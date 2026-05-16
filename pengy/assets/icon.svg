@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Blue background pill -->
+  <circle cx="32" cy="32" r="32" fill="#4a90d9"/>
+  <!-- Body -->
+  <ellipse cx="32" cy="46" rx="15" ry="15" fill="#1a1a2e"/>
+  <!-- Belly -->
+  <ellipse cx="32" cy="49" rx="9" ry="9" fill="#f0f0f0"/>
+  <!-- Head -->
+  <circle cx="32" cy="23" r="13" fill="#1a1a2e"/>
+  <!-- White face patch -->
+  <ellipse cx="32" cy="25" rx="7.5" ry="8.5" fill="#f0f0f0"/>
+  <!-- Eyes -->
+  <circle cx="28.5" cy="21" r="2.2" fill="#1a1a2e"/>
+  <circle cx="35.5" cy="21" r="2.2" fill="#1a1a2e"/>
+  <circle cx="29.1" cy="20.4" r="0.7" fill="white"/>
+  <circle cx="36.1" cy="20.4" r="0.7" fill="white"/>
+  <!-- Beak -->
+  <path d="M 29 25.5 Q 32 30 35 25.5 Z" fill="#f5a623"/>
+  <!-- Wings -->
+  <ellipse cx="17" cy="46" rx="5" ry="12" fill="#1a1a2e" transform="rotate(-18 17 46)"/>
+  <ellipse cx="47" cy="46" rx="5" ry="12" fill="#1a1a2e" transform="rotate(18 47 46)"/>
+  <!-- Feet -->
+  <ellipse cx="27" cy="60" rx="6" ry="2.5" fill="#f5a623"/>
+  <ellipse cx="37" cy="60" rx="6" ry="2.5" fill="#f5a623"/>
+</svg>
