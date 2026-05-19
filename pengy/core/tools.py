@@ -1,4 +1,5 @@
 """Tool definitions and execution for Pengy."""
+import concurrent.futures
 import re
 import subprocess
 import tempfile
@@ -235,9 +236,13 @@ def _run_bash(command: str) -> str:
 
 def _web_search(query: str, max_results: int = 5) -> str:
     """Search the web using DuckDuckGo."""
-    try:
+    def _do_search():
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
+            return list(ddgs.text(query, max_results=max_results))
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            results = executor.submit(_do_search).result(timeout=5)
         if not results:
             return "No results found."
         lines = []
@@ -247,6 +252,8 @@ def _web_search(query: str, max_results: int = 5) -> str:
             lines.append(f"   {r.get('body', '')}")
             lines.append("")
         return "\n".join(lines).strip()
+    except concurrent.futures.TimeoutError:
+        return "Web search timed out after 5 seconds. Please try again."
     except Exception as e:
         return f"Error performing web search: {e}"
 
