@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Pengy
+Comment=AI chat assistant
+Exec=PENGY_EXEC
+Icon=PENGY_ICON
+Terminal=false
+Categories=Utility;
