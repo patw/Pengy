@@ -47,7 +47,7 @@ class SettingsDialog(QDialog):
         # UI Scale
         scale_row = QFormLayout()
         self.scale_combo = QComboBox()
-        self._scale_values = [75, 100, 125, 200]
+        self._scale_values = [75, 100, 125, 150, 175, 200]
         for v in self._scale_values:
             self.scale_combo.addItem(f"{v}%", v)
         current_scale = config.get("ui_scale", 100)
