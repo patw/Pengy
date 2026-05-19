@@ -19,6 +19,7 @@ class SettingsDialog(QDialog):
 
         # API Settings
         api_group = QFormLayout()
+        api_group.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.base_url_input = QLineEdit(config.get("base_url", "https://api.openai.com/v1"))
         self.api_key_input = QLineEdit(config.get("api_key", ""))
@@ -46,6 +47,7 @@ class SettingsDialog(QDialog):
 
         # UI Scale
         scale_row = QFormLayout()
+        scale_row.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.scale_combo = QComboBox()
         self._scale_values = [75, 100, 125, 150, 175, 200]
         for v in self._scale_values:

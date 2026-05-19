@@ -3,23 +3,25 @@ import json
 import re
 from PySide6.QtWidgets import QTextBrowser
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QMouseEvent
+from PySide6.QtGui import QFont, QFontDatabase, QMouseEvent
 
 import markdown
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name, TextLexer
 from pygments.formatters import HtmlFormatter
 
-_CSS = """
-body {
-    font-family: Monospace;
+def _build_css() -> str:
+    fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
+    return f"""
+body {{
+    font-family: "{fixed}";
     font-size: 10pt;
     background-color: #ffffff;
     color: #1e1e2e;
     margin: 8px;
-}
-a { color: #a05000; text-decoration: none; }
-pre { white-space: pre-wrap; word-wrap: break-word; }
+}}
+a {{ color: #a05000; text-decoration: none; }}
+pre {{ white-space: pre-wrap; word-wrap: break-word; }}
 """
 
 
@@ -31,7 +33,8 @@ class ChatView(QTextBrowser):
         self._messages = []
         self._expanded_tools = set()
         self.md_extensions = ["fenced_code", "codehilite", "tables", "footnotes"]
-        font = QFont("Monospace", 10)
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        font.setPointSize(10)
         self.setFont(font)
         self.setStyleSheet(
             "QTextBrowser { background-color: #ffffff; color: #1e1e2e; border: none; padding: 0; }"
@@ -92,7 +95,7 @@ class ChatView(QTextBrowser):
             self.verticalScrollBar().setValue(prev_pos)
 
     def _build_html(self) -> str:
-        parts = [f"<html><head><meta charset='utf-8'><style>{_CSS}</style></head><body>"]
+        parts = [f"<html><head><meta charset='utf-8'><style>{_build_css()}</style></head><body>"]
         for msg in self._messages:
             parts.append(self._render_msg(msg))
         parts.append("</body></html>")

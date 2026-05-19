@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QMessageBox,
 )
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtGui import QFont, QKeyEvent
+from PySide6.QtGui import QFont, QFontDatabase, QKeyEvent
 
 
 _TEXT_EXTENSIONS = {
@@ -39,7 +39,9 @@ class _InputEdit(QTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFont(QFont("Monospace", 10))
+        fixed_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        fixed_font.setPointSize(10)
+        self.setFont(fixed_font)
         self.setPlaceholderText("Type a message... (Enter to send, Shift+Enter for new line)")
         self.setMaximumHeight(60)
         self.setMinimumHeight(40)

@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QFont, QFontDatabase, QIcon
 
 from pengy.core.config import load_config
 from pengy.ui.main_window import MainWindow
@@ -23,8 +23,8 @@ def main():
     if _ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(_ICON_PATH)))
 
-    # Set default font
-    font = QFont("Sans Serif", 10)
+    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
+    font.setPointSize(10)
     app.setFont(font)
 
     window = MainWindow()
