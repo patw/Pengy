@@ -143,13 +143,23 @@ class MainWindow(QMainWindow):
             elif msg["role"] == "assistant":
                 if msg.get("tool_calls"):
                     for tc in msg["tool_calls"]:
-                        self.chat_view.append_message(
-                            "tool_request",
-                            {"name": tc["function"]["name"]}
-                        )
-                self.chat_view.append_message("assistant", msg["content"])
+                        try:
+                            args = json.loads(tc["function"]["arguments"]) if isinstance(tc["function"].get("arguments"), str) else tc["function"].get("arguments", {})
+                        except (json.JSONDecodeError, KeyError):
+                            args = {}
+                        self.chat_view.append_message("tool_request", {
+                            "tool_call_id": tc["id"],
+                            "name": tc["function"]["name"],
+                            "args": args,
+                        })
+                if msg.get("content"):
+                    self.chat_view.append_message("assistant", msg["content"])
             elif msg["role"] == "tool":
-                self.chat_view.append_message("tool", msg["content"])
+                self.chat_view.append_message("tool_result", {
+                    "tool_call_id": msg.get("tool_call_id", ""),
+                    "content": msg["content"],
+                    "declined": False,
+                })
 
     def send_message(self, text: str):
         """Send a message to the LLM."""
@@ -213,6 +223,15 @@ class MainWindow(QMainWindow):
                 })
             else:
                 self._handle_tool_confirm(response)
+        elif response["type"] == "assistant_tool_calls":
+            self.current_chat["messages"].append(response["message"])
+        elif response["type"] == "tool_result":
+            self.current_chat["messages"].append({
+                "role": "tool",
+                "tool_call_id": response["tool_call_id"],
+                "content": response["content"],
+            })
+            self.chat_view.append_message("tool_result", response)
 
     def _on_worker_error(self, error_msg: str):
         """Handle an error from the background worker."""

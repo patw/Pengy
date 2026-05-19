@@ -43,6 +43,23 @@ class LLMClient:
             current_messages.append(assistant_msg)
 
             if assistant_msg.tool_calls:
+                serialized_assistant = {
+                    "role": "assistant",
+                    "content": assistant_msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in assistant_msg.tool_calls
+                    ],
+                }
+                yield {"type": "assistant_tool_calls", "message": serialized_assistant}
+
                 for tool_call in assistant_msg.tool_calls:
                     tool_name = tool_call.function.name
                     try:
@@ -58,6 +75,7 @@ class LLMClient:
                             "tool_call_id": tool_call.id,
                             "content": result,
                         })
+                        yield {"type": "tool_result", "tool_call_id": tool_call.id, "name": tool_name, "args": tool_args, "content": result, "declined": False}
                     else:
                         confirm = yield {"type": "tool_request", "name": tool_name, "args": tool_args, "tool_call_id": tool_call.id}
                         if confirm and confirm.get("confirmed"):
@@ -67,12 +85,15 @@ class LLMClient:
                                 "tool_call_id": tool_call.id,
                                 "content": result,
                             })
+                            yield {"type": "tool_result", "tool_call_id": tool_call.id, "name": tool_name, "args": tool_args, "content": result, "declined": False}
                         else:
+                            declined_msg = "Tool execution was declined by user."
                             current_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
-                                "content": "Tool execution was declined by user.",
+                                "content": declined_msg,
                             })
+                            yield {"type": "tool_result", "tool_call_id": tool_call.id, "name": tool_name, "args": tool_args, "content": declined_msg, "declined": True}
             else:
                 yield {"type": "final_response", "content": assistant_msg.content}
                 break
