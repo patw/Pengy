@@ -12,10 +12,17 @@ from ddgs import DDGS
 # Set by the UI layer so _run_bash can request a sudo password interactively.
 _sudo_password_provider = None
 
+_user_agent = "PengyAgent/1.0"
+
 
 def set_sudo_password_provider(fn):
     global _sudo_password_provider
     _sudo_password_provider = fn
+
+
+def set_user_agent(ua: str):
+    global _user_agent
+    _user_agent = ua or "PengyAgent/1.0"
 
 TOOLS = [
     {
@@ -240,22 +247,28 @@ def _web_search(query: str, max_results: int = 5) -> str:
         with DDGS() as ddgs:
             return list(ddgs.text(query, max_results=max_results))
 
+    # shutdown(wait=False) is critical: if result(timeout=5) raises TimeoutError,
+    # the context-manager form would call shutdown(wait=True) and hang forever on
+    # the still-running thread.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            results = executor.submit(_do_search).result(timeout=5)
-        if not results:
-            return "No results found."
-        lines = []
-        for i, r in enumerate(results, 1):
-            lines.append(f"{i}. {r.get('title', '')}")
-            lines.append(f"   URL: {r.get('href', '')}")
-            lines.append(f"   {r.get('body', '')}")
-            lines.append("")
-        return "\n".join(lines).strip()
+        results = executor.submit(_do_search).result(timeout=5)
     except concurrent.futures.TimeoutError:
         return "Web search timed out after 5 seconds. Please try again."
     except Exception as e:
         return f"Error performing web search: {e}"
+    finally:
+        executor.shutdown(wait=False)
+
+    if not results:
+        return "No results found."
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r.get('title', '')}")
+        lines.append(f"   URL: {r.get('href', '')}")
+        lines.append(f"   {r.get('body', '')}")
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 def _download_file(url: str, filename: str | None = None) -> str:
@@ -266,7 +279,9 @@ def _download_file(url: str, filename: str | None = None) -> str:
         if not filename:
             filename = url.split("?")[0].rstrip("/").split("/")[-1] or "download"
         dest = downloads / filename
-        urllib.request.urlretrieve(url, dest)
+        req = urllib.request.Request(url, headers={"User-Agent": _user_agent})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            dest.write_bytes(resp.read())
         size = dest.stat().st_size
         return f"Downloaded to {dest} ({size:,} bytes)"
     except Exception as e:
@@ -303,7 +318,7 @@ class _TextExtractor(HTMLParser):
 def _fetch_url(url: str) -> str:
     """Fetch a URL and return its text content."""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": _user_agent})
         with urllib.request.urlopen(req, timeout=30) as resp:
             content_type = resp.headers.get_content_type()
             raw = resp.read(2 * 1024 * 1024)  # cap at 2 MB

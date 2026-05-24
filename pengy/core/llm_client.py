@@ -1,8 +1,39 @@
 """LLM client for OpenAI-compatible APIs."""
 import json
+import threading
 from openai import OpenAI
 
 from pengy.core.tools import TOOLS, execute_tool
+
+_TOOL_TIMEOUT = 60
+
+
+def _run_tool(name: str, args: dict) -> str:
+    """Run a tool in a daemon thread with a hard timeout.
+
+    Using a daemon thread (rather than ThreadPoolExecutor) means join() returns
+    immediately after the timeout without blocking on executor shutdown.
+    """
+    result: list = [None]
+    exc: list = [None]
+
+    def _target():
+        try:
+            result[0] = execute_tool(name, args)
+        except Exception as e:
+            exc[0] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(_TOOL_TIMEOUT)
+    if t.is_alive():
+        return (
+            f"Tool '{name}' timed out after {_TOOL_TIMEOUT} seconds. "
+            "Please try again or use a different approach."
+        )
+    if exc[0] is not None:
+        return f"Tool error: {exc[0]}"
+    return result[0]
 
 
 class LLMClient:
@@ -69,7 +100,7 @@ class LLMClient:
 
                     if yolo_mode:
                         yield {"type": "tool_request", "name": tool_name, "args": tool_args, "tool_call_id": tool_call.id}
-                        result = execute_tool(tool_name, tool_args)
+                        result = _run_tool(tool_name, tool_args)
                         current_messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
@@ -79,7 +110,7 @@ class LLMClient:
                     else:
                         confirm = yield {"type": "tool_request", "name": tool_name, "args": tool_args, "tool_call_id": tool_call.id}
                         if confirm and confirm.get("confirmed"):
-                            result = execute_tool(tool_name, tool_args)
+                            result = _run_tool(tool_name, tool_args)
                             current_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,

@@ -25,10 +25,12 @@ class SettingsDialog(QDialog):
         self.api_key_input = QLineEdit(config.get("api_key", ""))
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.model_input = QLineEdit(config.get("model", "gpt-4o"))
+        self.user_agent_input = QLineEdit(config.get("user_agent", "PengyAgent/1.0"))
 
         api_group.addRow("Base URL:", self.base_url_input)
         api_group.addRow("API Key:", self.api_key_input)
         api_group.addRow("Model:", self.model_input)
+        api_group.addRow("User Agent:", self.user_agent_input)
 
         layout.addLayout(api_group)
 
@@ -77,4 +79,5 @@ class SettingsDialog(QDialog):
         self.config["system_message"] = self.system_message_input.toPlainText()
         self.config["yolo_mode"] = self.yolo_checkbox.isChecked()
         self.config["ui_scale"] = self.scale_combo.currentData()
+        self.config["user_agent"] = self.user_agent_input.text() or "PengyAgent/1.0"
         return self.config

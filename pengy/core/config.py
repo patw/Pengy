@@ -22,6 +22,7 @@ DEFAULTS = {
     "system_message": DEFAULT_SYSTEM_MESSAGE,
     "yolo_mode": False,
     "ui_scale": 100,
+    "user_agent": "PengyAgent/1.0",
 }
 
 

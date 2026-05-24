@@ -11,6 +11,7 @@ from pengy.core.chat_manager import (
     load_chats, create_chat, save_chat, get_chat,
 )
 from pengy.core.llm_client import LLMClient
+from pengy.core import tools
 from pengy.ui.chat_history import ChatHistoryWidget
 from pengy.ui.chat_view import ChatView
 from pengy.ui.chat_input import ChatInputWidget
@@ -101,6 +102,7 @@ class MainWindow(QMainWindow):
             api_key=self.config["api_key"],
             model=self.config["model"],
         )
+        tools.set_user_agent(self.config.get("user_agent", "PengyAgent/1.0"))
 
     def load_chat_list(self):
         """Load and display chat history."""
