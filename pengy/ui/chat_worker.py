@@ -1,6 +1,6 @@
 """Background worker for LLM chat requests."""
-import json
-from PySide6.QtCore import QObject, Signal, QEventLoop
+import threading
+from PySide6.QtCore import QObject, Signal
 
 from pengy.core import tools
 from pengy.core.tools import execute_tool
@@ -12,9 +12,7 @@ class ChatWorker(QObject):
     response = Signal(dict)
     error = Signal(str)
     finished = Signal()
-    confirmation_ready = Signal(object)
     sudo_password_requested = Signal()
-    sudo_password_ready = Signal(object)
 
     def __init__(self, llm_client, messages: list[dict], yolo_mode: bool = False):
         super().__init__()
@@ -22,7 +20,10 @@ class ChatWorker(QObject):
         self.messages = messages
         self.yolo_mode = yolo_mode
         self.generator = None
-        self._event_loop = None
+        self._confirmation_event = threading.Event()
+        self._pending_confirmation = None
+        self._sudo_event = threading.Event()
+        self._pending_sudo_password = None
 
     def run(self):
         """Execute the chat request in the background thread."""
@@ -33,16 +34,19 @@ class ChatWorker(QObject):
             while True:
                 response = self.generator.send(send_value) if send_value is not None else next(self.generator)
                 send_value = None
+
+                # Clear the event BEFORE emitting so that even if send_confirmation
+                # arrives before we call wait(), wait() sees it was already set.
+                if response["type"] == "tool_request":
+                    self._pending_confirmation = None
+                    self._confirmation_event.clear()
+
                 self.response.emit(response)
 
                 if response["type"] == "final_response":
                     break
                 elif response["type"] == "tool_request":
-                    self._pending_confirmation = None
-                    self._event_loop = QEventLoop()
-                    self.confirmation_ready.connect(self._on_confirmation)
-                    self._event_loop.exec()
-                    self.confirmation_ready.disconnect(self._on_confirmation)
+                    self._confirmation_event.wait()
                     send_value = self._pending_confirmation
         except StopIteration:
             pass
@@ -55,32 +59,21 @@ class ChatWorker(QObject):
         self.finished.emit()
 
     def _request_sudo_password(self):
-        """Block the worker thread and ask the main thread for a sudo password."""
+        """Block the calling thread and ask the main thread for a sudo password."""
         self._pending_sudo_password = None
-        self._sudo_loop = QEventLoop()
-        self.sudo_password_ready.connect(self._on_sudo_password)
+        self._sudo_event.clear()
         self.sudo_password_requested.emit()
-        self._sudo_loop.exec()
-        self.sudo_password_ready.disconnect(self._on_sudo_password)
+        self._sudo_event.wait()
         return self._pending_sudo_password
-
-    def _on_sudo_password(self, password):
-        self._pending_sudo_password = password
-        if self._sudo_loop and self._sudo_loop.isRunning():
-            self._sudo_loop.quit()
 
     def send_sudo_password(self, password):
         """Called from the main thread with the user-entered password (or None to cancel)."""
-        self.sudo_password_ready.emit(password)
-
-    def _on_confirmation(self, confirmation):
-        """Store confirmation and unblock the worker loop."""
-        self._pending_confirmation = confirmation
-        if self._event_loop and self._event_loop.isRunning():
-            self._event_loop.quit()
+        self._pending_sudo_password = password
+        self._sudo_event.set()
 
     def send_confirmation(self, confirmation):
-        """Send tool execution confirmation back to the generator."""
+        """Called from the main thread to confirm or decline a tool call."""
         if not self.generator:
             return
-        self.confirmation_ready.emit(confirmation)
+        self._pending_confirmation = confirmation
+        self._confirmation_event.set()
