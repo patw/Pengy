@@ -20,18 +20,38 @@ class ChatWorker(QObject):
         self.messages = messages
         self.yolo_mode = yolo_mode
         self.generator = None
+        self._cancelled = threading.Event()
         self._confirmation_event = threading.Event()
         self._pending_confirmation = None
         self._sudo_event = threading.Event()
         self._pending_sudo_password = None
 
+    def cancel(self):
+        """Signal the worker to stop at the next opportunity.
+
+        Also unblocks any pending confirmation or sudo-password waits so
+        the worker loop can check the cancelled flag and exit promptly.
+        """
+        self._cancelled.set()
+        self._confirmation_event.set()
+        self._sudo_event.set()
+
     def run(self):
         """Execute the chat request in the background thread."""
+        # Bail immediately if cancelled before we even start
+        if self._cancelled.is_set():
+            self.finished.emit()
+            return
+
         tools.set_sudo_password_provider(self._request_sudo_password)
         try:
             self.generator = self.llm_client.chat(self.messages, self.yolo_mode)
             send_value = None
             while True:
+                # Check for cancellation before every generator step
+                if self._cancelled.is_set():
+                    return
+
                 response = self.generator.send(send_value) if send_value is not None else next(self.generator)
                 send_value = None
 
@@ -47,19 +67,24 @@ class ChatWorker(QObject):
                     break
                 elif response["type"] == "tool_request":
                     self._confirmation_event.wait()
+                    if self._cancelled.is_set():
+                        return
                     send_value = self._pending_confirmation
         except StopIteration:
             pass
         except Exception as e:
-            self.error.emit(str(e))
+            if not self._cancelled.is_set():
+                self.error.emit(str(e))
         finally:
             self.generator = None
-
-        tools.set_sudo_password_provider(None)
-        self.finished.emit()
+            tools.set_sudo_password_provider(None)
+            if not self._cancelled.is_set():
+                self.finished.emit()
 
     def _request_sudo_password(self):
         """Block the calling thread and ask the main thread for a sudo password."""
+        if self._cancelled.is_set():
+            return None
         self._pending_sudo_password = None
         self._sudo_event.clear()
         self.sudo_password_requested.emit()

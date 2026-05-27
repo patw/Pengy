@@ -249,6 +249,17 @@ class ChatHistoryWidget(QWidget):
             self._blink_timer.stop()
             self.status_dot.setStyleSheet("color: #a6e3a1; font-size: 14px;")
 
+    def set_tool_running(self, running: bool):
+        """Show a solid orange dot while a tool is executing."""
+        if running:
+            self._blink_timer.stop()
+            self.status_dot.setStyleSheet("color: #fab387; font-size: 14px;")
+        else:
+            # Revert to thinking (red blinking) — caller should have set that
+            self._dot_phase = True
+            self.status_dot.setStyleSheet("color: #f38ba8; font-size: 14px;")
+            self._blink_timer.start()
+
     def _blink_dot(self):
         self._dot_phase = not self._dot_phase
         color = "#f38ba8" if self._dot_phase else "transparent"

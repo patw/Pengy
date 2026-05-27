@@ -29,6 +29,7 @@ class MainWindow(QMainWindow):
         self.llm_client = None
         self.worker = None
         self.worker_thread = None
+        self._abandoned_workers = []  # (thread, worker) kept alive until threads exit
         self.setup_ui()
         self.update_llm_client()
         self.load_chat_list()
@@ -81,6 +82,24 @@ class MainWindow(QMainWindow):
         self.chat_input = ChatInputWidget()
         self.chat_input.message_sent.connect(self.send_message)
         input_layout.addWidget(self.chat_input)
+
+        self._stop_btn = QPushButton("⏹ Stop")
+        self._stop_btn.setFixedHeight(32)
+        self._stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #d20f39;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 14px;
+                font-weight: bold;
+                font-size: 11pt;
+            }
+            QPushButton:hover { background-color: #e64553; }
+        """)
+        self._stop_btn.clicked.connect(self._stop_worker)
+        self._stop_btn.hide()
+        input_layout.addWidget(self._stop_btn)
 
         right_splitter.addWidget(input_row)
         right_splitter.setStretchFactor(0, 1)
@@ -189,13 +208,16 @@ class MainWindow(QMainWindow):
             )
             save_chat(self.current_chat)
 
+        self._stop_btn.show()
         self.chat_history.set_thinking(True)
         self._process_response(messages)
 
     def _process_response(self, messages: list[dict]):
         """Process the LLM response via a background worker thread."""
-        if self.worker and self.worker_thread and self.worker_thread.isRunning():
-            return
+        # Abandon any previous worker that may still be running (e.g.
+        # blocked in a C-level socket read).  Its signals are already
+        # disconnected so it can't interfere.
+        self._abandon_worker()
 
         yolo_mode = self.config.get("yolo_mode", False)
         self.worker = ChatWorker(self.llm_client, messages, yolo_mode)
@@ -217,6 +239,7 @@ class MainWindow(QMainWindow):
         if response["type"] == "final_response":
             self._handle_final_response(response["content"])
         elif response["type"] == "tool_request":
+            self.chat_history.set_tool_running(True)
             self.chat_view.append_message("tool_request", response)
             if self.config.get("yolo_mode", False):
                 self.worker.send_confirmation({
@@ -228,6 +251,7 @@ class MainWindow(QMainWindow):
         elif response["type"] == "assistant_tool_calls":
             self.current_chat["messages"].append(response["message"])
         elif response["type"] == "tool_result":
+            self.chat_history.set_tool_running(False)
             self.current_chat["messages"].append({
                 "role": "tool",
                 "tool_call_id": response["tool_call_id"],
@@ -238,6 +262,7 @@ class MainWindow(QMainWindow):
     def _on_worker_error(self, error_msg: str):
         """Handle an error from the background worker."""
         self.chat_view.append_message("assistant", f"Error: {error_msg}")
+        self._stop_btn.hide()
         self.chat_history.set_thinking(False)
         if self.worker_thread and self.worker_thread.isRunning():
             self.worker_thread.quit()
@@ -249,7 +274,55 @@ class MainWindow(QMainWindow):
             self.worker_thread.wait()
         self.worker = None
         self.worker_thread = None
+        self._stop_btn.hide()
         self.chat_history.set_thinking(False)
+
+    def _abandon_worker(self):
+        """Disconnect the current worker and let it die silently.
+
+        Does NOT kill the thread — severs signals, posts a quit event
+        (non-blocking), then stashes references in _abandoned_workers so
+        Python's GC cannot destroy the QThread while it's still running.
+        The thread exits on its own and _reap_abandoned_workers cleans up.
+        """
+        if self.worker is not None:
+            self.worker.cancel()
+            try:
+                self.worker.response.disconnect(self._on_worker_response)
+                self.worker.error.disconnect(self._on_worker_error)
+                self.worker.finished.disconnect(self._on_worker_finished)
+                self.worker.sudo_password_requested.disconnect(
+                    self._on_sudo_password_requested
+                )
+            except (TypeError, RuntimeError):
+                pass
+
+        if self.worker_thread is not None:
+            self.worker_thread.quit()
+            self._abandoned_workers.append((self.worker_thread, self.worker))
+            self.worker_thread.finished.connect(self._reap_abandoned_workers)
+
+        self.worker = None
+        self.worker_thread = None
+
+    def _reap_abandoned_workers(self):
+        """Drop references to abandoned threads that have finished."""
+        self._abandoned_workers = [
+            (t, w) for t, w in self._abandoned_workers if t.isRunning()
+        ]
+
+    def _stop_worker(self):
+        """User pressed Stop — abandon the worker and restore the UI."""
+        self._abandon_worker()
+
+        self._stop_btn.hide()
+        self.chat_history.set_thinking(False)
+        self.chat_history.set_tool_running(False)
+
+        self.chat_view.append_message("assistant", "⏹ *Stopped*")
+
+        if self.current_chat:
+            save_chat(self.current_chat)
 
     def _handle_tool_confirm(self, tool_info: dict):
         """Show confirmation dialog for tool execution."""
