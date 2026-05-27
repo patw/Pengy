@@ -131,11 +131,14 @@ class ChatView(QTextBrowser):
         name_safe = self._escape_html(name)
 
         args_preview = ", ".join(f"{k}={v!r}" for k, v in args.items())
-        if len(args_preview) > 60:
-            args_preview = args_preview[:59] + "&#8230;"
+        truncated = len(args_preview) > 60
+        if truncated:
+            args_preview = args_preview[:59]
         label = f"{arrow}&nbsp;Tool:&nbsp;{name_safe}"
         if args_preview:
             label += f"&nbsp;[{self._escape_html(args_preview)}]"
+            if truncated:
+                label += "&#8230;"
 
         if result is None and not declined:
             status = '&nbsp;<i style="color:#888;">(running&#8230;)</i>'
