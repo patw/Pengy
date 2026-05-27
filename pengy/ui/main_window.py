@@ -1,5 +1,7 @@
 """Main window for Pengy."""
+import base64
 import json
+import mimetypes
 from PySide6.QtWidgets import (
     QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout,
     QDialog, QPushButton, QDialogButtonBox, QLabel, QInputDialog, QLineEdit,
@@ -182,26 +184,52 @@ class MainWindow(QMainWindow):
                     "declined": False,
                 })
 
-    def send_message(self, text: str):
+    def send_message(self, text: str, images: list = None):
         """Send a message to the LLM."""
         if not self.current_chat:
             return
+        if images is None:
+            images = []
 
-        # Add user message
-        user_msg = {"role": "user", "content": text}
+        # Persistent/display version: image filenames as placeholders, no bytes
+        placeholder_parts = [f"[Image: {img.name}]" for img in images]
+        if text:
+            placeholder_parts.append(text)
+        display_content = "\n".join(placeholder_parts)
+
+        user_msg = {"role": "user", "content": display_content}
         self.current_chat["messages"].append(user_msg)
-        self.chat_view.append_message("user", text)
+        self.chat_view.append_message("user", display_content)
 
-        # Build message history
+        # Build message history for the API call
         messages = []
         system_msg = self.config.get("system_message", "")
         if system_msg:
             messages.append({"role": "system", "content": render_system_message(system_msg)})
-        messages.extend(self.current_chat["messages"])
+        # Prior turns use stored (placeholder) content; current turn gets real image data
+        messages.extend(self.current_chat["messages"][:-1])
+        if images:
+            content_parts = []
+            for img_path in images:
+                try:
+                    b64 = base64.b64encode(img_path.read_bytes()).decode()
+                    mime = mimetypes.guess_type(str(img_path))[0] or "image/jpeg"
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{b64}"},
+                    })
+                except Exception:
+                    pass
+            if text:
+                content_parts.append({"type": "text", "text": text})
+            messages.append({"role": "user", "content": content_parts})
+        else:
+            messages.append({"role": "user", "content": display_content})
 
         # Update chat title from first message
         if self.current_chat["title"] == "New Chat":
-            short = text[:50] + ("..." if len(text) > 50 else "")
+            title_source = text or (images[0].name if images else "")
+            short = title_source[:50] + ("..." if len(title_source) > 50 else "")
             self.current_chat["title"] = short
             self.chat_history.update_chat_title(
                 self.current_chat["id"], self.current_chat["title"]

@@ -10,6 +10,16 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QKeyEvent
 
 
+_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
+
+
+def _is_image_file(path: Path) -> bool:
+    if path.suffix.lower() in _IMAGE_EXTENSIONS:
+        return True
+    mime, _ = mimetypes.guess_type(str(path))
+    return bool(mime and mime.startswith("image/"))
+
+
 _TEXT_EXTENSIONS = {
     '.txt', '.md', '.markdown', '.rst', '.json', '.xml', '.html', '.htm',
     '.css', '.js', '.ts', '.py', '.rb', '.go', '.rs', '.c', '.cpp', '.h',
@@ -68,7 +78,7 @@ class _InputEdit(QTextEdit):
 
 
 class ChatInputWidget(QWidget):
-    message_sent = Signal(str)
+    message_sent = Signal(str, list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -97,7 +107,7 @@ class ChatInputWidget(QWidget):
 
         self._attach_btn = QPushButton("📎")
         self._attach_btn.setFixedSize(32, 32)
-        self._attach_btn.setToolTip("Attach a text file")
+        self._attach_btn.setToolTip("Attach a file (text or image)")
         self._attach_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
@@ -121,11 +131,12 @@ class ChatInputWidget(QWidget):
         if not path_str:
             return
         path = Path(path_str)
-        if not _is_text_file(path):
+        if not _is_text_file(path) and not _is_image_file(path):
             QMessageBox.warning(
                 self,
                 "Cannot Attach File",
-                f'"{path.name}" doesn\'t appear to be a text file and cannot be attached.',
+                f'"{path.name}" is not a supported file type.\n'
+                "Supported: text files and images (JPEG, PNG, GIF, WebP).",
             )
             return
         if path not in self._attachments:
@@ -141,7 +152,8 @@ class ChatInputWidget(QWidget):
         chip_layout.setContentsMargins(5, 2, 3, 2)
         chip_layout.setSpacing(3)
 
-        label = QLabel(f"📄 {path.name}")
+        icon = "🖼" if _is_image_file(path) else "📄"
+        label = QLabel(f"{icon} {path.name}")
         label.setStyleSheet("font-size:11px; color:#333; border:none; background:transparent;")
         chip_layout.addWidget(label)
 
@@ -183,12 +195,16 @@ class ChatInputWidget(QWidget):
             return
 
         parts = []
+        images = []
         for path in self._attachments:
-            try:
-                content = path.read_text(encoding="utf-8", errors="replace")
-                parts.append(f"[File: {path.name}]\n```\n{content}\n```")
-            except Exception as e:
-                parts.append(f"[File: {path.name} — error reading: {e}]")
+            if _is_image_file(path):
+                images.append(path)
+            else:
+                try:
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                    parts.append(f"[File: {path.name}]\n```\n{content}\n```")
+                except Exception as e:
+                    parts.append(f"[File: {path.name} — error reading: {e}]")
 
         if text:
             parts.append(text)
@@ -197,4 +213,4 @@ class ChatInputWidget(QWidget):
         self._attachments.clear()
         self._clear_chips()
 
-        self.message_sent.emit("\n\n".join(parts))
+        self.message_sent.emit("\n\n".join(parts), images)
