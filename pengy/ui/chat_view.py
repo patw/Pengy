@@ -2,8 +2,8 @@
 import json
 import re
 from PySide6.QtWidgets import QTextBrowser
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QFontDatabase, QMouseEvent
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QMouseEvent
 
 import markdown
 from pygments import highlight
@@ -51,6 +51,9 @@ class ChatView(QTextBrowser):
                 else:
                     self._expanded_tools.add(tool_id)
                 self._render()
+                return
+            if anchor.startswith(("http://", "https://")):
+                QDesktopServices.openUrl(QUrl(anchor))
                 return
         super().mousePressEvent(event)
 
