@@ -3,9 +3,7 @@ import json
 import threading
 from openai import OpenAI
 
-from pengy.core.tools import TOOLS, execute_tool
-
-_TOOL_TIMEOUT = 60
+from pengy.core import tools as _tools_mod
 
 
 def _run_tool(name: str, args: dict) -> str:
@@ -13,22 +11,28 @@ def _run_tool(name: str, args: dict) -> str:
 
     Using a daemon thread (rather than ThreadPoolExecutor) means join() returns
     immediately after the timeout without blocking on executor shutdown.
+    A timeout of -1 means wait forever.
+
+    Reads tools._tool_timeout at call time so settings changes take effect.
     """
+    timeout_value = _tools_mod._tool_timeout
+    timeout = None if timeout_value == -1 else timeout_value
     result: list = [None]
     exc: list = [None]
 
     def _target():
         try:
-            result[0] = execute_tool(name, args)
+            result[0] = _tools_mod.execute_tool(name, args)
         except Exception as e:
             exc[0] = e
 
     t = threading.Thread(target=_target, daemon=True)
     t.start()
-    t.join(_TOOL_TIMEOUT)
+    t.join(timeout)
     if t.is_alive():
+        label = f"{timeout_value} seconds" if timeout_value != -1 else "infinity"
         return (
-            f"Tool '{name}' timed out after {_TOOL_TIMEOUT} seconds. "
+            f"Tool '{name}' timed out after {label}. "
             "Please try again or use a different approach."
         )
     if exc[0] is not None:
@@ -66,7 +70,7 @@ class LLMClient:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=current_messages,
-                tools=TOOLS,
+                tools=_tools_mod.TOOLS,
                 tool_choice="auto",
             )
 

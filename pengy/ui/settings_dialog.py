@@ -2,6 +2,7 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QLineEdit,
     QTextEdit, QDialogButtonBox, QCheckBox, QLabel, QComboBox,
+    QSpinBox,
 )
 
 
@@ -60,6 +61,17 @@ class SettingsDialog(QDialog):
         scale_row.addRow("UI Scale (restart to apply):", self.scale_combo)
         layout.addLayout(scale_row)
 
+        # Tool Timeout
+        timeout_row = QFormLayout()
+        timeout_row.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.timeout_spinbox = QSpinBox()
+        self.timeout_spinbox.setRange(-1, 3600)
+        self.timeout_spinbox.setSpecialValueText("No timeout")
+        self.timeout_spinbox.setSuffix(" sec")
+        self.timeout_spinbox.setValue(config.get("tool_timeout", 60))
+        timeout_row.addRow("Tool timeout:", self.timeout_spinbox)
+        layout.addLayout(timeout_row)
+
         layout.addStretch()
 
         # Buttons
@@ -79,5 +91,6 @@ class SettingsDialog(QDialog):
         self.config["system_message"] = self.system_message_input.toPlainText()
         self.config["yolo_mode"] = self.yolo_checkbox.isChecked()
         self.config["ui_scale"] = self.scale_combo.currentData()
+        self.config["tool_timeout"] = self.timeout_spinbox.value()
         self.config["user_agent"] = self.user_agent_input.text() or "PengyAgent/1.0"
         return self.config

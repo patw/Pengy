@@ -16,6 +16,8 @@ _sudo_password_provider = None
 
 _user_agent = "PengyAgent/1.0"
 
+_tool_timeout = 60  # seconds; -1 means no timeout
+
 # Directories/files to skip in directory_tree and search_content
 _ALWAYS_SKIP_DIRS = {
     ".git", ".svn", ".hg", "__pycache__", ".DS_Store",
@@ -34,6 +36,12 @@ def set_sudo_password_provider(fn):
 def set_user_agent(ua: str):
     global _user_agent
     _user_agent = ua or "PengyAgent/1.0"
+
+
+def set_tool_timeout(seconds: int):
+    """Set the timeout for tool calls.  -1 means no timeout."""
+    global _tool_timeout
+    _tool_timeout = seconds
 
 TOOLS = [
     {
@@ -440,7 +448,7 @@ def _run_bash(command: str) -> str:
             shell=True,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=None if _tool_timeout == -1 else _tool_timeout,
             input=stdin_input,
         )
         output = result.stdout
@@ -454,7 +462,7 @@ def _run_bash(command: str) -> str:
             output += f"\n[Exit code: {result.returncode}]"
         return output or "(No output)"
     except subprocess.TimeoutExpired:
-        return "Error: Command timed out after 60 seconds"
+        return f"Error: Command timed out after {_tool_timeout} seconds"
     except Exception as e:
         return f"Error running command: {e}"
 
@@ -498,7 +506,7 @@ def _download_file(url: str, filename: str | None = None) -> str:
             filename = url.split("?")[0].rstrip("/").split("/")[-1] or "download"
         dest = downloads / filename
         req = urllib.request.Request(url, headers={"User-Agent": _user_agent})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=None if _tool_timeout == -1 else _tool_timeout) as resp:
             dest.write_bytes(resp.read())
         size = dest.stat().st_size
         return f"Downloaded to {dest} ({size:,} bytes)"
@@ -537,7 +545,7 @@ def _fetch_url(url: str) -> str:
     """Fetch a URL and return its text content."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _user_agent})
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=None if _tool_timeout == -1 else _tool_timeout) as resp:
             content_type = resp.headers.get_content_type()
             raw = resp.read(2 * 1024 * 1024)  # cap at 2 MB
         text = raw.decode("utf-8", errors="replace")
@@ -565,7 +573,7 @@ def _run_python(code: str) -> str:
             ["python3", temp_file],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=None if _tool_timeout == -1 else _tool_timeout,
         )
         output = result.stdout
         if result.stderr:
@@ -574,7 +582,7 @@ def _run_python(code: str) -> str:
             output += f"\n[Exit code: {result.returncode}]"
         return output or "(No output)"
     except subprocess.TimeoutExpired:
-        return "Error: Python execution timed out after 30 seconds"
+        return f"Error: Python execution timed out after {_tool_timeout} seconds"
     except Exception as e:
         return f"Error running Python: {e}"
 
