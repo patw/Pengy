@@ -13,6 +13,8 @@ from ddgs import DDGS
 
 # Set by the UI layer so _run_bash can request a sudo password interactively.
 _sudo_password_provider = None
+# Cache the sudo password after first prompt so we don't ask repeatedly.
+_cached_sudo_password = None
 
 _user_agent = "PengyAgent/1.0"
 
@@ -29,8 +31,11 @@ _ALWAYS_SKIP_FILES = {".DS_Store", "Thumbs.db"}
 
 
 def set_sudo_password_provider(fn):
-    global _sudo_password_provider
+    global _sudo_password_provider, _cached_sudo_password
     _sudo_password_provider = fn
+    if fn is None:
+        # Session ended — clear cached password for safety
+        _cached_sudo_password = None
 
 
 def set_user_agent(ua: str):
@@ -436,9 +441,14 @@ def _run_bash(command: str) -> str:
         if re.search(r'\bsudo\b', command):
             if _sudo_password_provider is None:
                 return "Error: sudo detected but no password provider is configured."
-            password = _sudo_password_provider()
+            # Use cached password if available; otherwise prompt the user.
+            global _cached_sudo_password
+            password = _cached_sudo_password
             if password is None:
-                return "Cancelled: sudo password not provided."
+                password = _sudo_password_provider()
+                if password is None:
+                    return "Cancelled: sudo password not provided."
+                _cached_sudo_password = password
             # Inject -S so sudo reads password from stdin
             command = re.sub(r'\bsudo\b(?!\s+-S)', 'sudo -S', command, count=1)
             stdin_input = password + "\n"
