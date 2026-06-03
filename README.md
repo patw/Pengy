@@ -1,125 +1,157 @@
 # Pengy 🐧
 
-A lightweight Qt6 desktop app for chatting with LLMs via any OpenAI-compatible API, with built-in tools that let the model operate on your local machine.
+**A local-first AI agent with tools.** Desktop GUI **and** command-line — both backed by the same agent core, talking to any OpenAI-compatible API.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-brightgreen)
 
+---
+
+## What is Pengy?
+
+Pengy is an LLM agent that runs on your own machine. It connects to OpenAI, Ollama, vLLM, Groq, OpenRouter, or any local endpoint, and gives the model a set of tools to operate on your filesystem, run code, search the web, and fetch URLs — all with your approval.
+
+Two interfaces, one agent:
+
+| **🐧 Pengy Desktop** | **🐧 Pengy CLI** |
+|---|---|
+| Qt6 GUI with markdown rendering, multi-session sidebar, file attachments | Terminal REPL with slash commands, single-shot mode for scripting |
+
+Both share the same core — same tools, same chat history, same config. Use whichever fits your flow.
+
+---
+
 ## Features
 
 - **OpenAI-compatible** — Works with OpenAI, Ollama, vLLM, LM Studio, OpenRouter, Groq, or any local endpoint
-- **Built-in tools** — File read/write, bash execution (with sudo support), Python execution, DuckDuckGo web search, file download, and URL fetching
-- **File attachments** — Attach text files directly from the input bar; contents are injected into your message
-- **Tool confirmation** — Approve or decline every tool call; YOLO mode skips confirmation for power users
-- **Markdown rendering** — Full markdown with syntax-highlighted code blocks
-- **Templated system message** — Auto-fills `{date}`, `{username}`, `{hostname}`, and `{osinfo}` at send time
+- **11 built-in tools** — Read, write, and edit files; run bash (with sudo support) and Python code; search the web and fetch URLs; explore directory trees and search codebases
+- **Agentic workflow** — The LLM can call multiple tools per turn, chaining them to accomplish complex tasks
+- **Tool confirmation** — Approve or decline every tool call, or flip on YOLO mode to skip confirmation
 - **Multi-session** — Create, switch, and delete chat sessions; history saved locally as JSON
-- **Penguin icon** — Shows as "Pengy" with a proper icon in the taskbar (not "python3")
+- **File attachments** (GUI) — Attach text files from the input bar; contents are injected into your message
+- **Slash commands** (CLI) — `/new`, `/load`, `/yolo`, `/model`, `/list`, `/delete`, and more
+- **Templated system message** — Auto-fills `{date}`, `{username}`, `{hostname}`, `{osinfo}` at send time
+- **Persistent config** — Settings and chat history live in `~/.config/pengy/`, shared between GUI and CLI
+
+---
 
 ## Screenshot
 
 ![Pengy Interface](screenshot.png)
 
-## Installation
+---
+
+## Quick Start
 
 **Requirements:** Python 3.10+
 
-### pip
-
 ```bash
 pip install -r requirements.txt
-./run_pengy.sh
 ```
 
-### uv
+### Desktop GUI
 
 ```bash
-uv venv
-uv pip install -r requirements.txt
 ./run_pengy.sh
+# or: python pengy/main.py
 ```
 
-Or run directly without the script:
+### CLI (interactive)
 
 ```bash
-# pip
-python pengy/main.py
-
-# uv
-uv run python pengy/main.py
+./run_pengy_cli.sh
+# or: python -m pengy.cli.main
 ```
+
+### CLI (single-shot)
+
+```bash
+./run_pengy_cli.sh "What is the capital of France?"
+python -m pengy.cli.main "List all files in /tmp"
+```
+
+---
 
 ## Configuration
 
-Click **⚙ Settings** in the sidebar:
+**Desktop:** Click ⚙ Settings in the sidebar.  
+**CLI:** Run `/config` to view, `/model <name>` to switch models.
 
-| Field          | Description                                              |
-|----------------|----------------------------------------------------------|
-| Base URL       | API endpoint, e.g. `http://localhost:11434/v1` for Ollama|
-| API Key        | Your API key (or anything for local endpoints)           |
-| Model          | Model name, e.g. `gpt-4o`, `llama3`, `gemma`            |
-| System Message | Supports `{date}`, `{username}`, `{hostname}`, `{osinfo}`|
-| YOLO Mode      | Skip tool confirmation dialogs                           |
-| UI Scale       | 75 / 100 / 125 / 200 % — takes effect on next launch    |
+| Setting | Description |
+|---------|-------------|
+| Base URL | API endpoint (e.g. `http://localhost:11434/v1` for Ollama) |
+| API Key | Your API key (or anything for local endpoints) |
+| Model | Model name, e.g. `gpt-4o`, `llama3`, `gemma` |
+| System Message | Supports `{date}`, `{username}`, `{hostname}`, `{osinfo}` placeholders |
+| YOLO Mode | Skip tool confirmation dialogs |
+| UI Scale (GUI) | 75 / 100 / 125 / 200 % — takes effect on next launch |
 
-Settings and chat history are saved to `~/.config/pengy/`.
+---
 
 ## Tools
 
-The LLM can call these tools (confirmation dialog shown unless YOLO mode is on):
+Pengy gives the LLM these tools to operate on your machine:
 
-| Tool            | Description                                                      |
-|-----------------|------------------------------------------------------------------|
-| `read_file`     | Read a local file                                                |
-| `write_file`    | Write content to a local file                                    |
-| `run_bash`      | Run a bash command (60s timeout); prompts for sudo password in UI|
-| `run_python`    | Execute Python code (30s timeout)                                |
-| `web_search`    | Search the web via DuckDuckGo                                    |
-| `download_file` | Download a URL to `~/Downloads/`                                 |
-| `fetch_url`     | Fetch a URL's text content into context (useful for docs)        |
+| Tool | Description |
+|------|-------------|
+| `read_file` / `read_multiple_files` | Read one or more files at once |
+| `write_file` | Write or overwrite a file |
+| `replace_in_file` | Targeted text replacement (safer than full rewrites) |
+| `run_bash` | Execute shell commands (60s timeout; sudo password dialog) |
+| `run_python` | Execute Python code (30s timeout) |
+| `web_search` | DuckDuckGo web search |
+| `download_file` | Download a URL to `~/Downloads/` |
+| `fetch_url` | Fetch a URL's text content into context |
+| `directory_tree` | Visual directory structure listing |
+| `search_content` | Regex search across files in a codebase |
 
-## File Attachments
+---
 
-Click **📎** in the input bar to attach a text file. Supported: `.py`, `.md`, `.json`, `.yaml`, `.toml`, `.ini`, `.cfg`, `.sh`, `.txt`, `.csv`, `.sql`, and more. Binary files are rejected. Attached files appear as chips above the input and are injected as fenced code blocks when you send.
+## API Compatibility
+
+| Service | Base URL |
+|---------|----------|
+| OpenAI | `https://api.openai.com/v1` |
+| Ollama | `http://localhost:11434/v1` |
+| LM Studio | `http://localhost:1234/v1` |
+| vLLM | `http://localhost:8000/v1` |
+| OpenRouter | `https://openrouter.ai/api/v1` |
+| Groq | `https://api.groq.com/openai/v1` |
+
+---
 
 ## Project Structure
 
 ```
 pengy/
-├── main.py                 # Entry point
+├── main.py              # Desktop GUI entry point
+├── cli/
+│   └── main.py          # CLI entry point (interactive + single-shot)
 ├── assets/
-│   └── icon.svg            # App icon
+│   └── icon.svg         # App icon
 ├── core/
-│   ├── config.py           # Settings load/save + system message templating
-│   ├── chat_manager.py     # Chat session CRUD
-│   ├── llm_client.py       # API client (generator protocol for tool handling)
-│   └── tools.py            # Tool definitions and execution
+│   ├── config.py        # Settings load/save + system message templating
+│   ├── chat_manager.py  # Chat session CRUD
+│   ├── llm_client.py    # API client (generator protocol for tool handling)
+│   └── tools.py         # Tool definitions and execution
 └── ui/
-    ├── main_window.py      # Main window; wires all signals
-    ├── chat_history.py     # Sidebar chat list + quick settings
-    ├── chat_view.py        # Markdown chat renderer
-    ├── chat_input.py       # Input field + file attachment
-    ├── chat_worker.py      # Background thread driving the LLM generator
+    ├── main_window.py   # Main window; wires all signals
+    ├── chat_history.py  # Sidebar chat list + quick settings
+    ├── chat_view.py     # Markdown chat renderer
+    ├── chat_input.py    # Input field + file attachment
+    ├── chat_worker.py   # Background thread driving the LLM generator
     └── settings_dialog.py  # Settings dialog
 ```
 
-## API Compatibility
-
-| Service     | Base URL                         |
-|-------------|----------------------------------|
-| OpenAI      | `https://api.openai.com/v1`      |
-| Ollama      | `http://localhost:11434/v1`      |
-| LM Studio   | `http://localhost:1234/v1`       |
-| vLLM        | `http://localhost:8000/v1`       |
-| OpenRouter  | `https://openrouter.ai/api/v1`   |
-| Groq        | `https://api.groq.com/openai/v1` |
+---
 
 ## Dependencies
 
-| Package  | Purpose                     |
-|----------|-----------------------------|
-| PySide6  | Qt6 GUI framework           |
-| openai   | OpenAI-compatible API client|
-| markdown | Markdown rendering          |
-| pygments | Syntax highlighting         |
-| ddgs     | DuckDuckGo web search       |
+| Package | Purpose |
+|---------|---------|
+| PySide6 | Qt6 GUI framework |
+| openai | OpenAI-compatible API client |
+| markdown | Markdown rendering |
+| pygments | Syntax highlighting |
+| ddgs | DuckDuckGo web search |
+| rich | CLI formatting (tables, panels, markdown) |
