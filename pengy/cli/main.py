@@ -102,10 +102,10 @@ class PengyCLI:
             # advertise it).
             chat = create_chat()
             chat["title"] = _truncate(prompt_text, 50)
+            chat["messages"].append({"role": "user", "content": prompt_text})
             save_chat(chat)
 
             messages = self._build_messages(chat, prompt_text)
-            chat["messages"].append({"role": "user", "content": prompt_text})
             self._drive_generator(messages, chat)
         except KeyboardInterrupt:
             self.console.print("\n[dim]Cancelled.[/dim]")
