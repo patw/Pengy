@@ -1,18 +1,33 @@
 """Pengy - LLM Chat Desktop Application."""
-import os
 import sys
-from pathlib import Path
-from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QFont, QFontDatabase, QIcon
-
-from pengy.core.config import load_config
-from pengy.ui.main_window import MainWindow
-
-_ICON_PATH = Path(__file__).parent / "assets" / "icon.svg"
 
 
 def main():
-    """Main entry point."""
+    """Main entry point for the Pengy desktop GUI."""
+    # Friendly import guard so ``pip install pengy`` (without [gui]) gives a
+    # clear message instead of an ugly traceback.
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        print(
+            "❌ Pengy GUI requires PySide6.\n"
+            "   Install it with:  pip install pengy[gui]\n"
+            "   Or install everything:  pip install pengy[all]\n"
+            "   For the CLI-only version:  pip install pengy[cli]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    import os
+    from pathlib import Path
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QFont, QFontDatabase, QIcon
+
+    from pengy.core.config import load_config
+    from pengy.ui.main_window import MainWindow
+
+    _ICON_PATH = Path(__file__).parent / "assets" / "icon.svg"
+
     scale = load_config().get("ui_scale", 100)
     if scale != 100:
         os.environ["QT_SCALE_FACTOR"] = str(scale / 100)

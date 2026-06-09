@@ -12,20 +12,33 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.prompt import Prompt
-from rich.table import Table
-from rich.text import Text
 
-from pengy.core import tools
-from pengy.core.chat_manager import (
-    create_chat, delete_chat, get_chat, load_chats, save_chat,
-    clean_dangling_tool_calls, elide_old_tool_results,
-)
-from pengy.core.config import load_config, render_system_message
-from pengy.core.llm_client import LLMClient
+# ---------------------------------------------------------------------------
+# friendly import guard for the CLI extra
+# ---------------------------------------------------------------------------
+
+def _require_rich():
+    """Import and return the ``rich`` module, or print a friendly error."""
+    try:
+        import rich as _r
+        return _r
+    except ImportError:
+        print(
+            "❌ Pengy CLI requires the 'rich' library.\n"
+            "   Install it with:  pip install pengy[cli]\n"
+            "   Or install everything:  pip install pengy[all]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+rich = _require_rich()
+Console = rich.console.Console
+Markdown = rich.markdown.Markdown
+Panel = rich.panel.Panel
+Prompt = rich.prompt.Prompt
+Table = rich.table.Table
+Text = rich.text.Text
 
 
 # ---------------------------------------------------------------------------

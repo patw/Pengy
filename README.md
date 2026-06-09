@@ -2,8 +2,9 @@
 
 **A local-first AI agent with tools.** Desktop GUI **and** command-line — both backed by the same agent core, talking to any OpenAI-compatible API.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue)
-![PySide6](https://img.shields.io/badge/GUI-PySide6-brightgreen)
+[![PyPI - Version](https://img.shields.io/pypi/v/pengy)](https://pypi.org/project/pengy/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pengy)](https://pypi.org/project/pengy/)
+[![PyPI - License](https://img.shields.io/pypi/l/pengy)](https://github.com/patw/pengy/blob/main/LICENSE)
 
 ---
 
@@ -18,6 +19,45 @@ Two interfaces, one agent:
 | Qt6 GUI with markdown rendering, multi-session sidebar, file attachments | Terminal REPL with slash commands, single-shot mode for scripting |
 
 Both share the same core — same tools, same chat history, same config. Use whichever fits your flow.
+
+---
+
+## Quick Start
+
+### Install
+
+```bash
+# Everything (GUI + CLI)
+pip install pengy[all]
+
+# CLI only
+pip install pengy[cli]
+
+# GUI only
+pip install pengy[gui]
+
+# Minimum (no GUI, no CLI — use as a library)
+pip install pengy
+```
+
+### Desktop GUI
+
+```bash
+pengy
+```
+
+### CLI (interactive)
+
+```bash
+pengy-cli
+```
+
+### CLI (single-shot)
+
+```bash
+pengy-cli "What is the capital of France?"
+pengy-cli "List all files in /tmp"
+```
 
 ---
 
@@ -41,37 +81,6 @@ Both share the same core — same tools, same chat history, same config. Use whi
 ## Screenshot
 
 ![Pengy Interface](screenshot.png)
-
----
-
-## Quick Start
-
-**Requirements:** Python 3.10+
-
-```bash
-pip install -r requirements.txt
-```
-
-### Desktop GUI
-
-```bash
-./run_pengy.sh
-# or: python pengy/main.py
-```
-
-### CLI (interactive)
-
-```bash
-./run_pengy_cli.sh
-# or: python -m pengy.cli.main
-```
-
-### CLI (single-shot)
-
-```bash
-./run_pengy_cli.sh "What is the capital of France?"
-python -m pengy.cli.main "List all files in /tmp"
-```
 
 ---
 
@@ -144,6 +153,25 @@ pengy/
     ├── chat_input.py    # Input field + file attachment
     ├── chat_worker.py   # Background thread driving the LLM generator
     └── settings_dialog.py  # Settings dialog
+```
+
+---
+
+## Development
+
+### Install from source
+
+```bash
+git clone https://github.com/patw/pengy.git
+cd pengy
+pip install -e ".[all]"
+```
+
+### Running tests
+
+```bash
+pip install -e ".[all]"
+python -m pytest tests/ -v
 ```
 
 ---

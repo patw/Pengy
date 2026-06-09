@@ -1,6 +1,1 @@
-PySide6>=6.6.0
-openai>=1.0.0
-markdown>=3.5
-pygments>=2.17.0
-ddgs>=9.0.0
-rich>=13.0.0
+-e ".[all]"
