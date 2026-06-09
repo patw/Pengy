@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pengy-agent"
+version = "1.0.0"
+description = "Local-first AI agent with tools — GUI and CLI"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Pat Wendorf"},
+]
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+    "ddgs>=9.0.0",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.6.0",
+    "markdown>=3.5",
+    "pygments>=2.17.0",
+]
+cli = [
+    "rich>=13.0.0",
+]
+all = [
+    "PySide6>=6.6.0",
+    "markdown>=3.5",
+    "pygments>=2.17.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+pengy = "pengy.main:main"
+pengy-cli = "pengy.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/patw/pengy"
+
+[tool.setuptools.packages.find]
+include = ["pengy", "pengy.*"]
+
+[tool.setuptools.package-data]
+pengy = ["assets/*"]

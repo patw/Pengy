@@ -7,16 +7,12 @@ from pengy.core import tools as _tools_mod
 
 
 def _run_tool(name: str, args: dict) -> str:
-    """Run a tool in a daemon thread with a hard timeout.
+    """Run a tool in a daemon thread, relying on subprocess-level timeouts.
 
-    Using a daemon thread (rather than ThreadPoolExecutor) means join() returns
-    immediately after the timeout without blocking on executor shutdown.
-    A timeout of -1 means wait forever.
-
-    Reads tools._tool_timeout at call time so settings changes take effect.
+    The tools themselves (_run_bash, _run_python) enforce the tool_timeout
+    at the subprocess level with proper process-group cleanup.  This thread
+    exists purely for isolation so the caller can't block the event loop.
     """
-    timeout_value = _tools_mod._tool_timeout
-    timeout = None if timeout_value == -1 else timeout_value
     result: list = [None]
     exc: list = [None]
 
@@ -28,13 +24,7 @@ def _run_tool(name: str, args: dict) -> str:
 
     t = threading.Thread(target=_target, daemon=True)
     t.start()
-    t.join(timeout)
-    if t.is_alive():
-        label = f"{timeout_value} seconds" if timeout_value != -1 else "infinity"
-        return (
-            f"Tool '{name}' timed out after {label}. "
-            "Please try again or use a different approach."
-        )
+    t.join()  # wait forever — timeout is handled inside the tool
     if exc[0] is not None:
         return f"Tool error: {exc[0]}"
     return result[0]
@@ -58,13 +48,19 @@ class LLMClient:
             )
         return self._client
 
-    def chat(self, messages: list[dict], yolo_mode: bool = False):
+    def chat(self, messages: list[dict], tool_confirmation: str = "none"):
         """
         Send a chat request and handle tool calls.
         Returns the final assistant message content.
         Yields intermediate tool call info for UI updates.
+
+        *tool_confirmation* is one of:
+          "all"  – execute every tool without asking (YOLO)
+          "safe" – auto-approve read-only tools; confirm write/execute
+          "none" – confirm every tool call
         """
         current_messages = list(messages)
+        accumulated_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         while True:
             response = self.client.chat.completions.create(
@@ -73,6 +69,12 @@ class LLMClient:
                 tools=_tools_mod.TOOLS,
                 tool_choice="auto",
             )
+
+            # Accumulate token usage across all calls in this turn
+            if response.usage:
+                accumulated_usage["prompt_tokens"] += response.usage.prompt_tokens
+                accumulated_usage["completion_tokens"] += response.usage.completion_tokens
+                accumulated_usage["total_tokens"] += response.usage.total_tokens
 
             assistant_msg = response.choices[0].message
             current_messages.append(assistant_msg)
@@ -102,17 +104,27 @@ class LLMClient:
                     except json.JSONDecodeError:
                         tool_args = {}
 
-                    if yolo_mode:
-                        yield {"type": "tool_request", "name": tool_name, "args": tool_args, "tool_call_id": tool_call.id}
+                    # Auto-approve based on tool_confirmation mode
+                    skip_confirm = (
+                        tool_confirmation == "all"
+                        or (tool_confirmation == "safe" and _tools_mod.is_readonly_tool(tool_name))
+                    )
+
+                    if skip_confirm:
+                        yield {"type": "tool_request", "name": tool_name,
+                               "args": tool_args, "tool_call_id": tool_call.id}
                         result = _run_tool(tool_name, tool_args)
                         current_messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
                             "content": result,
                         })
-                        yield {"type": "tool_result", "tool_call_id": tool_call.id, "name": tool_name, "args": tool_args, "content": result, "declined": False}
+                        yield {"type": "tool_result", "tool_call_id": tool_call.id,
+                               "name": tool_name, "args": tool_args,
+                               "content": result, "declined": False}
                     else:
-                        confirm = yield {"type": "tool_request", "name": tool_name, "args": tool_args, "tool_call_id": tool_call.id}
+                        confirm = yield {"type": "tool_request", "name": tool_name,
+                                         "args": tool_args, "tool_call_id": tool_call.id}
                         if confirm and confirm.get("confirmed"):
                             result = _run_tool(tool_name, tool_args)
                             current_messages.append({
@@ -120,7 +132,9 @@ class LLMClient:
                                 "tool_call_id": tool_call.id,
                                 "content": result,
                             })
-                            yield {"type": "tool_result", "tool_call_id": tool_call.id, "name": tool_name, "args": tool_args, "content": result, "declined": False}
+                            yield {"type": "tool_result", "tool_call_id": tool_call.id,
+                                   "name": tool_name, "args": tool_args,
+                                   "content": result, "declined": False}
                         else:
                             declined_msg = "Tool execution was declined by user."
                             current_messages.append({
@@ -128,7 +142,10 @@ class LLMClient:
                                 "tool_call_id": tool_call.id,
                                 "content": declined_msg,
                             })
-                            yield {"type": "tool_result", "tool_call_id": tool_call.id, "name": tool_name, "args": tool_args, "content": declined_msg, "declined": True}
+                            yield {"type": "tool_result", "tool_call_id": tool_call.id,
+                                   "name": tool_name, "args": tool_args,
+                                   "content": declined_msg, "declined": True}
             else:
-                yield {"type": "final_response", "content": assistant_msg.content}
+                yield {"type": "final_response", "content": assistant_msg.content,
+                       "usage": accumulated_usage}
                 break

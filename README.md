@@ -26,10 +26,13 @@ Both share the same core — same tools, same chat history, same config. Use whi
 - **OpenAI-compatible** — Works with OpenAI, Ollama, vLLM, LM Studio, OpenRouter, Groq, or any local endpoint
 - **11 built-in tools** — Read, write, and edit files; run bash (with sudo support) and Python code; search the web and fetch URLs; explore directory trees and search codebases
 - **Agentic workflow** — The LLM can call multiple tools per turn, chaining them to accomplish complex tasks
-- **Tool confirmation** — Approve or decline every tool call, or flip on YOLO mode to skip confirmation
+- **Tool confirmation** — Three modes: YOLO (All) skips all confirmations, Safe auto-approves read-only tools, None confirms everything
+- **Context management** — Elide old tool results to save context window space; configurable per-chat
+- **Token usage display** — See prompt/completion token counts after every turn (GUI sidebar + CLI footer)
+- **Model discovery** — Fetch available models from your endpoint with one click or `/models` command
 - **Multi-session** — Create, switch, and delete chat sessions; history saved locally as JSON
-- **File attachments** (GUI) — Attach text files from the input bar; contents are injected into your message
-- **Slash commands** (CLI) — `/new`, `/load`, `/yolo`, `/model`, `/list`, `/delete`, and more
+- **File attachments** — GUI: attach files from the input bar; CLI: use `/attach <path>` or `@path` inline syntax
+- **Slash commands** (CLI) — `/new`, `/load`, `/models`, `/yolo`, `/model`, `/list`, `/delete`, `/attach`, `/compact`, and more
 - **Templated system message** — Auto-fills `{date}`, `{username}`, `{hostname}`, `{osinfo}` at send time
 - **Persistent config** — Settings and chat history live in `~/.config/pengy/`, shared between GUI and CLI
 
@@ -83,7 +86,7 @@ python -m pengy.cli.main "List all files in /tmp"
 | API Key | Your API key (or anything for local endpoints) |
 | Model | Model name, e.g. `gpt-4o`, `llama3`, `gemma` |
 | System Message | Supports `{date}`, `{username}`, `{hostname}`, `{osinfo}` placeholders |
-| YOLO Mode | Skip tool confirmation dialogs |
+| Tool Confirmation | YOLO (All) / Safe Only / None — controls which tools require approval |
 | UI Scale (GUI) | 75 / 100 / 125 / 200 % — takes effect on next launch |
 
 ---
@@ -97,8 +100,8 @@ Pengy gives the LLM these tools to operate on your machine:
 | `read_file` / `read_multiple_files` | Read one or more files at once |
 | `write_file` | Write or overwrite a file |
 | `replace_in_file` | Targeted text replacement (safer than full rewrites) |
-| `run_bash` | Execute shell commands (60s timeout; sudo password dialog) |
-| `run_python` | Execute Python code (30s timeout) |
+| `run_bash` | Execute shell commands (configurable timeout; sudo password dialog) |
+| `run_python` | Execute Python code (uses the same interpreter/venv as Pengy) |
 | `web_search` | DuckDuckGo web search |
 | `download_file` | Download a URL to `~/Downloads/` |
 | `fetch_url` | Fetch a URL's text content into context |

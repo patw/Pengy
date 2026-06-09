@@ -3,8 +3,12 @@ import concurrent.futures
 import fnmatch
 import os
 import re
+import signal
 import subprocess
+import sys as _sys_module
 import tempfile
+import threading
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
@@ -19,6 +23,19 @@ _cached_sudo_password = None
 _user_agent = "PengyAgent/1.0"
 
 _tool_timeout = 60  # seconds; -1 means no timeout
+
+# Read-only tools that can be auto-approved when tool_confirmation is "safe"
+READONLY_TOOLS = frozenset({
+    "read_file", "read_multiple_files", "directory_tree",
+    "search_content", "web_search", "fetch_url",
+})
+
+# Active subprocess handle so the UI layer can kill runaway tools
+_active_process = None
+_active_process_lock = threading.Lock()
+
+# Maximum download size for download_file (100 MB)
+_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024
 
 # Directories/files to skip in directory_tree and search_content
 _ALWAYS_SKIP_DIRS = {
@@ -375,16 +392,6 @@ def _replace_in_file(path: str, old_str: str, new_str: str) -> str:
                 f"Leading/trailing whitespace and indentation must match exactly."
             )
         elif count > 1:
-            # Find line numbers of each occurrence to help the agent
-            lines = content.split("\n")
-            occurrences = []
-            for lineno, line in enumerate(lines, 1):
-                if old_str in line or any(
-                    old_str in "\n".join(lines[i:i + old_str.count("\n") + 1])
-                    for i in range(max(0, lineno - 1), min(len(lines), lineno + old_str.count("\n")))
-                ):
-                    pass  # We'll find exact matches below
-
             # Find precise line numbers for each occurrence
             pos = 0
             found_lines = []
@@ -436,12 +443,13 @@ def _replace_in_file(path: str, old_str: str, new_str: str) -> str:
 
 def _run_bash(command: str) -> str:
     """Run a bash command."""
+    global _active_process
+    proc = None
     try:
         stdin_input = None
         if re.search(r'\bsudo\b', command):
             if _sudo_password_provider is None:
                 return "Error: sudo detected but no password provider is configured."
-            # Use cached password if available; otherwise prompt the user.
             global _cached_sudo_password
             password = _cached_sudo_password
             if password is None:
@@ -449,31 +457,53 @@ def _run_bash(command: str) -> str:
                 if password is None:
                     return "Cancelled: sudo password not provided."
                 _cached_sudo_password = password
-            # Inject -S so sudo reads password from stdin
             command = re.sub(r'\bsudo\b(?!\s+-S)', 'sudo -S', command, count=1)
             stdin_input = password + "\n"
 
-        result = subprocess.run(
+        timeout = None if _tool_timeout == -1 else _tool_timeout
+        proc = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=None if _tool_timeout == -1 else _tool_timeout,
-            input=stdin_input,
+            start_new_session=True,
         )
-        output = result.stdout
-        stderr = result.stderr
+        with _active_process_lock:
+            _active_process = proc
+        try:
+            stdout, stderr = proc.communicate(input=stdin_input, timeout=timeout)
+        finally:
+            with _active_process_lock:
+                if _active_process is proc:
+                    _active_process = None
+
+        output = stdout or ""
         if stdin_input:
-            # Strip the sudo password prompt line from stderr
-            stderr = re.sub(r'^\[sudo\].*\n?', '', stderr, flags=re.MULTILINE).strip()
+            stderr = re.sub(r'^\[sudo\].*\n?', '', stderr or "", flags=re.MULTILINE).strip()
         if stderr:
             output += "\n" + stderr
-        if result.returncode != 0:
-            output += f"\n[Exit code: {result.returncode}]"
+        if proc.returncode != 0:
+            output += f"\n[Exit code: {proc.returncode}]"
         return output or "(No output)"
     except subprocess.TimeoutExpired:
+        if proc is not None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        with _active_process_lock:
+            if _active_process is proc:
+                _active_process = None
         return f"Error: Command timed out after {_tool_timeout} seconds"
     except Exception as e:
+        with _active_process_lock:
+            if _active_process is proc:
+                _active_process = None
         return f"Error running command: {e}"
 
 
@@ -510,16 +540,38 @@ def _web_search(query: str, max_results: int = 5) -> str:
 def _download_file(url: str, filename: str | None = None) -> str:
     """Download a file to ~/Downloads/."""
     try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return f"Error: Only http/https URLs are supported (got '{parsed.scheme}')."
+
         downloads = Path.home() / "Downloads"
         downloads.mkdir(exist_ok=True)
         if not filename:
             filename = url.split("?")[0].rstrip("/").split("/")[-1] or "download"
         dest = downloads / filename
         req = urllib.request.Request(url, headers={"User-Agent": _user_agent})
-        with urllib.request.urlopen(req, timeout=None if _tool_timeout == -1 else _tool_timeout) as resp:
-            dest.write_bytes(resp.read())
-        size = dest.stat().st_size
-        return f"Downloaded to {dest} ({size:,} bytes)"
+        timeout = None if _tool_timeout == -1 else _tool_timeout
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # Stream to disk in chunks, enforcing a size cap
+            total = 0
+            with open(dest, "wb") as out:
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _MAX_DOWNLOAD_SIZE:
+                        out.close()
+                        try:
+                            dest.unlink()
+                        except OSError:
+                            pass
+                        return (
+                            f"Error: Download exceeds maximum size of "
+                            f"{_MAX_DOWNLOAD_SIZE:,} bytes."
+                        )
+                    out.write(chunk)
+        return f"Downloaded to {dest} ({total:,} bytes)"
     except Exception as e:
         return f"Error downloading file: {e}"
 
@@ -554,6 +606,10 @@ class _TextExtractor(HTMLParser):
 def _fetch_url(url: str) -> str:
     """Fetch a URL and return its text content."""
     try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return f"Error: Only http/https URLs are supported (got '{parsed.scheme}')."
+
         req = urllib.request.Request(url, headers={"User-Agent": _user_agent})
         with urllib.request.urlopen(req, timeout=None if _tool_timeout == -1 else _tool_timeout) as resp:
             content_type = resp.headers.get_content_type()
@@ -573,27 +629,55 @@ def _fetch_url(url: str) -> str:
 
 def _run_python(code: str) -> str:
     """Execute Python code."""
+    global _active_process
+    proc = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False
         ) as f:
             f.write(code)
             temp_file = f.name
-        result = subprocess.run(
-            ["python3", temp_file],
-            capture_output=True,
+        timeout = None if _tool_timeout == -1 else _tool_timeout
+        proc = subprocess.Popen(
+            [_sys_module.executable, temp_file],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=None if _tool_timeout == -1 else _tool_timeout,
+            start_new_session=True,
         )
-        output = result.stdout
-        if result.stderr:
-            output += "\n" + result.stderr
-        if result.returncode != 0:
-            output += f"\n[Exit code: {result.returncode}]"
+        with _active_process_lock:
+            _active_process = proc
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        finally:
+            with _active_process_lock:
+                if _active_process is proc:
+                    _active_process = None
+
+        output = stdout or ""
+        if stderr:
+            output += "\n" + stderr
+        if proc.returncode != 0:
+            output += f"\n[Exit code: {proc.returncode}]"
         return output or "(No output)"
     except subprocess.TimeoutExpired:
+        if proc is not None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        with _active_process_lock:
+            if _active_process is proc:
+                _active_process = None
         return f"Error: Python execution timed out after {_tool_timeout} seconds"
     except Exception as e:
+        with _active_process_lock:
+            if _active_process is proc:
+                _active_process = None
         return f"Error running Python: {e}"
 
 
@@ -991,3 +1075,32 @@ def _group_regions(matched: set[int], context: int, total_lines: int
         else:
             regions.append((start, end))
     return regions
+
+
+# ---------------------------------------------------------------------------
+# process management helpers
+# ---------------------------------------------------------------------------
+
+def kill_active_process():
+    """Kill the currently active tool subprocess, if any.
+
+    Called by the UI layer on Stop / cancel.  Uses SIGKILL on the entire
+    process group so that any child processes are also terminated.
+    """
+    proc = None
+    with _active_process_lock:
+        proc = _active_process
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def is_readonly_tool(name: str) -> bool:
+    """Return True if the named tool is read-only (no side effects)."""
+    return name in READONLY_TOOLS

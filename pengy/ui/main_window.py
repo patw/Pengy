@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QThread
 from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.chat_manager import (
     load_chats, create_chat, save_chat, get_chat,
+    clean_dangling_tool_calls, elide_old_tool_results,
 )
 from pengy.core.llm_client import LLMClient
 from pengy.core import tools
@@ -32,12 +33,13 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.worker_thread = None
         self._abandoned_workers = []  # (thread, worker) kept alive until threads exit
+        self._yolo_this_turn = False
         self.setup_ui()
         self.update_llm_client()
         self.load_chat_list()
         self.chat_history.update_quick_settings(
             self.config.get("model", "gpt-4o"),
-            self.config.get("yolo_mode", False),
+            self.config.get("tool_confirmation", "none"),
         )
 
         self.chat_history.chat_selected.connect(self.load_chat)
@@ -147,7 +149,7 @@ class MainWindow(QMainWindow):
             self.update_llm_client()
             self.chat_history.update_quick_settings(
                 self.config.get("model", "gpt-4o"),
-                self.config.get("yolo_mode", False),
+                self.config.get("tool_confirmation", "none"),
             )
 
     def load_chat(self, chat_id: str):
@@ -192,6 +194,9 @@ class MainWindow(QMainWindow):
         if images is None:
             images = []
 
+        # Reset per-turn YOLO
+        self._yolo_this_turn = False
+
         # Persistent/display version: image filenames as placeholders, no bytes
         placeholder_parts = [f"[Image: {img.name}]" for img in images]
         if text:
@@ -208,7 +213,12 @@ class MainWindow(QMainWindow):
         if system_msg:
             messages.append({"role": "system", "content": render_system_message(system_msg)})
         # Prior turns use stored (placeholder) content; current turn gets real image data
-        messages.extend(self.current_chat["messages"][:-1])
+        prior = list(self.current_chat["messages"][:-1])
+        # Clean dangling tool calls + elide old tool results before sending
+        prior = clean_dangling_tool_calls(prior)
+        prior = elide_old_tool_results(prior, self.config.get("context_keep_turns", 0))
+        messages.extend(prior)
+
         if images:
             content_parts = []
             for img_path in images:
@@ -239,17 +249,16 @@ class MainWindow(QMainWindow):
 
         self._stop_btn.show()
         self.chat_history.set_thinking(True)
+        self.chat_history.update_token_usage(0, 0)
         self._process_response(messages)
 
     def _process_response(self, messages: list[dict]):
         """Process the LLM response via a background worker thread."""
-        # Abandon any previous worker that may still be running (e.g.
-        # blocked in a C-level socket read).  Its signals are already
-        # disconnected so it can't interfere.
         self._abandon_worker()
 
-        yolo_mode = self.config.get("yolo_mode", False)
-        self.worker = ChatWorker(self.llm_client, messages, yolo_mode)
+        tool_confirmation = self.config.get("tool_confirmation", "none")
+        self.worker = ChatWorker(self.llm_client, messages,
+                                 tool_confirmation=tool_confirmation)
         self.worker_thread = QThread()
         self.worker.moveToThread(self.worker_thread)
 
@@ -266,11 +275,12 @@ class MainWindow(QMainWindow):
         if not isinstance(response, dict) or "type" not in response:
             return
         if response["type"] == "final_response":
-            self._handle_final_response(response["content"])
+            self._handle_final_response(response)
         elif response["type"] == "tool_request":
             self.chat_history.set_tool_running(True)
             self.chat_view.append_message("tool_request", response)
-            if self.config.get("yolo_mode", False):
+            # Auto-approve if tool_confirmation is "all" or yolo_this_turn is set
+            if self.config.get("tool_confirmation") == "all" or self._yolo_this_turn:
                 self.worker.send_confirmation({
                     "confirmed": True,
                     "tool_call_id": response["tool_call_id"],
@@ -341,16 +351,19 @@ class MainWindow(QMainWindow):
         ]
 
     def _stop_worker(self):
-        """User pressed Stop — abandon the worker and restore the UI."""
+        """User pressed Stop — clean up and restore the UI."""
         self._abandon_worker()
 
         self._stop_btn.hide()
         self.chat_history.set_thinking(False)
         self.chat_history.set_tool_running(False)
 
-        self.chat_view.append_message("assistant", "⏹ *Stopped*")
-
+        # Fix dangling tool_calls before saving so the chat isn't bricked
         if self.current_chat:
+            self.current_chat["messages"] = clean_dangling_tool_calls(
+                self.current_chat["messages"]
+            )
+            self.chat_view.append_message("assistant", "⏹ *Stopped*")
             save_chat(self.current_chat)
 
     def _handle_tool_confirm(self, tool_info: dict):
@@ -358,14 +371,15 @@ class MainWindow(QMainWindow):
         if not self.worker:
             return
         dialog = ToolConfirmDialog(tool_info, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            if dialog.confirmed:
-                self.worker.send_confirmation({
-                    "confirmed": True,
-                    "tool_call_id": tool_info["tool_call_id"],
-                })
-            else:
-                self.worker.send_confirmation(None)
+        result = dialog.exec()
+        if result == QDialog.DialogCode.Accepted and dialog.confirmed:
+            if dialog.yolo_turn:
+                self._yolo_this_turn = True
+            self.worker.send_confirmation({
+                "confirmed": True,
+                "yolo_turn": dialog.yolo_turn,
+                "tool_call_id": tool_info["tool_call_id"],
+            })
         else:
             self.worker.send_confirmation(None)
 
@@ -379,30 +393,40 @@ class MainWindow(QMainWindow):
         )
         self.worker.send_sudo_password(password if ok else None)
 
-    def _handle_final_response(self, content: str):
+    def _handle_final_response(self, response: dict):
         """Handle the final text response from the LLM."""
+        content = response.get("content", "")
         # Add assistant message to chat
         assistant_msg = {"role": "assistant", "content": content}
         self.current_chat["messages"].append(assistant_msg)
         self.chat_view.append_message("assistant", content)
+
+        # Show token usage
+        usage = response.get("usage", {})
+        if usage:
+            self.chat_history.update_token_usage(
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
 
         # Save chat
         save_chat(self.current_chat)
 
 
 class ToolConfirmDialog(QDialog):
-    """Dialog for confirming tool execution."""
+    """Dialog for confirming tool execution with Yes-to-all-this-turn."""
 
     def __init__(self, tool_info: dict, parent=None):
         super().__init__(parent)
         self.confirmed = False
+        self.yolo_turn = False
         self.setup_ui(tool_info)
 
     def setup_ui(self, tool_info: dict):
         """Build the confirmation dialog."""
         self.setWindowTitle(f"Confirm Tool: {tool_info['name']}")
         self.setModal(True)
-        self.resize(450, 300)
+        self.resize(480, 320)
 
         layout = QVBoxLayout(self)
 
@@ -414,16 +438,50 @@ class ToolConfirmDialog(QDialog):
         info_label.setStyleSheet("color: #000000; padding: 8px;")
         layout.addWidget(info_label)
 
-        # Buttons
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        # Three buttons: Execute, Yes to all this turn, Cancel
+        btn_layout = QHBoxLayout()
 
-    def accept(self):
-        """Handle accept."""
+        execute_btn = QPushButton("Execute")
+        execute_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1e66f5; color: white; border: none;
+                border-radius: 6px; padding: 8px 18px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #4478f7; }
+        """)
+        execute_btn.clicked.connect(self._on_execute)
+        btn_layout.addWidget(execute_btn)
+
+        yes_all_btn = QPushButton("Yes to All\nThis Turn")
+        yes_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #df8e1d; color: white; border: none;
+                border-radius: 6px; padding: 8px 14px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #fea82f; }
+        """)
+        yes_all_btn.clicked.connect(self._on_yes_all)
+        btn_layout.addWidget(yes_all_btn)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #d20f39; color: white; border: none;
+                border-radius: 6px; padding: 8px 18px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #e64553; }
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        layout.addLayout(btn_layout)
+
+    def _on_execute(self):
         self.confirmed = True
-        super().accept()
+        self.yolo_turn = False
+        self.accept()
+
+    def _on_yes_all(self):
+        self.confirmed = True
+        self.yolo_turn = True
+        self.accept()

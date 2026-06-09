@@ -3,7 +3,6 @@ import threading
 from PySide6.QtCore import QObject, Signal
 
 from pengy.core import tools
-from pengy.core.tools import execute_tool
 
 
 class ChatWorker(QObject):
@@ -14,11 +13,12 @@ class ChatWorker(QObject):
     finished = Signal()
     sudo_password_requested = Signal()
 
-    def __init__(self, llm_client, messages: list[dict], yolo_mode: bool = False):
+    def __init__(self, llm_client, messages: list[dict],
+                 tool_confirmation: str = "none"):
         super().__init__()
         self.llm_client = llm_client
         self.messages = messages
-        self.yolo_mode = yolo_mode
+        self.tool_confirmation = tool_confirmation
         self.generator = None
         self._cancelled = threading.Event()
         self._confirmation_event = threading.Event()
@@ -29,10 +29,11 @@ class ChatWorker(QObject):
     def cancel(self):
         """Signal the worker to stop at the next opportunity.
 
-        Also unblocks any pending confirmation or sudo-password waits so
-        the worker loop can check the cancelled flag and exit promptly.
+        Kills any active tool subprocess and unblocks pending confirmation
+        or sudo-password waits so the worker loop exits promptly.
         """
         self._cancelled.set()
+        tools.kill_active_process()
         self._confirmation_event.set()
         self._sudo_event.set()
 
@@ -45,7 +46,9 @@ class ChatWorker(QObject):
 
         tools.set_sudo_password_provider(self._request_sudo_password)
         try:
-            self.generator = self.llm_client.chat(self.messages, self.yolo_mode)
+            self.generator = self.llm_client.chat(
+                self.messages, self.tool_confirmation,
+            )
             send_value = None
             while True:
                 # Check for cancellation before every generator step

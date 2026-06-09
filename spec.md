@@ -84,7 +84,7 @@ Terminal interface built on `rich`. See [CLI](#cli) section below for details.
 │                    │                                                  │
 │  ─────────────     │  Tool output                                     │
 │  Model: gpt-4o     │  file1.txt  file2.py                             │
-│  YOLO: OFF         │                                                  │
+│  Tool Confirm: None│                                                  │
 │                    │  Assistant 🤖                                    │
 │                    │  Here are the files in /tmp: ...                 │
 │                    │                                                  │
@@ -98,7 +98,7 @@ Terminal interface built on `rich`. See [CLI](#cli) section below for details.
 - **+ New Chat button** — Creates a new chat session
 - **⚙ Settings button** — Opens the settings dialog
 - **Chat history list** — Scrollable, sorted newest first; click to load, right-click or trash icon (🗑) to delete
-- **Quick settings panel** — Shows current model name, YOLO mode toggle, and a status dot (green = idle, blinking = waiting for LLM)
+- **Quick settings panel** — Shows current model name, tool confirmation mode (YOLO/Safe/None), and a status dot (green = idle, blinking = waiting for LLM)
 
 ### Right-Top Pane (Chat View)
 - Markdown-rendered chat messages via `QTextBrowser`
@@ -137,16 +137,17 @@ python -m pengy.cli.main "What is the capital of France?"
 
 On startup:
 1. Loads the most recent chat from `chats.json` (or creates a new one if none exist)
-2. Shows a welcome panel with model name and YOLO status
+2. Shows a welcome panel with model name and tool confirmation status
 3. Enters the REPL loop: prompt → send → stream generator → loop
 
 The `_drive_generator()` method runs the LLM generator **in the main thread** (unlike the GUI which uses a QThread). Tool confirmation blocks on user input via `rich.prompt.Prompt.ask()` with a 3-choice menu: Execute / Yes to all this turn / Decline.
 
 ### Single-Shot Mode
 
-1. Creates a throw-away chat (still persisted for discovery in the desktop app)
+1. Creates a throw-away chat (persisted unless `--no-save` is passed)
 2. Sends the prompt, drives the generator to completion, and exits
 3. Useful for scripting: `pengy-cli "summarize this file" && pengy-cli "translate to French"`
+4. The `--no-save` flag prevents single-shot chats from polluting the sidebar history
 
 ### Slash Commands
 
@@ -154,13 +155,16 @@ The `_drive_generator()` method runs the LLM generator **in the main thread** (u
 |---------|-------------|
 | `/help` | Show the command reference table |
 | `/new` | Start a new chat session |
-| `/yolo [on\|off]` | Toggle YOLO mode (skip tool confirmations) |
-| `/config` | Show current configuration (base URL, model, YOLO, timeout, user agent) |
+| `/yolo [all\|safe\|none]` | Set tool confirmation: all (YOLO), safe (read-only), none — cycles if no arg |
+| `/config` | Show current configuration (base URL, model, timeout, etc.) |
 | `/model <name>` | Switch models (e.g. `/model gpt-4o`) |
+| `/models` | Fetch available models from the endpoint's `GET /v1/models` |
 | `/list` | List recent chats with index, title, message count, and creation date |
 | `/load <index>` | Load a chat by its `/list` index |
 | `/delete <index>` | Delete a chat by its `/list` index |
+| `/attach <path>` | Attach a text file (or use `@path` inline in your prompt) |
 | `/system` | Show the system message template and rendered output |
+| `/compact` | Elide old tool results to free context window space |
 | `/quit`, `/exit`, `/q` | Exit the CLI |
 
 ### CLI Rendering
@@ -187,10 +191,11 @@ Built on `rich`:
   "api_key": "",
   "model": "gpt-4o",
   "system_message": "You are a helpful assistant. The current date is {date} and the user is {username} on host {hostname} which is {osinfo}.",
-  "yolo_mode": false,
+  "tool_confirmation": "none",
   "ui_scale": 100,
   "user_agent": "PengyAgent/1.0",
-  "tool_timeout": 60
+  "tool_timeout": 60,
+  "context_keep_turns": 0
 }
 ```
 
@@ -200,10 +205,11 @@ Built on `rich`:
 | `api_key` | string | (empty) | API key |
 | `model` | string | `gpt-4o` | Model name |
 | `system_message` | string | (see above) | Template; `{date}`, `{username}`, `{hostname}`, `{osinfo}` filled at send time |
-| `yolo_mode` | bool | `false` | Skip tool confirmation dialogs |
+| `tool_confirmation` | string | `"none"` | Tool confirmation mode: `"all"` (YOLO — skip all confirmations), `"safe"` (auto-approve read-only tools; confirm write/execute), `"none"` (confirm every tool) |
 | `ui_scale` | int | `100` | Sets `QT_SCALE_FACTOR` on next launch (75/100/125/200); CLI ignores this |
 | `user_agent` | string | `PengyAgent/1.0` | User-Agent header for HTTP requests (downloads, URL fetches) |
 | `tool_timeout` | int | `60` | Timeout in seconds for tool execution (-1 = no timeout) |
+| `context_keep_turns` | int | `0` | Number of recent turns whose tool results are kept; older ones are elided to `[tool output from earlier turn elided]`. 0 = keep all. |
 
 ### System Message Templating
 
@@ -234,7 +240,7 @@ Array of chat session objects:
 ]
 ```
 
-Only `user` and `assistant` (final text) messages are persisted. Tool call messages (`assistant_tool_calls`, `tool` role) are not saved — they are ephemeral and reconstructed on re-chat by driving the generator again.
+Only `user`, `assistant` (including those with `tool_calls`), and `tool` messages are persisted. This means a chat can be reloaded and rendered without re-running tools. When re-sending, the stored messages are passed to the API directly — the agent continues from where it left off.
 
 ---
 
@@ -286,25 +292,34 @@ Searches for a regex pattern in files under a directory. If the regex is invalid
 ```
 LLM responds with tool call(s)
        │
-       ├─ YOLO mode ON ──► show tool + args in chat → execute → feed result back → loop
+       ├─ tool_confirmation = "all" ──► show tool + args → execute → feed result → loop
        │
-       └─ YOLO mode OFF
+       ├─ tool_confirmation = "safe" & tool is read-only ──► auto-approve → execute → loop
+       │
+       └─ Otherwise
               │
               ▼
         Confirmation dialog (tool name + full args JSON)
               │
-              ├── OK / Execute      → execute → feed result back → loop
-              ├── Yes to all turn   → execute (yolo for rest of this LLM round-trip) → loop
-              └── Cancel / Decline  → "Tool execution was declined by user." → loop
+              ├── Execute              → execute → feed result → loop
+              ├── Yes to all this turn → execute (yolo for rest of this LLM round-trip) → loop
+              └── Cancel / Decline     → "Tool execution was declined by user." → loop
 ```
+
+Both the GUI and CLI "Yes to all this turn" auto-approves all remaining tool calls
+from the current API response (it resets on the next assistant message with tool_calls).
 
 ### Desktop Flow
 
-The `ChatWorker` (a `QObject` moved to a `QThread`) drives `LLMClient.chat()` via the generator protocol. For tool confirmation and sudo password prompts, the worker blocks on a `threading.Event` while the main thread shows the dialog. The main thread unblocks the worker via `.send()` on the generator (tool confirmation) or `send_sudo_password()` which sets the event.
+The `ChatWorker` (a `QObject` moved to a `QThread`) drives `LLMClient.chat()` via the generator protocol. For tool confirmation and sudo password prompts, the worker blocks on a `threading.Event` while the main thread shows the dialog. The main thread unblocks the worker via `send_confirmation()` or `send_sudo_password()` which set the event.
+
+**Token usage:** After the final response, the GUI sidebar shows the turn's prompt/completion token counts. The data is accumulated across all API calls in the turn (including tool-call retries).
 
 ### CLI Flow
 
 The `PengyCLI._drive_generator()` method runs the generator **synchronously in the main thread**. Tool confirmation blocks on `rich.prompt.Prompt.ask()` — a simple 1/2/3 menu. No threading is involved. Sudo passwords use the same password-masked prompt.
+
+**Token usage:** Displayed in a dim footer line after the assistant's response.
 
 ---
 
@@ -340,10 +355,12 @@ LLM API call (non-streaming, full response at once)
 |-------|--------|-------|
 | Base URL | QLineEdit | OpenAI-compatible endpoint |
 | API Key | QLineEdit (masked) | Stored in settings.json (plaintext) |
-| Model | QLineEdit | Any model name the endpoint accepts |
+| Model | QComboBox (editable) | Pre-populated with current model; "↻ Fetch" button calls `GET /v1/models` to populate the dropdown |
 | System Message | QTextEdit | Supports `{date}`, `{username}`, etc. templates |
-| YOLO Mode | QCheckBox | Skips tool confirmation dialogs |
+| Tool Confirmation | QComboBox | "YOLO (All)", "Safe Only", "None" — controls which tools require confirmation |
+| Keep tool results | QSpinBox | Number of recent turns to keep tool results for (0 = keep all) |
 | UI Scale | QComboBox | 75%, 100%, 125%, 200% — takes effect on relaunch |
+| Tool timeout | QSpinBox | Seconds (-1 = no timeout) |
 
 ---
 

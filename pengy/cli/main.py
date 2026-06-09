@@ -6,8 +6,10 @@ Single-shot mode:  pengy-cli "What is the capital of France?"
 
 import argparse
 import json
+import re
 import shlex
 import sys
+import urllib.request
 from pathlib import Path
 
 from rich.console import Console
@@ -20,6 +22,7 @@ from rich.text import Text
 from pengy.core import tools
 from pengy.core.chat_manager import (
     create_chat, delete_chat, get_chat, load_chats, save_chat,
+    clean_dangling_tool_calls, elide_old_tool_results,
 )
 from pengy.core.config import load_config, render_system_message
 from pengy.core.llm_client import LLMClient
@@ -36,6 +39,37 @@ def _truncate(text: str, max_len: int = 72) -> str:
     return text[:max_len - 1] + "…"
 
 
+_TEXT_EXTENSIONS = {
+    '.txt', '.md', '.markdown', '.rst', '.json', '.xml', '.html', '.htm',
+    '.css', '.js', '.ts', '.py', '.rb', '.go', '.rs', '.c', '.cpp', '.h',
+    '.java', '.kt', '.swift', '.sh', '.bash', '.zsh', '.fish', '.ps1',
+    '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.config',
+    '.env', '.csv', '.tsv', '.sql', '.graphql', '.proto', '.tf',
+    '.log', '.diff', '.patch',
+}
+
+
+def _is_text_file(path: Path) -> bool:
+    """Return True if *path* looks like a text file."""
+    if path.suffix.lower() in _TEXT_EXTENSIONS:
+        return True
+    try:
+        with open(path, "rb") as f:
+            f.read(8192).decode("utf-8")
+        return True
+    except (UnicodeDecodeError, OSError):
+        return False
+
+
+def _inject_file_content(path: Path) -> str:
+    """Return a fenced code block with the file's content."""
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+        return f"[File: {path.name}]\n```\n{content}\n```"
+    except Exception as e:
+        return f"[File: {path.name} — error reading: {e}]"
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -43,11 +77,12 @@ def _truncate(text: str, max_len: int = 72) -> str:
 class PengyCLI:
     """Command-line interface for Pengy."""
 
-    def __init__(self):
+    def __init__(self, no_save: bool = False):
         self.config = load_config()
         self.console = Console()
         self.llm_client: LLMClient | None = None
         self.current_chat: dict | None = None
+        self._no_save = no_save
         self._update_llm_client()
 
         # "yes to all this turn" — resets each time the LLM returns a fresh
@@ -82,7 +117,7 @@ class PengyCLI:
 
         self.console.print(
             f"[dim]Model: {self.config.get('model', '?')}  "
-            f"YOLO: {'ON' if self.config.get('yolo_mode') else 'OFF'}[/dim]"
+            f"Tool Confirm: {self._confirm_display()}[/dim]"
         )
 
         tools.set_sudo_password_provider(self._get_sudo_password)
@@ -97,13 +132,11 @@ class PengyCLI:
         """Send a single prompt and exit after the response."""
         tools.set_sudo_password_provider(self._get_sudo_password)
         try:
-            # Create a throw-away chat (we still save it so the user can
-            # find it later in the desktop app or via /list, but we don't
-            # advertise it).
             chat = create_chat()
             chat["title"] = _truncate(prompt_text, 50)
             chat["messages"].append({"role": "user", "content": prompt_text})
-            save_chat(chat)
+            if not self._no_save:
+                save_chat(chat)
 
             messages = self._build_messages(chat, prompt_text)
             self._drive_generator(messages, chat)
@@ -111,6 +144,8 @@ class PengyCLI:
             self.console.print("\n[dim]Cancelled.[/dim]")
         finally:
             tools.set_sudo_password_provider(None)
+            if self._no_save and chat:
+                delete_chat(chat["id"])
 
     # ------------------------------------------------------------------
     # REPL
@@ -131,6 +166,13 @@ class PengyCLI:
             if text.startswith("/"):
                 self._handle_slash(text)
                 continue
+
+            # Check for @path syntax (file attachment)
+            resolved_text, files_content = self._resolve_attachments(text)
+            if files_content:
+                text = files_content + "\n" + resolved_text
+            elif resolved_text != text:
+                text = resolved_text
 
             # Normal message
             self.current_chat["messages"].append({"role": "user", "content": text})
@@ -169,6 +211,9 @@ class PengyCLI:
         elif cmd == "/model":
             self._cmd_model(args)
 
+        elif cmd == "/models":
+            self._cmd_models()
+
         elif cmd == "/list":
             self._cmd_list()
 
@@ -181,6 +226,12 @@ class PengyCLI:
         elif cmd == "/delete":
             self._cmd_delete(args)
 
+        elif cmd == "/attach":
+            self._cmd_attach(args)
+
+        elif cmd == "/compact":
+            self._cmd_compact()
+
         else:
             self.console.print(f"[red]Unknown command:[/red] {cmd}  (try /help)")
 
@@ -192,27 +243,34 @@ class PengyCLI:
 
         table.add_row("/help", "Show this help")
         table.add_row("/new", "Start a new chat")
-        table.add_row("/yolo [on|off]", "Toggle YOLO mode (or set explicitly)")
+        table.add_row("/yolo [all|safe|none]", "Set tool confirmation: all (YOLO), safe (read-only), none")
         table.add_row("/config", "Show current configuration")
         table.add_row("/model <name>", "Change the model (e.g. /model gpt-4o)")
+        table.add_row("/models", "Fetch available models from the endpoint")
         table.add_row("/list", "List recent chats")
         table.add_row("/load <index>", "Load a chat by its /list index")
         table.add_row("/delete <index>", "Delete a chat by its /list index")
+        table.add_row("/attach <path>", "Attach a text file to your next message")
         table.add_row("/system", "Show the system message")
+        table.add_row("/compact", "Compact context by eliding old tool results")
         table.add_row("/quit, /exit", "Exit Pengy CLI")
 
         self.console.print(table)
 
     def _cmd_yolo(self, args: list[str]):
-        if args and args[0].lower() == "on":
-            self.config["yolo_mode"] = True
-        elif args and args[0].lower() == "off":
-            self.config["yolo_mode"] = False
+        modes = ["all", "safe", "none"]
+        current = self.config.get("tool_confirmation", "none")
+        if args and args[0].lower() in modes:
+            current = args[0].lower()
         else:
-            self.config["yolo_mode"] = not self.config["yolo_mode"]
+            # Cycle to next mode
+            idx = modes.index(current) if current in modes else 2
+            current = modes[(idx + 1) % len(modes)]
 
-        status = "ON" if self.config["yolo_mode"] else "OFF"
-        self.console.print(f"[green]✓ YOLO mode:[/green] [bold]{status}[/bold]")
+        self.config["tool_confirmation"] = current
+        self.console.print(
+            f"[green]✓ Tool Confirmation:[/green] [bold]{self._confirm_display()}[/bold]"
+        )
 
     def _cmd_config(self):
         table = Table(title="Configuration", border_style="dim")
@@ -222,7 +280,8 @@ class PengyCLI:
         table.add_row("Base URL", self.config.get("base_url", "—"))
         table.add_row("Model", self.config.get("model", "—"))
         table.add_row("API Key", "••••" if self.config.get("api_key") else "(not set)")
-        table.add_row("YOLO Mode", "ON" if self.config.get("yolo_mode") else "OFF")
+        table.add_row("Tool Confirmation", self._confirm_display())
+        table.add_row("Context keep turns", str(self.config.get("context_keep_turns", 0)))
         table.add_row("Tool Timeout", f"{self.config.get('tool_timeout', 60)}s")
         table.add_row("User Agent", self.config.get("user_agent", "—"))
 
@@ -240,6 +299,43 @@ class PengyCLI:
         self.console.print(
             f"[green]✓ Model changed:[/green] {old_model} → [bold]{new_model}[/bold]"
         )
+
+    def _cmd_models(self):
+        """Fetch available models from the endpoint."""
+        base_url = self.config.get("base_url", "").rstrip("/")
+        api_key = self.config.get("api_key", "")
+        models_url = f"{base_url}/models"
+
+        self.console.print(f"[dim]Fetching models from {models_url}...[/dim]")
+        try:
+            req = urllib.request.Request(models_url)
+            req.add_header("Authorization", f"Bearer {api_key}")
+            req.add_header("User-Agent", self.config.get("user_agent", "PengyAgent/1.0"))
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            model_ids = sorted(
+                m.get("id", "") for m in data.get("data", [])
+                if m.get("id")
+            )
+            if not model_ids:
+                self.console.print("[yellow]No models returned.[/yellow]")
+                return
+
+            current = self.config.get("model", "")
+            table = Table(title="Available Models", border_style="dim")
+            table.add_column("Model ID", style="bold cyan")
+            for mid in model_ids:
+                marker = " ← current" if mid == current else ""
+                table.add_row(mid + marker)
+            self.console.print(table)
+
+        except urllib.error.HTTPError as e:
+            self.console.print(
+                f"[red]HTTP {e.code} from {models_url}.[/red] "
+                f"Check your Base URL and API Key."
+            )
+        except Exception as e:
+            self.console.print(f"[red]Error fetching models:[/red] {e}")
 
     def _cmd_list(self):
         chats = load_chats()
@@ -341,9 +437,64 @@ class PengyCLI:
             border_style="dim",
         ))
 
+    def _cmd_attach(self, args: list[str]):
+        """Show how to use attachment; the @path syntax is demonstrated."""
+        self.console.print(
+            "[bold]File attachment:[/bold]\n"
+            "  Use [cyan]@path/to/file[/cyan] anywhere in your message to attach a text file.\n"
+            "  Example: [dim]Look at @src/main.py and fix the bug[/dim]\n"
+            "  The file's content will be injected as a fenced code block before your prompt."
+        )
+
+    def _cmd_compact(self):
+        """Compact the current chat's context by eliding old tool results."""
+        if not self.current_chat:
+            self.console.print("[dim]No active chat.[/dim]")
+            return
+        turns = self.config.get("context_keep_turns", 3) or 3
+        old_count = len(self.current_chat["messages"])
+        self.current_chat["messages"] = elide_old_tool_results(
+            self.current_chat["messages"], turns
+        )
+        new_count = len(self.current_chat["messages"])
+        self.console.print(
+            f"[green]✓ Compacted:[/green] elided tool results older than "
+            f"{turns} turns. ({old_count} → {new_count} messages)"
+        )
+        save_chat(self.current_chat)
+
+    # ------------------------------------------------------------------
+    # attachment helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_attachments(text: str) -> tuple[str, str]:
+        """Scan *text* for @path references and return (cleaned_text, fenced_blocks)."""
+        resolved = text
+        blocks = []
+        for match in re.finditer(r'@(\S+)', text):
+            raw = match.group(1)
+            # Strip trailing punctuation that isn't part of the path
+            path_str = raw.rstrip(',;:.!?)]}')
+            if not path_str:
+                continue
+            p = Path(path_str).expanduser().resolve()
+            if p.exists() and p.is_file() and _is_text_file(p):
+                blocks.append(_inject_file_content(p))
+                resolved = resolved.replace(match.group(0), "", 1)
+        resolved = resolved.strip()
+        return resolved, "\n\n".join(blocks)
+
     # ------------------------------------------------------------------
     # LLM interaction
     # ------------------------------------------------------------------
+
+    _CONFIRM_DISPLAY = {"all": "YOLO", "safe": "Safe", "none": "None"}
+
+    def _confirm_display(self) -> str:
+        return self._CONFIRM_DISPLAY.get(
+            self.config.get("tool_confirmation", "none"), "None"
+        )
 
     def _update_llm_client(self):
         """Recreate the LLM client from current config."""
@@ -358,15 +509,19 @@ class PengyCLI:
     @staticmethod
     def _build_messages(chat: dict, _current_text: str) -> list[dict]:
         """Build the message list for an API call from a chat session."""
-        messages: list[dict] = []
         config = load_config()
         system_msg = config.get("system_message", "")
+        messages: list[dict] = []
         if system_msg:
             messages.append({
                 "role": "system",
                 "content": render_system_message(system_msg),
             })
-        messages.extend(chat.get("messages", []))
+        # Clean dangling tool calls + elide old tool results
+        raw = list(chat.get("messages", []))
+        raw = clean_dangling_tool_calls(raw)
+        raw = elide_old_tool_results(raw, config.get("context_keep_turns", 0))
+        messages.extend(raw)
         return messages
 
     def _drive_generator(self, messages: list[dict], chat: dict):
@@ -375,17 +530,12 @@ class PengyCLI:
         This is single-threaded — tool confirmation blocks on user input,
         which is fine for a CLI.
         """
-        yolo = self.config.get("yolo_mode", False)
-        gen = self.llm_client.chat(messages, yolo_mode=yolo)
+        gen = self.llm_client.chat(
+            messages, tool_confirmation=self.config.get("tool_confirmation", "none")
+        )
         self._yolo_this_turn = False
         send_value = None
 
-        # Only certain generator transitions actually call the API (and thus
-        # block waiting for the network).  We show "Thinking…" only then.
-        #
-        #   next(gen)  at start or after tool_result  →  API call
-        #   next(gen)  after assistant_tool_calls     →  yields tool_request (instant)
-        #   gen.send() after tool_request             →  executes tool locally (instant)
         expecting_api_call = True
 
         try:
@@ -406,12 +556,12 @@ class PengyCLI:
                     self._render_final(response, chat)
 
                 elif rtype == "assistant_tool_calls":
-                    expecting_api_call = False   # next yield is tool_request, instant
+                    expecting_api_call = False
                     self._yolo_this_turn = False
                     chat["messages"].append(response["message"])
 
                 elif rtype == "tool_request":
-                    expecting_api_call = False   # gen.send() runs tool locally
+                    expecting_api_call = False
                     self._render_tool_request(response)
                     confirm = self._get_tool_confirmation(response)
                     send_value = confirm
@@ -420,7 +570,7 @@ class PengyCLI:
                             self._yolo_this_turn = True
 
                 elif rtype == "tool_result":
-                    expecting_api_call = True    # next next() hits the API
+                    expecting_api_call = True
                     self._render_tool_result(response)
                     chat["messages"].append({
                         "role": "tool",
@@ -441,11 +591,11 @@ class PengyCLI:
             save_chat(chat)
 
     def _show_thinking(self):
-        """Print the 'Thinking…' indicator (non-newline, so the cursor sits after it)."""
+        """Print the 'Thinking…' indicator."""
         self.console.print("[dim]⏳ Thinking…[/dim]", end="\r")
 
     def _clear_thinking(self):
-        """Clear the 'Thinking…' line by overwriting with spaces."""
+        """Clear the 'Thinking…' line."""
         self.console.print(" " * 40, end="\r")
 
     # ------------------------------------------------------------------
@@ -453,7 +603,7 @@ class PengyCLI:
     # ------------------------------------------------------------------
 
     def _render_final(self, response: dict, chat: dict):
-        """Render the final assistant response and save it."""
+        """Render the final assistant response and show token usage."""
         content = response.get("content") or ""
         chat["messages"].append({"role": "assistant", "content": content})
 
@@ -469,6 +619,16 @@ class PengyCLI:
             )
         else:
             self.console.print("[dim](empty response)[/dim]")
+
+        # Show token usage
+        usage = response.get("usage", {})
+        if usage:
+            prompt = usage.get("prompt_tokens", 0)
+            completion = usage.get("completion_tokens", 0)
+            self.console.print(
+                f"[dim]Tokens: {prompt:,} in / {completion:,} out "
+                f"({prompt + completion:,} total)[/dim]"
+            )
 
     def _render_tool_request(self, response: dict):
         """Show the tool call that the model wants to make."""
@@ -503,9 +663,8 @@ class PengyCLI:
             display = display[:2000] + "\n\n[... truncated ...]"
 
         title = "Tool output"
-        border = "dim" if not declined else "red"
         self.console.print(
-            Panel(display, title=title, title_align="left", border_style=border)
+            Panel(display, title=title, title_align="left", border_style="dim")
         )
 
     # ------------------------------------------------------------------
@@ -517,10 +676,7 @@ class PengyCLI:
 
         Returns a dict to send into the generator, or None.
         """
-        name = response.get("name", "?")
-        yolo_mode = self.config.get("yolo_mode", False)
-
-        if yolo_mode or self._yolo_this_turn:
+        if self.config.get("tool_confirmation") == "all" or self._yolo_this_turn:
             return {"confirmed": True, "tool_call_id": response["tool_call_id"]}
 
         while True:
@@ -563,9 +719,14 @@ def main():
         nargs="*",
         help="Optional prompt for single-shot mode. If omitted, starts interactive mode.",
     )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Don't persist single-shot chats to history.",
+    )
     args = parser.parse_args()
 
-    cli = PengyCLI()
+    cli = PengyCLI(no_save=args.no_save)
 
     if args.prompt:
         prompt_text = " ".join(args.prompt)

@@ -1,9 +1,13 @@
 """Settings dialog for Pengy."""
+import json
+import urllib.request
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QLineEdit,
     QTextEdit, QDialogButtonBox, QCheckBox, QLabel, QComboBox,
-    QSpinBox,
+    QSpinBox, QPushButton, QHBoxLayout, QMessageBox,
 )
+from PySide6.QtCore import Qt
 
 
 class SettingsDialog(QDialog):
@@ -14,7 +18,7 @@ class SettingsDialog(QDialog):
         self.config = config
         self.setWindowTitle("Settings")
         self.setModal(True)
-        self.resize(500, 400)
+        self.resize(520, 500)
 
         layout = QVBoxLayout(self)
 
@@ -25,12 +29,28 @@ class SettingsDialog(QDialog):
         self.base_url_input = QLineEdit(config.get("base_url", "https://api.openai.com/v1"))
         self.api_key_input = QLineEdit(config.get("api_key", ""))
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.model_input = QLineEdit(config.get("model", "gpt-4o"))
+
+        # Model: editable combo box + fetch button
+        model_row = QHBoxLayout()
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        current_model = config.get("model", "gpt-4o")
+        self.model_combo.addItem(current_model)
+        self.model_combo.setCurrentText(current_model)
+        model_row.addWidget(self.model_combo, 1)
+
+        self.fetch_models_btn = QPushButton("↻ Fetch")
+        self.fetch_models_btn.setToolTip("Fetch available models from the endpoint")
+        self.fetch_models_btn.setFixedWidth(80)
+        self.fetch_models_btn.clicked.connect(self._fetch_models)
+        model_row.addWidget(self.fetch_models_btn)
+
         self.user_agent_input = QLineEdit(config.get("user_agent", "PengyAgent/1.0"))
 
         api_group.addRow("Base URL:", self.base_url_input)
         api_group.addRow("API Key:", self.api_key_input)
-        api_group.addRow("Model:", self.model_input)
+        api_group.addRow("Model:", model_row)
         api_group.addRow("User Agent:", self.user_agent_input)
 
         layout.addLayout(api_group)
@@ -43,10 +63,35 @@ class SettingsDialog(QDialog):
         self.system_message_input.setMaximumHeight(100)
         layout.addWidget(self.system_message_input)
 
-        # YOLO Mode
-        self.yolo_checkbox = QCheckBox("YOLO Mode (execute tools without confirmation)")
-        self.yolo_checkbox.setChecked(config.get("yolo_mode", False))
-        layout.addWidget(self.yolo_checkbox)
+        # Tool Confirmation
+        confirm_layout = QFormLayout()
+        confirm_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.confirm_combo = QComboBox()
+        self.confirm_combo.addItem("YOLO (All) — execute everything, no questions asked", "all")
+        self.confirm_combo.addItem("Safe Only — auto-approve read-only tools; confirm write/execute", "safe")
+        self.confirm_combo.addItem("None — confirm every tool before execution", "none")
+        current_confirm = config.get("tool_confirmation", "none")
+        for i in range(self.confirm_combo.count()):
+            if self.confirm_combo.itemData(i) == current_confirm:
+                self.confirm_combo.setCurrentIndex(i)
+                break
+        confirm_layout.addRow("Tool Confirmation:", self.confirm_combo)
+        layout.addLayout(confirm_layout)
+
+        # Context keep turns
+        ctx_row = QFormLayout()
+        ctx_row.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.context_keep_turns_spinbox = QSpinBox()
+        self.context_keep_turns_spinbox.setRange(0, 999)
+        self.context_keep_turns_spinbox.setSpecialValueText("Keep all")
+        self.context_keep_turns_spinbox.setSuffix(" turns")
+        self.context_keep_turns_spinbox.setToolTip(
+            "Tool results older than this many turns are elided to save context window. "
+            "0 = keep all."
+        )
+        self.context_keep_turns_spinbox.setValue(config.get("context_keep_turns", 0))
+        ctx_row.addRow("Keep tool results:", self.context_keep_turns_spinbox)
+        layout.addLayout(ctx_row)
 
         # UI Scale
         scale_row = QFormLayout()
@@ -83,13 +128,57 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _fetch_models(self):
+        """Fetch available models from the endpoint's /v1/models."""
+        base_url = self.base_url_input.text().strip().rstrip("/")
+        api_key = self.api_key_input.text()
+        models_url = f"{base_url}/models"
+
+        self.fetch_models_btn.setEnabled(False)
+        self.fetch_models_btn.setText("...")
+
+        try:
+            req = urllib.request.Request(models_url)
+            req.add_header("Authorization", f"Bearer {api_key}")
+            req.add_header("User-Agent", "PengyAgent/1.0")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            model_ids = sorted(
+                m.get("id", "") for m in data.get("data", [])
+                if m.get("id")
+            )
+            if not model_ids:
+                QMessageBox.information(self, "No Models", "The endpoint returned an empty model list.")
+                return
+
+            current = self.model_combo.currentText()
+            self.model_combo.clear()
+            self.model_combo.addItems(model_ids)
+            if current in model_ids:
+                self.model_combo.setCurrentText(current)
+            elif model_ids:
+                self.model_combo.setCurrentText(model_ids[0])
+
+        except urllib.error.HTTPError as e:
+            QMessageBox.warning(
+                self, "Fetch Failed",
+                f"HTTP {e.code} from {models_url}\n\n"
+                f"Check your Base URL and API Key."
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Fetch Failed", str(e))
+        finally:
+            self.fetch_models_btn.setEnabled(True)
+            self.fetch_models_btn.setText("↻ Fetch")
+
     def get_config(self) -> dict:
         """Return updated configuration."""
         self.config["base_url"] = self.base_url_input.text()
         self.config["api_key"] = self.api_key_input.text()
-        self.config["model"] = self.model_input.text()
+        self.config["model"] = self.model_combo.currentText()
         self.config["system_message"] = self.system_message_input.toPlainText()
-        self.config["yolo_mode"] = self.yolo_checkbox.isChecked()
+        self.config["tool_confirmation"] = self.confirm_combo.currentData()
+        self.config["context_keep_turns"] = self.context_keep_turns_spinbox.value()
         self.config["ui_scale"] = self.scale_combo.currentData()
         self.config["tool_timeout"] = self.timeout_spinbox.value()
         self.config["user_agent"] = self.user_agent_input.text() or "PengyAgent/1.0"

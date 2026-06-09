@@ -95,9 +95,13 @@ class ChatHistoryWidget(QWidget):
         self.model_label.setStyleSheet("color: #000000;")
         qs_layout.addWidget(self.model_label)
 
-        self.yolo_label = QLabel("YOLO: OFF")
-        self.yolo_label.setStyleSheet("color: #000000;")
-        qs_layout.addWidget(self.yolo_label)
+        self.confirm_label = QLabel("Tool Confirm: None")
+        self.confirm_label.setStyleSheet("color: #000000;")
+        qs_layout.addWidget(self.confirm_label)
+
+        self.tokens_label = QLabel("Tokens: —")
+        self.tokens_label.setStyleSheet("color: #000000;")
+        qs_layout.addWidget(self.tokens_label)
 
         layout.addWidget(qs_frame)
 
@@ -265,7 +269,18 @@ class ChatHistoryWidget(QWidget):
         color = "#f38ba8" if self._dot_phase else "transparent"
         self.status_dot.setStyleSheet(f"color: {color}; font-size: 14px;")
 
-    def update_quick_settings(self, model: str, yolo_mode: bool):
+    _CONFIRM_LABELS = {"all": "Tool Confirm: YOLO", "safe": "Tool Confirm: Safe", "none": "Tool Confirm: None"}
+
+    def update_quick_settings(self, model: str, tool_confirmation: str):
         """Update the quick settings display."""
         self.model_label.setText(f"Model: {model}")
-        self.yolo_label.setText(f"YOLO: {'ON' if yolo_mode else 'OFF'}")
+        self.confirm_label.setText(
+            self._CONFIRM_LABELS.get(tool_confirmation, f"Tool Confirm: {tool_confirmation}")
+        )
+
+    def update_token_usage(self, prompt: int, completion: int):
+        """Show the last turn's token usage."""
+        if prompt or completion:
+            self.tokens_label.setText(f"Tokens: {prompt:,} in / {completion:,} out")
+        else:
+            self.tokens_label.setText("Tokens: —")
