@@ -66,5 +66,11 @@ Repository = "https://github.com/patw/pengy"
 [tool.setuptools.packages.find]
 include = ["pengy", "pengy.*"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "smoke: quick import-and-parse tests (no LLM needed)",
+]
+
 [tool.setuptools.package-data]
 pengy = ["assets/*"]

@@ -42,13 +42,13 @@ def _require_rich():
         sys.exit(1)
 
 
-rich = _require_rich()
-Console = rich.console.Console
-Markdown = rich.markdown.Markdown
-Panel = rich.panel.Panel
-Prompt = rich.prompt.Prompt
-Table = rich.table.Table
-Text = rich.text.Text
+_rich = _require_rich()
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.table import Table
+from rich.text import Text
 
 
 # ---------------------------------------------------------------------------
