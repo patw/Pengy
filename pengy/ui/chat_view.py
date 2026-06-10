@@ -1,9 +1,11 @@
 """Chat view with markdown rendering for Pengy."""
 import json
 import re
+import threading
+import urllib.request
 from PySide6.QtWidgets import QTextBrowser
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QMouseEvent
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QImage, QMouseEvent, QTextDocument
 
 import markdown
 from pygments import highlight
@@ -22,16 +24,35 @@ body {{
 }}
 a {{ color: #a05000; text-decoration: none; }}
 pre {{ white-space: pre-wrap; word-wrap: break-word; }}
+table {{
+    border: 1px solid #cccccc;
+    margin: 6px 0;
+}}
+th, td {{
+    border: 1px solid #cccccc;
+    padding: 4px 10px;
+}}
+th {{
+    background-color: #f0f0f0;
+    font-weight: bold;
+}}
+img {{ max-width: 600px; }}
 """
 
 
 class ChatView(QTextBrowser):
     """Markdown-rendering chat view with collapsible tool call blocks."""
 
+    _image_loaded = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._messages = []
         self._expanded_tools = set()
+        self._image_cache: dict[str, bytes] = {}   # url -> raw bytes (b"" = failed)
+        self._image_pending: set[str] = set()
+        self._image_lock = threading.Lock()
+        self._image_loaded.connect(self._render)
         self.md_extensions = ["fenced_code", "codehilite", "tables", "footnotes"]
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         font.setPointSize(10)
@@ -40,6 +61,55 @@ class ChatView(QTextBrowser):
             "QTextBrowser { background-color: #ffffff; color: #1e1e2e; border: none; padding: 0; }"
         )
         self.setOpenLinks(False)
+
+    def loadResource(self, type_: int, url: QUrl) -> object:
+        """Return cached external images; kick off a background fetch if not yet loaded."""
+        if type_ == QTextDocument.ResourceType.ImageResource:
+            url_str = url.toString()
+            if url_str.startswith(("http://", "https://")):
+                should_fetch = False
+                with self._image_lock:
+                    cached = self._image_cache.get(url_str)
+                    if cached is None and url_str not in self._image_pending:
+                        self._image_pending.add(url_str)
+                        should_fetch = True
+
+                if should_fetch:
+                    threading.Thread(
+                        target=self._fetch_image, args=(url_str,), daemon=True
+                    ).start()
+
+                if cached:
+                    image = QImage()
+                    image.loadFromData(cached)
+                    if not image.isNull():
+                        if image.width() > 600:
+                            image = image.scaledToWidth(
+                                600, Qt.TransformationMode.SmoothTransformation
+                            )
+                        return image
+
+                return None  # not yet loaded; Qt leaves a blank space until re-render
+
+        return super().loadResource(type_, url)
+
+    def _fetch_image(self, url_str: str):
+        """Fetch an image in a worker thread; on success emit _image_loaded to re-render."""
+        try:
+            req = urllib.request.Request(
+                url_str, headers={"User-Agent": "PengyAgent/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = resp.read(4 * 1024 * 1024)  # cap at 4 MB
+            with self._image_lock:
+                self._image_cache[url_str] = data
+            self._image_loaded.emit()
+        except Exception:
+            with self._image_lock:
+                self._image_cache[url_str] = b""  # sentinel: don't retry
+        finally:
+            with self._image_lock:
+                self._image_pending.discard(url_str)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -184,6 +254,9 @@ class ChatView(QTextBrowser):
     def _render_markdown(self, text: str) -> str:
         md = markdown.Markdown(extensions=self.md_extensions)
         html = md.convert(text)
+        # Qt doesn't support border-collapse; cellspacing="0" removes inter-cell gaps
+        # so the CSS border on each cell reads as a single collapsed border visually.
+        html = html.replace("<table>", '<table cellspacing="0">')
         return self._highlight_code(html)
 
     def _highlight_code(self, html: str) -> str:
