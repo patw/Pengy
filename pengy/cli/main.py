@@ -10,7 +10,17 @@ import re
 import shlex
 import sys
 import urllib.request
+import uuid
+from datetime import datetime
 from pathlib import Path
+
+from pengy.core.config import load_config, render_system_message
+from pengy.core.llm_client import LLMClient
+from pengy.core.chat_manager import (
+    load_chats, create_chat, save_chat, delete_chat,
+    clean_dangling_tool_calls, elide_old_tool_results,
+)
+from pengy.core import tools
 
 
 # ---------------------------------------------------------------------------
@@ -144,11 +154,19 @@ class PengyCLI:
     def run_single_shot(self, prompt_text: str):
         """Send a single prompt and exit after the response."""
         tools.set_sudo_password_provider(self._get_sudo_password)
+        chat = None
         try:
-            chat = create_chat()
-            chat["title"] = _truncate(prompt_text, 50)
-            chat["messages"].append({"role": "user", "content": prompt_text})
-            if not self._no_save:
+            if self._no_save:
+                chat = {
+                    "id": str(uuid.uuid4()),
+                    "title": _truncate(prompt_text, 50),
+                    "messages": [{"role": "user", "content": prompt_text}],
+                    "created_at": datetime.now().isoformat(),
+                }
+            else:
+                chat = create_chat()
+                chat["title"] = _truncate(prompt_text, 50)
+                chat["messages"].append({"role": "user", "content": prompt_text})
                 save_chat(chat)
 
             messages = self._build_messages(chat, prompt_text)
@@ -157,8 +175,6 @@ class PengyCLI:
             self.console.print("\n[dim]Cancelled.[/dim]")
         finally:
             tools.set_sudo_password_provider(None)
-            if self._no_save and chat:
-                delete_chat(chat["id"])
 
     # ------------------------------------------------------------------
     # REPL
@@ -601,7 +617,8 @@ class PengyCLI:
             self.console.print(f"\n[red]Error:[/red] {exc}")
         finally:
             gen.close()
-            save_chat(chat)
+            if not self._no_save:
+                save_chat(chat)
 
     def _show_thinking(self):
         """Print the 'Thinking…' indicator."""

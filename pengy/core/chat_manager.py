@@ -113,34 +113,46 @@ def get_chat(chat_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def clean_dangling_tool_calls(messages: list[dict]) -> list[dict]:
-    """Remove or repair dangling assistant tool_calls that lack tool results.
+    """Remove or repair dangling/orphan tool messages.
 
-    If an assistant message has tool_calls but the next message is not a
-    matching tool-role message, synthesize a 'cancelled' tool result so the
-    API won't reject the message list.
+    Handles two corruption cases that cause OpenAI-compatible APIs to 400:
+    - assistant tool_calls with no following tool result → synthesizes a cancelled result
+    - role: 'tool' messages with no preceding matching tool_calls → dropped
 
     Returns a *new* list — does not mutate the input.
     """
     cleaned = []
+    pending_ids: set[str] = set()  # tool_call IDs declared but not yet satisfied
     i = 0
     while i < len(messages):
         msg = messages[i]
-        cleaned.append(msg)
         i += 1
+
+        if msg.get("role") == "tool":
+            tc_id = msg.get("tool_call_id", "")
+            if tc_id in pending_ids:
+                pending_ids.discard(tc_id)
+                cleaned.append(msg)
+            # else: orphan tool message — drop it
+            continue
+
+        cleaned.append(msg)
 
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             tc_ids = {tc["id"] for tc in msg["tool_calls"]}
+            pending_ids.update(tc_ids)
             # Consume any tool messages that follow that match these IDs
             while i < len(messages) and messages[i].get("role") == "tool":
                 tc_id = messages[i].get("tool_call_id", "")
-                if tc_id in tc_ids:
-                    tc_ids.discard(tc_id)
+                if tc_id in pending_ids:
+                    pending_ids.discard(tc_id)
                     cleaned.append(messages[i])
                     i += 1
                 else:
                     break
-            # Any unmatched tool_call IDs get a synthetic cancelled result
-            for missing_id in sorted(tc_ids):
+            # Synthesize cancelled results for this assistant's unsatisfied IDs
+            for missing_id in sorted(tc_ids & pending_ids):
+                pending_ids.discard(missing_id)
                 cleaned.append({
                     "role": "tool",
                     "tool_call_id": missing_id,

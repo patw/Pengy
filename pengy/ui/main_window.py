@@ -288,6 +288,7 @@ class MainWindow(QMainWindow):
             else:
                 self._handle_tool_confirm(response)
         elif response["type"] == "assistant_tool_calls":
+            self._yolo_this_turn = False
             self.current_chat["messages"].append(response["message"])
         elif response["type"] == "tool_result":
             self.chat_history.set_tool_running(False)
@@ -310,7 +311,7 @@ class MainWindow(QMainWindow):
         """Clean up worker thread."""
         if self.worker_thread and self.worker_thread.isRunning():
             self.worker_thread.quit()
-            self.worker_thread.wait()
+            self.worker_thread.wait(5000)  # don't freeze the UI if thread is stuck
         self.worker = None
         self.worker_thread = None
         self._stop_btn.hide()
@@ -356,7 +357,6 @@ class MainWindow(QMainWindow):
 
         self._stop_btn.hide()
         self.chat_history.set_thinking(False)
-        self.chat_history.set_tool_running(False)
 
         # Fix dangling tool_calls before saving so the chat isn't bricked
         if self.current_chat:

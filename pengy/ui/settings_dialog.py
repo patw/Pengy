@@ -1,5 +1,6 @@
 """Settings dialog for Pengy."""
 import json
+import threading
 import urllib.request
 
 from PySide6.QtWidgets import (
@@ -7,14 +8,19 @@ from PySide6.QtWidgets import (
     QTextEdit, QDialogButtonBox, QCheckBox, QLabel, QComboBox,
     QSpinBox, QPushButton, QHBoxLayout, QMessageBox,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 
 class SettingsDialog(QDialog):
     """Settings dialog for configuring API and system message."""
 
+    _models_fetched = Signal(list)
+    _models_fetch_failed = Signal(str)
+
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
+        self._models_fetched.connect(self._on_models_fetched)
+        self._models_fetch_failed.connect(self._on_models_fetch_failed)
         self.config = config
         self.setWindowTitle("Settings")
         self.setModal(True)
@@ -129,7 +135,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     def _fetch_models(self):
-        """Fetch available models from the endpoint's /v1/models."""
+        """Fetch available models from the endpoint's /v1/models (non-blocking)."""
         base_url = self.base_url_input.text().strip().rstrip("/")
         api_key = self.api_key_input.text()
         models_url = f"{base_url}/models"
@@ -137,39 +143,45 @@ class SettingsDialog(QDialog):
         self.fetch_models_btn.setEnabled(False)
         self.fetch_models_btn.setText("...")
 
-        try:
-            req = urllib.request.Request(models_url)
-            req.add_header("Authorization", f"Bearer {api_key}")
-            req.add_header("User-Agent", "PengyAgent/1.0")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-            model_ids = sorted(
-                m.get("id", "") for m in data.get("data", [])
-                if m.get("id")
-            )
-            if not model_ids:
-                QMessageBox.information(self, "No Models", "The endpoint returned an empty model list.")
-                return
+        def do_fetch():
+            try:
+                req = urllib.request.Request(models_url)
+                req.add_header("Authorization", f"Bearer {api_key}")
+                req.add_header("User-Agent", "PengyAgent/1.0")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode())
+                model_ids = sorted(
+                    m.get("id", "") for m in data.get("data", [])
+                    if m.get("id")
+                )
+                self._models_fetched.emit(model_ids)
+            except urllib.error.HTTPError as e:
+                self._models_fetch_failed.emit(
+                    f"HTTP {e.code} from {models_url}\n\nCheck your Base URL and API Key."
+                )
+            except Exception as e:
+                self._models_fetch_failed.emit(str(e))
 
-            current = self.model_combo.currentText()
-            self.model_combo.clear()
-            self.model_combo.addItems(model_ids)
-            if current in model_ids:
-                self.model_combo.setCurrentText(current)
-            elif model_ids:
-                self.model_combo.setCurrentText(model_ids[0])
+        threading.Thread(target=do_fetch, daemon=True).start()
 
-        except urllib.error.HTTPError as e:
-            QMessageBox.warning(
-                self, "Fetch Failed",
-                f"HTTP {e.code} from {models_url}\n\n"
-                f"Check your Base URL and API Key."
-            )
-        except Exception as e:
-            QMessageBox.warning(self, "Fetch Failed", str(e))
-        finally:
-            self.fetch_models_btn.setEnabled(True)
-            self.fetch_models_btn.setText("↻ Fetch")
+    def _on_models_fetched(self, model_ids: list):
+        self.fetch_models_btn.setEnabled(True)
+        self.fetch_models_btn.setText("↻ Fetch")
+        if not model_ids:
+            QMessageBox.information(self, "No Models", "The endpoint returned an empty model list.")
+            return
+        current = self.model_combo.currentText()
+        self.model_combo.clear()
+        self.model_combo.addItems(model_ids)
+        if current in model_ids:
+            self.model_combo.setCurrentText(current)
+        elif model_ids:
+            self.model_combo.setCurrentText(model_ids[0])
+
+    def _on_models_fetch_failed(self, error: str):
+        self.fetch_models_btn.setEnabled(True)
+        self.fetch_models_btn.setText("↻ Fetch")
+        QMessageBox.warning(self, "Fetch Failed", error)
 
     def get_config(self) -> dict:
         """Return updated configuration."""

@@ -7,11 +7,12 @@ from pengy.core import tools as _tools_mod
 
 
 def _run_tool(name: str, args: dict) -> str:
-    """Run a tool in a daemon thread, relying on subprocess-level timeouts.
+    """Run a tool in a daemon thread with an outer safety-net timeout.
 
-    The tools themselves (_run_bash, _run_python) enforce the tool_timeout
-    at the subprocess level with proper process-group cleanup.  This thread
-    exists purely for isolation so the caller can't block the event loop.
+    Subprocess-based tools (_run_bash, _run_python) have their own timeout
+    at the process level.  The outer join timeout here catches tools that lack
+    an internal deadline (e.g. read_file on a hung NFS mount, fetch_url
+    trickle) without requiring every tool to implement its own guard.
     """
     result: list = [None]
     exc: list = [None]
@@ -24,7 +25,11 @@ def _run_tool(name: str, args: dict) -> str:
 
     t = threading.Thread(target=_target, daemon=True)
     t.start()
-    t.join()  # wait forever — timeout is handled inside the tool
+    tool_timeout = _tools_mod._tool_timeout
+    outer = None if tool_timeout == -1 else tool_timeout + 30
+    t.join(timeout=outer)
+    if t.is_alive():
+        return f"Tool timed out (outer safety net after {outer}s)"
     if exc[0] is not None:
         return f"Tool error: {exc[0]}"
     return result[0]
@@ -45,8 +50,13 @@ class LLMClient:
             self._client = OpenAI(
                 base_url=self.base_url,
                 api_key=self.api_key,
+                timeout=120.0,
+                max_retries=0,
             )
         return self._client
+
+    def _reset_client(self):
+        self._client = None
 
     def chat(self, messages: list[dict], tool_confirmation: str = "none"):
         """
@@ -63,12 +73,16 @@ class LLMClient:
         accumulated_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         while True:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=current_messages,
-                tools=_tools_mod.TOOLS,
-                tool_choice="auto",
-            )
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=current_messages,
+                    tools=_tools_mod.TOOLS,
+                    tool_choice="auto",
+                )
+            except Exception:
+                self._reset_client()
+                raise
 
             # Accumulate token usage across all calls in this turn
             if response.usage:
