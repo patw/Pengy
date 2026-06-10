@@ -80,14 +80,21 @@ def _safe_json_load(path: Path) -> dict | list | None:
 
 
 def load_config() -> dict:
-    """Load configuration from JSON file, with corruption recovery."""
+    """Load configuration from JSON file, with corruption recovery.
+
+    On first run (no file exists), writes defaults to disk so the file
+    is immediately available for hand-editing.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     saved = _safe_json_load(CONFIG_FILE)
     if saved is not None and isinstance(saved, dict):
         config = {**DEFAULTS, **saved}
         _migrate_config(config, saved)
         return config
-    return DEFAULTS.copy()
+    # First run — persist defaults so the file exists for hand-editing
+    config = DEFAULTS.copy()
+    save_config(config)
+    return config
 
 
 def _migrate_config(config: dict, saved: dict) -> None:

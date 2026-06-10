@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from pengy.core.config import load_config, render_system_message
+from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
     load_chats, create_chat, save_chat, delete_chat,
@@ -249,8 +249,23 @@ class PengyCLI:
         elif cmd == "/load":
             self._cmd_load(args)
 
+        elif cmd == "/baseurl":
+            self._cmd_baseurl(args)
+
+        elif cmd == "/apikey":
+            self._cmd_apikey(args)
+
+        elif cmd == "/timeout":
+            self._cmd_timeout(args)
+
+        elif cmd == "/agent":
+            self._cmd_agent(args)
+
+        elif cmd == "/context-keep":
+            self._cmd_context_keep(args)
+
         elif cmd == "/system":
-            self._cmd_system()
+            self._cmd_system(args)
 
         elif cmd == "/delete":
             self._cmd_delete(args)
@@ -272,19 +287,28 @@ class PengyCLI:
 
         table.add_row("/help", "Show this help")
         table.add_row("/new", "Start a new chat")
-        table.add_row("/yolo [all|safe|none]", "Set tool confirmation: all (YOLO), safe (read-only), none")
         table.add_row("/config", "Show current configuration")
         table.add_row("/model <name>", "Change the model (e.g. /model gpt-4o)")
         table.add_row("/models", "Fetch available models from the endpoint")
+        table.add_row("/baseurl <url>", "Set the API base URL (e.g. /baseurl http://localhost:11434/v1)")
+        table.add_row("/apikey <key>", "Set the API key")
+        table.add_row("/timeout <sec>", "Set tool execution timeout in seconds")
+        table.add_row("/agent <string>", "Set the user agent string")
+        table.add_row("/context-keep <n>", "Set how many recent turns to keep when compacting")
+        table.add_row("/yolo [all|safe|none]", "Set tool confirmation: all (YOLO), safe (read-only), none")
+        table.add_row("/system [message...]", "Show or set the system message template")
+        table.add_row("/compact", "Compact context by eliding old tool results")
         table.add_row("/list", "List recent chats")
         table.add_row("/load <index>", "Load a chat by its /list index")
         table.add_row("/delete <index>", "Delete a chat by its /list index")
         table.add_row("/attach <path>", "Attach a text file to your next message")
-        table.add_row("/system", "Show the system message")
-        table.add_row("/compact", "Compact context by eliding old tool results")
         table.add_row("/quit, /exit", "Exit Pengy CLI")
 
         self.console.print(table)
+
+    def _save_config(self):
+        """Persist the current in-memory config to disk atomically."""
+        save_config(self.config)
 
     def _cmd_yolo(self, args: list[str]):
         modes = ["all", "safe", "none"]
@@ -297,6 +321,7 @@ class PengyCLI:
             current = modes[(idx + 1) % len(modes)]
 
         self.config["tool_confirmation"] = current
+        self._save_config()
         self.console.print(
             f"[green]✓ Tool Confirmation:[/green] [bold]{self._confirm_display()}[/bold]"
         )
@@ -324,6 +349,7 @@ class PengyCLI:
         new_model = args[0]
         old_model = self.config.get("model", "")
         self.config["model"] = new_model
+        self._save_config()
         self._update_llm_client()
         self.console.print(
             f"[green]✓ Model changed:[/green] {old_model} → [bold]{new_model}[/bold]"
@@ -456,7 +482,120 @@ class PengyCLI:
                 self.current_chat = create_chat()
                 self.console.print("[dim]New chat created.[/dim]")
 
-    def _cmd_system(self):
+    def _cmd_baseurl(self, args: list[str]):
+        """Set the API base URL."""
+        if not args:
+            self.console.print(
+                f"[dim]Current base URL:[/dim] {self.config.get('base_url', '?')}"
+            )
+            self.console.print("[dim]Usage: /baseurl <url> (e.g. /baseurl http://localhost:11434/v1)[/dim]")
+            return
+        new_url = args[0]
+        old_url = self.config.get("base_url", "")
+        self.config["base_url"] = new_url
+        self._save_config()
+        self._update_llm_client()
+        self.console.print(
+            f"[green]✓ Base URL changed:[/green] {old_url} → [bold]{new_url}[/bold]"
+        )
+
+    def _cmd_apikey(self, args: list[str]):
+        """Set the API key."""
+        if not args:
+            current = self.config.get("api_key", "")
+            masked = current[:4] + "••••" + current[-4:] if len(current) > 8 else "(not set)"
+            self.console.print(f"[dim]Current API key:[/dim] {masked}")
+            self.console.print("[dim]Usage: /apikey <key>[/dim]")
+            return
+        new_key = args[0]
+        self.config["api_key"] = new_key
+        self._save_config()
+        self._update_llm_client()
+        self.console.print(f"[green]✓ API key updated.[/green]")
+
+    def _cmd_timeout(self, args: list[str]):
+        """Set the tool execution timeout in seconds."""
+        if not args:
+            self.console.print(
+                f"[dim]Current timeout:[/dim] {self.config.get('tool_timeout', 60)}s"
+            )
+            self.console.print("[dim]Usage: /timeout <seconds>[/dim]")
+            return
+        try:
+            secs = int(args[0])
+        except ValueError:
+            self.console.print("[red]Invalid number. Usage: /timeout <seconds>[/red]")
+            return
+        if secs < 1:
+            self.console.print("[red]Timeout must be at least 1 second.[/red]")
+            return
+        old = self.config.get("tool_timeout", 60)
+        self.config["tool_timeout"] = secs
+        self._save_config()
+        tools.set_tool_timeout(secs)
+        self.console.print(
+            f"[green]✓ Timeout changed:[/green] {old}s → [bold]{secs}s[/bold]"
+        )
+
+    def _cmd_agent(self, args: list[str]):
+        """Set the user agent string."""
+        if not args:
+            self.console.print(
+                f"[dim]Current user agent:[/dim] {self.config.get('user_agent', '—')}"
+            )
+            self.console.print("[dim]Usage: /agent <string>[/dim]")
+            return
+        new_agent = args[0]
+        old_agent = self.config.get("user_agent", "")
+        self.config["user_agent"] = new_agent
+        self._save_config()
+        tools.set_user_agent(new_agent)
+        self.console.print(
+            f"[green]✓ User agent changed:[/green] {old_agent} → [bold]{new_agent}[/bold]"
+        )
+
+    def _cmd_context_keep(self, args: list[str]):
+        """Set how many recent turns to keep when compacting context."""
+        if not args:
+            self.console.print(
+                f"[dim]Current context keep turns:[/dim] {self.config.get('context_keep_turns', 0)}"
+            )
+            self.console.print("[dim]Usage: /context-keep <turns> (0 = keep all)[/dim]")
+            return
+        try:
+            turns = int(args[0])
+        except ValueError:
+            self.console.print("[red]Invalid number. Usage: /context-keep <turns>[/red]")
+            return
+        if turns < 0:
+            self.console.print("[red]Turns must be 0 or greater.[/red]")
+            return
+        old = self.config.get("context_keep_turns", 0)
+        self.config["context_keep_turns"] = turns
+        self._save_config()
+        self.console.print(
+            f"[green]✓ Context keep turns changed:[/green] {old} → [bold]{turns}[/bold]"
+        )
+
+    def _cmd_system(self, args: list[str]):
+        """Show or set the system message template."""
+        if args:
+            # Set a new system message from the arguments
+            new_template = " ".join(args)
+            self.config["system_message"] = new_template
+            self._save_config()
+            rendered = render_system_message(new_template)
+            self.console.print(
+                f"[green]✓ System message updated.[/green]"
+            )
+            self.console.print(Panel(
+                f"[bold]New template:[/bold]\n{new_template}\n\n[bold]Rendered:[/bold]\n{rendered}",
+                title="System Message",
+                border_style="green",
+            ))
+            return
+
+        # No arguments — show current system message
         template = self.config.get("system_message", "")
         rendered = render_system_message(template) if template else "(no system message)"
 
