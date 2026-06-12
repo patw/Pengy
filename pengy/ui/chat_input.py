@@ -1,13 +1,15 @@
 """Chat input widget for Pengy."""
 import mimetypes
+import os
+import tempfile
 from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget, QTextEdit, QHBoxLayout, QVBoxLayout,
     QPushButton, QLabel, QFileDialog, QMessageBox,
 )
-from PySide6.QtCore import Signal, Qt
-from PySide6.QtGui import QFont, QFontDatabase, QKeyEvent
+from PySide6.QtCore import Signal, Qt, QMimeData
+from PySide6.QtGui import QFont, QFontDatabase, QKeyEvent, QImage, QPixmap
 
 
 _IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
@@ -46,6 +48,7 @@ def _is_text_file(path: Path) -> bool:
 
 class _InputEdit(QTextEdit):
     submit_pressed = Signal()
+    image_pasted = Signal(Path)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,6 +71,23 @@ class _InputEdit(QTextEdit):
             }
         """)
         self.installEventFilter(self)
+
+    def insertFromMimeData(self, source: QMimeData):
+        if source.hasImage():
+            img_data = source.imageData()
+            if isinstance(img_data, QPixmap):
+                image = img_data.toImage()
+            elif isinstance(img_data, QImage):
+                image = img_data
+            else:
+                image = QImage(img_data)
+            if not image.isNull():
+                fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="pengy_clip_")
+                os.close(fd)
+                if image.save(tmp_path):
+                    self.image_pasted.emit(Path(tmp_path))
+                    return
+        super().insertFromMimeData(source)
 
     def eventFilter(self, obj, event):
         if obj is self and event.type() == QKeyEvent.Type.KeyRelease:
@@ -122,6 +142,7 @@ class ChatInputWidget(QWidget):
 
         self._edit = _InputEdit()
         self._edit.submit_pressed.connect(self._on_submit)
+        self._edit.image_pasted.connect(self._on_image_pasted)
         row_layout.addWidget(self._edit)
 
         layout.addWidget(input_row)
@@ -188,6 +209,11 @@ class ChatInputWidget(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._chips_row.hide()
+
+    def _on_image_pasted(self, path: Path):
+        if path not in self._attachments:
+            self._attachments.append(path)
+            self._add_chip(path)
 
     def _on_submit(self):
         text = self._edit.toPlainText().strip()
