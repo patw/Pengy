@@ -464,6 +464,7 @@ def _run_bash(command: str) -> str:
         proc = subprocess.Popen(
             command,
             shell=True,
+            stdin=subprocess.PIPE if stdin_input else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -480,7 +481,7 @@ def _run_bash(command: str) -> str:
 
         output = stdout or ""
         if stdin_input:
-            stderr = re.sub(r'^\[sudo\].*\n?', '', stderr or "", flags=re.MULTILINE).strip()
+            stderr = re.sub(r'^\[sudo[^]]*\].*\n?', '', stderr or "", flags=re.MULTILINE).strip()
         if stderr:
             output += "\n" + stderr
         if proc.returncode != 0:
