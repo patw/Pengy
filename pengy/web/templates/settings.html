@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+
+{% block title %}Settings — Pengy{% endblock %}
+
+{% block sidebar_chats %}
+{% for c in chats %}
+<a href="{{ url_for('chat_view', chat_id=c.id) }}"
+   class="chat-list-item"
+   data-chat-id="{{ c.id }}">
+  <i class="bi bi-chat-left-text small text-muted flex-shrink-0"></i>
+  <span class="chat-title">{{ c.title }}</span>
+</a>
+{% endfor %}
+{% endblock %}
+
+{% block main %}
+<div class="overflow-y-auto flex-grow-1 p-4">
+  <div class="mx-auto" style="max-width:640px">
+
+    {% if saved %}
+    <div class="alert alert-success alert-dismissible fade show py-2" role="alert">
+      <i class="bi bi-check-circle me-2"></i>Settings saved.
+      <button type="button" class="btn-close btn-close-sm" data-bs-dismiss="alert"></button>
+    </div>
+    {% endif %}
+
+    <h5 class="fw-bold mb-4">Settings</h5>
+
+    <form method="post">
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Base URL</label>
+        <input type="url" name="base_url" class="form-control"
+               value="{{ config.base_url }}"
+               placeholder="https://api.openai.com/v1">
+        <div class="form-text">OpenAI-compatible API endpoint</div>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">API Key</label>
+        <input type="password" name="api_key" class="form-control"
+               placeholder="Leave blank to keep current key"
+               autocomplete="new-password">
+        <div class="form-text">
+          Current: {{ "set" if config.api_key else "not set" }}
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Model</label>
+        <input type="text" name="model" class="form-control"
+               value="{{ config.model }}"
+               placeholder="gpt-4o">
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Tool Confirmation</label>
+        <select name="tool_confirmation" class="form-select">
+          <option value="none"
+            {% if config.tool_confirmation == 'none' %}selected{% endif %}>
+            Confirm every tool call
+          </option>
+          <option value="safe"
+            {% if config.tool_confirmation == 'safe' %}selected{% endif %}>
+            Auto-approve read-only tools (Safe)
+          </option>
+          <option value="all"
+            {% if config.tool_confirmation == 'all' %}selected{% endif %}>
+            YOLO — approve everything automatically
+          </option>
+        </select>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Tool Timeout (seconds)</label>
+        <input type="number" name="tool_timeout" class="form-control"
+               value="{{ config.tool_timeout }}" min="1" max="3600">
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Context Keep Turns</label>
+        <input type="number" name="context_keep_turns" class="form-control"
+               value="{{ config.context_keep_turns }}" min="0">
+        <div class="form-text">
+          Elide tool results older than N turns (0 = keep all)
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">User Agent</label>
+        <input type="text" name="user_agent" class="form-control"
+               value="{{ config.user_agent }}">
+      </div>
+
+      <div class="mb-4">
+        <label class="form-label fw-semibold">System Message Template</label>
+        <textarea name="system_message" class="form-control" rows="4"
+                  placeholder="You are a helpful assistant…">{{ config.system_message }}</textarea>
+        <div class="form-text">
+          Placeholders: <code>{date}</code>, <code>{username}</code>,
+          <code>{hostname}</code>, <code>{osinfo}</code>
+        </div>
+      </div>
+
+      <button type="submit" class="btn btn-primary">
+        <i class="bi bi-floppy me-1"></i>Save Settings
+      </button>
+      <a href="{{ url_for('index') }}" class="btn btn-outline-secondary ms-2">Cancel</a>
+    </form>
+  </div>
+</div>
+{% endblock %}

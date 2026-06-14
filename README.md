@@ -1,6 +1,6 @@
 # Pengy 🐧
 
-**A local-first AI agent with tools.** Desktop GUI **and** command-line — both backed by the same agent core, talking to any OpenAI-compatible API.
+**A local-first AI agent with tools.** Desktop GUI, web UI, **and** command-line — all backed by the same agent core, talking to any OpenAI-compatible API.
 
 [![PyPI - Version](https://img.shields.io/pypi/v/pengy)](https://pypi.org/project/pengy/)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/pengy)](https://pypi.org/project/pengy/)
@@ -12,13 +12,13 @@
 
 Pengy is an LLM agent that runs on your own machine. It connects to OpenAI, Ollama, vLLM, Groq, OpenRouter, or any local endpoint, and gives the model a set of tools to operate on your filesystem, run code, search the web, and fetch URLs — all with your approval.
 
-Two interfaces, one agent:
+Three interfaces, one agent:
 
-| **🐧 Pengy Desktop** | **🐧 Pengy CLI** |
-|---|---|
-| Qt6 GUI with markdown rendering, multi-session sidebar, file attachments | Terminal REPL with slash commands, single-shot mode for scripting |
+| **🐧 Pengy Desktop** | **🐧 Pengy CLI** | **🐧 Pengy Web** |
+|---|---|---|
+| Qt6 GUI with markdown rendering, multi-session sidebar, file attachments | Terminal REPL with slash commands, single-shot mode for scripting | Flask web UI with Bootstrap, responsive layout, SSE live streaming |
 
-Both share the same core — same tools, same chat history, same config. Use whichever fits your flow.
+All three share the same core — same tools, same chat history, same config. Use whichever fits your flow.
 
 ---
 
@@ -27,7 +27,7 @@ Both share the same core — same tools, same chat history, same config. Use whi
 ### Install
 
 ```bash
-# Everything (GUI + CLI)
+# Everything (GUI + CLI + Web)
 pip install pengy[all]
 
 # CLI only
@@ -35,6 +35,9 @@ pip install pengy[cli]
 
 # GUI only
 pip install pengy[gui]
+
+# Web UI only
+pip install pengy[web]
 
 # Minimum (no GUI, no CLI — use as a library)
 pip install pengy
@@ -59,6 +62,21 @@ pengy-cli "What is the capital of France?"
 pengy-cli "List all files in /tmp"
 ```
 
+### Web UI
+
+```bash
+# Localhost only (default)
+pengy-web
+
+# Listen on all interfaces (for nginx reverse proxy)
+pengy-web --host 0.0.0.0
+
+# Custom port
+pengy-web --host 0.0.0.0 --port 8080
+```
+
+The web UI is designed for single-user personal use. For remote access, put it behind nginx with SSL and HTTP basic auth — Pengy itself has no authentication.
+
 ---
 
 ## Features
@@ -70,8 +88,9 @@ pengy-cli "List all files in /tmp"
 - **Context management** — Elide old tool results to save context window space; configurable per-chat
 - **Token usage display** — See prompt/completion token counts after every turn (GUI sidebar + CLI footer)
 - **Model discovery** — Fetch available models from your endpoint with one click or `/models` command
-- **Multi-session** — Create, switch, and delete chat sessions; history saved locally as JSON
+- **Multi-session** — Create, switch, and delete chat sessions; history saved locally as JSON; shared across all interfaces
 - **File attachments** — GUI: attach files from the input bar; CLI: use `/attach <path>` or `@path` inline syntax
+- **Web UI** — Responsive Bootstrap interface served by Flask; SSE live streaming; works great on mobile
 - **Slash commands** (CLI) — `/new`, `/load`, `/models`, `/yolo`, `/model`, `/list`, `/delete`, `/attach`, `/compact`, and more
 - **Templated system message** — Auto-fills `{date}`, `{username}`, `{hostname}`, `{osinfo}` at send time
 - **Persistent config** — Settings and chat history live in `~/.config/pengy/`, shared between GUI and CLI
@@ -87,7 +106,8 @@ pengy-cli "List all files in /tmp"
 ## Configuration
 
 **Desktop:** Click ⚙ Settings in the sidebar.  
-**CLI:** Run `/config` to view, `/model <name>` to switch models.
+**CLI:** Run `/config` to view, `/model <name>` to switch models.  
+**Web:** Click ⚙ in the top-right navbar.
 
 | Setting | Description |
 |---------|-------------|
@@ -146,13 +166,20 @@ pengy/
 │   ├── chat_manager.py  # Chat session CRUD
 │   ├── llm_client.py    # API client (generator protocol for tool handling)
 │   └── tools.py         # Tool definitions and execution
-└── ui/
-    ├── main_window.py   # Main window; wires all signals
-    ├── chat_history.py  # Sidebar chat list + quick settings
-    ├── chat_view.py     # Markdown chat renderer
-    ├── chat_input.py    # Input field + file attachment
-    ├── chat_worker.py   # Background thread driving the LLM generator
-    └── settings_dialog.py  # Settings dialog
+├── ui/
+│   ├── main_window.py   # Main window; wires all signals
+│   ├── chat_history.py  # Sidebar chat list + quick settings
+│   ├── chat_view.py     # Markdown chat renderer
+│   ├── chat_input.py    # Input field + file attachment
+│   ├── chat_worker.py   # Background thread driving the LLM generator
+│   └── settings_dialog.py  # Settings dialog
+└── web/
+    ├── app.py           # Flask application (routes, WebWorker, SSE)
+    ├── main.py          # Web entry point (argparse, app.run)
+    └── templates/
+        ├── base.html    # Navbar, sidebar, Bootstrap layout
+        ├── chat.html    # Chat view + JS SSE client
+        └── settings.html # Settings form
 ```
 
 ---
@@ -181,8 +208,9 @@ python -m pytest tests/ -v
 | Package | Purpose |
 |---------|---------|
 | PySide6 | Qt6 GUI framework |
+| flask | Web UI framework |
 | openai | OpenAI-compatible API client |
-| markdown | Markdown rendering |
-| pygments | Syntax highlighting |
+| markdown | Markdown rendering (GUI + Web) |
+| pygments | Syntax highlighting (GUI + Web) |
 | ddgs | DuckDuckGo web search |
 | rich | CLI formatting (tables, panels, markdown) |

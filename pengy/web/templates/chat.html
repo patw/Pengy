@@ -1,0 +1,482 @@
+{% extends "base.html" %}
+
+{% block title %}{{ chat.title }} — Pengy{% endblock %}
+
+{% block extra_style %}
+{{ pygments_css | safe }}
+{% endblock %}
+
+{% block navbar_center %}
+<span class="text-muted small d-none d-sm-inline">{{ config.model }}</span>
+<span class="badge
+  {% if config.tool_confirmation == 'all' %}bg-warning text-dark
+  {% elif config.tool_confirmation == 'safe' %}bg-info text-dark
+  {% else %}bg-secondary{% endif %} small">
+  {{ {'all':'YOLO','safe':'Safe','none':'Confirm'}.get(config.tool_confirmation, 'Confirm') }}
+</span>
+{% endblock %}
+
+{% block sidebar_chats %}
+{% for c in chats %}
+<a href="{{ url_for('chat_view', chat_id=c.id) }}"
+   class="chat-list-item {% if c.id == chat.id %}active{% endif %}"
+   data-chat-id="{{ c.id }}">
+  <i class="bi bi-chat-left-text small text-muted flex-shrink-0"></i>
+  <span class="chat-title">{{ c.title }}</span>
+  <form action="{{ url_for('chat_delete', chat_id=c.id) }}" method="post"
+        style="display:inline" onclick="event.stopPropagation()">
+    <button type="submit" class="delete-btn" title="Delete chat"
+            onclick="return confirm('Delete this chat?')">
+      <i class="bi bi-x"></i>
+    </button>
+  </form>
+</a>
+{% endfor %}
+{% endblock %}
+
+{% block main %}
+<!-- Messages area -->
+<div class="messages-area" id="messagesArea">
+
+  {% if not turns %}
+  <div class="text-center text-muted py-5">
+    <div style="font-size:2.5rem">🐧</div>
+    <div class="mt-2">Start a conversation</div>
+  </div>
+  {% endif %}
+
+  {% for turn in turns %}
+
+  {% if turn.type == "user" %}
+  <div class="msg-user">
+    <div class="bubble-user">{{ turn.content }}</div>
+  </div>
+
+  {% elif turn.type == "assistant" %}
+  <div class="msg-assistant">
+    <div class="bubble-assistant">
+      <div class="markdown-body">{{ turn.html | safe }}</div>
+    </div>
+  </div>
+
+  {% elif turn.type == "tool_use" %}
+  <div class="msg-tool">
+    {% for ev in turn.events %}
+    <div class="tool-card mb-1 {% if ev.declined %}declined{% elif ev.result is not none %}done{% endif %}"
+         id="{{ ev.safe_id }}">
+      <div class="tool-header"
+           data-bs-toggle="collapse"
+           data-bs-target="#body-{{ ev.safe_id }}">
+        <i class="bi bi-gear-fill text-warning" style="font-size:0.8rem"></i>
+        <code class="fw-semibold text-warning">{{ ev.name }}</code>
+        {% if ev.declined %}
+          <span class="badge bg-danger ms-1">declined</span>
+        {% elif ev.result is not none %}
+          <span class="badge bg-success ms-1">done</span>
+        {% else %}
+          <span class="badge bg-secondary ms-1">?</span>
+        {% endif %}
+        <i class="bi bi-chevron-down ms-auto" style="font-size:0.7rem"></i>
+      </div>
+      <div class="collapse" id="body-{{ ev.safe_id }}">
+        <pre class="tool-args">{{ ev.args | tojson(indent=2) }}</pre>
+        {% if ev.result is not none %}
+          {% if ev.declined %}
+          <div class="text-danger small mt-1 ps-1">Declined by user</div>
+          {% else %}
+          <pre class="tool-output">{{ ev.result[:3000] }}{{ "…" if ev.result | length > 3000 else "" }}</pre>
+          {% endif %}
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% endif %}
+  {% endfor %}
+
+</div>
+
+<!-- Input area -->
+<div class="input-area">
+  <form id="messageForm" class="d-flex gap-2" novalidate>
+    <textarea id="messageInput"
+              class="form-control"
+              rows="1"
+              placeholder="Message… (Enter to send, Shift+Enter for newline)"
+              autocomplete="off"
+              autofocus></textarea>
+    <button type="submit" id="sendBtn" class="btn btn-primary align-self-end">
+      <i class="bi bi-send-fill"></i>
+    </button>
+  </form>
+</div>
+
+<!-- ── Tool Confirmation Modal ───────────────────────────────── -->
+<div class="modal fade" id="confirmModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title">
+          <i class="bi bi-gear-fill text-warning me-2"></i>
+          Tool Request: <code id="confirmToolName"></code>
+        </h6>
+      </div>
+      <div class="modal-body">
+        <pre id="confirmToolArgs" class="tool-args" style="max-height:300px"></pre>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm btn-outline-danger" onclick="confirmTool(false)">
+          <i class="bi bi-x-circle me-1"></i>Decline
+        </button>
+        <button class="btn btn-sm btn-outline-warning" onclick="confirmTool(true, true)">
+          <i class="bi bi-lightning-fill me-1"></i>Yes to All This Turn
+        </button>
+        <button class="btn btn-sm btn-success" onclick="confirmTool(true)">
+          <i class="bi bi-check-circle me-1"></i>Execute
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Sudo Password Modal ───────────────────────────────────── -->
+<div class="modal fade" id="sudoModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title">
+          <i class="bi bi-shield-lock text-warning me-2"></i>sudo password
+        </h6>
+      </div>
+      <div class="modal-body">
+        <input type="password" id="sudoPasswordInput"
+               class="form-control" placeholder="Enter password…">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm btn-outline-secondary" onclick="submitSudo(null)">Cancel</button>
+        <button class="btn btn-sm btn-warning" onclick="submitSudo()">Submit</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CHAT_ID = {{ chat.id | tojson }};
+let isProcessing = false;
+let eventSource = null;
+let pendingToolCallId = null;
+let thinkingEl = null;
+let confirmModal, sudoModal;
+
+document.addEventListener('DOMContentLoaded', () => {
+  scrollToBottom();
+  confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+  sudoModal    = new bootstrap.Modal(document.getElementById('sudoModal'));
+
+  document.getElementById('sudoPasswordInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') submitSudo();
+  });
+});
+
+// ── Helpers ──────────────────────────────────────────────────
+
+function scrollToBottom() {
+  const area = document.getElementById('messagesArea');
+  area.scrollTop = area.scrollHeight;
+}
+
+function escHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+function safeId(toolCallId) {
+  return 'tc_' + toolCallId.replace(/[^a-zA-Z0-9]/g, '');
+}
+
+// ── Processing state ─────────────────────────────────────────
+
+function setProcessing(val) {
+  isProcessing = val;
+  document.getElementById('messageInput').disabled = val;
+  document.getElementById('sendBtn').disabled = val;
+  if (!val) document.getElementById('messageInput').focus();
+}
+
+// ── Thinking indicator ────────────────────────────────────────
+
+function showThinking() {
+  hideThinking();
+  thinkingEl = document.createElement('div');
+  thinkingEl.className = 'msg-thinking';
+  thinkingEl.innerHTML =
+    '<div class="spinner-border spinner-border-sm" role="status"></div>' +
+    '<span>Thinking…</span>';
+  document.getElementById('messagesArea').appendChild(thinkingEl);
+  scrollToBottom();
+}
+
+function hideThinking() {
+  if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+}
+
+// ── Send ──────────────────────────────────────────────────────
+
+function doSend() {
+  if (isProcessing) return;
+  const input = document.getElementById('messageInput');
+  const content = input.value.trim();
+  if (!content) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+
+  // Remove empty-state placeholder if present
+  const placeholder = document.querySelector('#messagesArea .text-center.text-muted');
+  if (placeholder) placeholder.remove();
+
+  appendUserMessage(content);
+  setProcessing(true);
+  showThinking();
+
+  fetch(`/chat/${CHAT_ID}/send`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content}),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.title) {
+      const el = document.querySelector(`[data-chat-id="${CHAT_ID}"] .chat-title`);
+      if (el) el.textContent = data.title;
+      document.title = data.title + ' — Pengy';
+    }
+    openSSE();
+  })
+  .catch(err => {
+    console.error('Send error:', err);
+    hideThinking();
+    appendError('Failed to send: ' + err);
+    setProcessing(false);
+  });
+}
+
+// Prevent native form submission in all cases; delegate to doSend().
+document.getElementById('messageForm').addEventListener('submit', e => {
+  e.preventDefault();
+  doSend();
+});
+
+document.getElementById('messageInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    doSend();  // call directly — no synthetic submit event needed
+  }
+});
+
+document.getElementById('messageInput').addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 180) + 'px';
+});
+
+// ── SSE ───────────────────────────────────────────────────────
+
+function openSSE() {
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  eventSource = new EventSource(`/chat/${CHAT_ID}/stream`);
+  eventSource.onmessage = e => handleEvent(JSON.parse(e.data));
+  eventSource.onerror = () => {
+    eventSource.close(); eventSource = null;
+    hideThinking();
+    setProcessing(false);
+  };
+}
+
+function handleEvent(data) {
+  switch (data.type) {
+
+    case 'tool_request':
+      hideThinking();
+      appendToolRequest(data);
+      if (!data.auto_approved) {
+        pendingToolCallId = data.tool_call_id;
+        document.getElementById('confirmToolName').textContent = data.name;
+        document.getElementById('confirmToolArgs').textContent =
+          JSON.stringify(data.args, null, 2);
+        confirmModal.show();
+      } else {
+        showThinking();
+      }
+      break;
+
+    case 'tool_result':
+      hideThinking();
+      updateToolResult(data);
+      showThinking();
+      break;
+
+    case 'final_response':
+      hideThinking();
+      appendAssistantMessage(data.html, data.usage);
+      eventSource.close(); eventSource = null;
+      setProcessing(false);
+      break;
+
+    case 'sudo_request':
+      hideThinking();
+      document.getElementById('sudoPasswordInput').value = '';
+      sudoModal.show();
+      setTimeout(() => document.getElementById('sudoPasswordInput').focus(), 300);
+      break;
+
+    case 'error':
+      hideThinking();
+      appendError(data.message || 'Unknown error');
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      setProcessing(false);
+      break;
+  }
+}
+
+// ── DOM builders ─────────────────────────────────────────────
+
+function appendUserMessage(content) {
+  const el = document.createElement('div');
+  el.className = 'msg-user';
+  el.innerHTML = `<div class="bubble-user">${escHtml(content)}</div>`;
+  document.getElementById('messagesArea').appendChild(el);
+  scrollToBottom();
+}
+
+function appendToolRequest(data) {
+  const sid = safeId(data.tool_call_id);
+  const el = document.createElement('div');
+  el.className = 'msg-tool';
+  el.innerHTML = `
+    <div class="tool-card mb-1" id="${sid}">
+      <div class="tool-header"
+           data-bs-toggle="collapse" data-bs-target="#body-${sid}">
+        <i class="bi bi-gear-fill text-warning" style="font-size:.8rem"></i>
+        <code class="fw-semibold text-warning">${escHtml(data.name)}</code>
+        <span class="badge bg-secondary ms-1" id="badge-${sid}">
+          ${data.auto_approved ? 'running…' : 'pending'}
+        </span>
+        <i class="bi bi-chevron-down ms-auto" style="font-size:.7rem"></i>
+      </div>
+      <div class="collapse" id="body-${sid}">
+        <pre class="tool-args">${escHtml(JSON.stringify(data.args, null, 2))}</pre>
+        <div id="result-${sid}">
+          <span class="text-muted small">${data.auto_approved ? 'Running…' : 'Awaiting confirmation…'}</span>
+        </div>
+      </div>
+    </div>`;
+  document.getElementById('messagesArea').appendChild(el);
+  scrollToBottom();
+}
+
+function updateToolResult(data) {
+  const sid = safeId(data.tool_call_id);
+
+  const card = document.getElementById(sid);
+  if (card) {
+    card.classList.remove('declined', 'done');
+    card.classList.add(data.declined ? 'declined' : 'done');
+    const badge = document.getElementById(`badge-${sid}`);
+    if (badge) {
+      badge.className = `badge ms-1 ${data.declined ? 'bg-danger' : 'bg-success'}`;
+      badge.textContent = data.declined ? 'declined' : 'done';
+    }
+  }
+
+  const resultArea = document.getElementById(`result-${sid}`);
+  if (resultArea) {
+    if (data.declined) {
+      resultArea.innerHTML = '<div class="text-danger small mt-1 ps-1">Declined by user</div>';
+    } else {
+      resultArea.innerHTML = `<pre class="tool-output">${escHtml(data.content)}</pre>`;
+    }
+  }
+  scrollToBottom();
+}
+
+function appendAssistantMessage(html, usage) {
+  const el = document.createElement('div');
+  el.className = 'msg-assistant';
+  let usageHtml = '';
+  if (usage && (usage.prompt_tokens || usage.completion_tokens)) {
+    const tot = (usage.prompt_tokens || 0) + (usage.completion_tokens || 0);
+    usageHtml = `<div class="usage-line">
+      ${(usage.prompt_tokens||0).toLocaleString()} in /
+      ${(usage.completion_tokens||0).toLocaleString()} out
+      (${tot.toLocaleString()} total)
+    </div>`;
+  }
+  el.innerHTML = `
+    <div class="bubble-assistant">
+      <div class="markdown-body">${html || '<em class="text-muted">(empty response)</em>'}</div>
+      ${usageHtml}
+    </div>`;
+  document.getElementById('messagesArea').appendChild(el);
+  scrollToBottom();
+}
+
+function appendError(message) {
+  const el = document.createElement('div');
+  el.className = 'mb-3';
+  el.innerHTML = `<div class="alert alert-danger py-2 mb-0"><i class="bi bi-exclamation-triangle me-2"></i>${escHtml(message)}</div>`;
+  document.getElementById('messagesArea').appendChild(el);
+  scrollToBottom();
+}
+
+// ── Tool confirmation ────────────────────────────────────────
+
+function confirmTool(confirmed, yoloTurn = false) {
+  confirmModal.hide();
+  if (!pendingToolCallId) return;
+
+  const sid = safeId(pendingToolCallId);
+  const badge = document.getElementById(`badge-${sid}`);
+  if (badge) {
+    if (confirmed) {
+      badge.className = 'badge ms-1 ' + (yoloTurn ? 'bg-warning text-dark' : 'bg-secondary');
+      badge.textContent = yoloTurn ? 'yolo' : 'running…';
+    } else {
+      badge.className = 'badge ms-1 bg-danger';
+      badge.textContent = 'declined';
+    }
+  }
+
+  fetch(`/chat/${CHAT_ID}/confirm`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({confirmed, tool_call_id: pendingToolCallId, yolo_turn: yoloTurn}),
+  });
+
+  if (confirmed) showThinking();
+
+  pendingToolCallId = null;
+}
+
+// ── Sudo ─────────────────────────────────────────────────────
+
+function submitSudo(override) {
+  sudoModal.hide();
+  const password = override !== undefined ? override
+    : document.getElementById('sudoPasswordInput').value || null;
+  document.getElementById('sudoPasswordInput').value = '';
+
+  fetch(`/chat/${CHAT_ID}/sudo`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password}),
+  });
+
+  showThinking();
+}
+</script>
+{% endblock %}

@@ -8,8 +8,9 @@ Pengy is a local-first AI agent application that connects to any OpenAI-compatib
 |-----------|------------|-------------|
 | **Desktop GUI** | `pengy/main.py` | Qt6 three-pane chat with markdown rendering, file attachments, multi-session sidebar |
 | **CLI** | `pengy/cli/main.py` | Terminal REPL with slash commands or single-shot mode for scripting |
+| **Web UI** | `pengy/web/main.py` | Flask server-side-rendered chat; SSE streaming; tool confirmation modals; responsive Bootstrap layout |
 
-Both write to the same `~/.config/pengy/` directory — settings and chat history are shared.
+All three write to the same `~/.config/pengy/` directory — settings and chat history are shared.
 
 ---
 
@@ -18,8 +19,10 @@ Both write to the same `~/.config/pengy/` directory — settings and chat histor
 - **Language:** Python 3.10+
 - **GUI Framework:** PySide6 (LGPL)
 - **CLI Framework:** `rich` (tables, panels, markdown rendering, prompts)
+- **Web Framework:** Flask (threaded dev server; SSE streaming responses)
 - **LLM Client:** `openai` Python SDK (non-streaming)
-- **Markdown Rendering:** `markdown` + `pygments` (syntax highlighting, desktop); `rich.markdown` (CLI)
+- **Markdown Rendering:** `markdown` + `pygments` (syntax highlighting, desktop + web); `rich.markdown` (CLI)
+- **Web UI:** Bootstrap 5.3 (responsive layout, light theme, offcanvas sidebar)
 - **Web Search:** `ddgs` (DuckDuckGo)
 - **Storage:** JSON files in `~/.config/pengy/`
 
@@ -40,13 +43,21 @@ pengy/
 │   ├── chat_manager.py        # Chat session CRUD
 │   ├── llm_client.py          # OpenAI-compatible API client (generator protocol)
 │   └── tools.py               # Tool schemas (TOOLS), execution (execute_tool), sudo provider
-└── ui/
-    ├── main_window.py         # 3-pane main window; wires all signals
-    ├── chat_history.py        # Left sidebar — chat list + quick settings panel
-    ├── chat_view.py           # Right-top — markdown chat renderer (QTextBrowser)
-    ├── chat_input.py          # Right-bottom — input field + attachment button
-    ├── chat_worker.py         # QThread worker driving the LLM generator
-    └── settings_dialog.py     # Settings modal dialog
+├── ui/
+│   ├── main_window.py         # 3-pane main window; wires all signals
+│   ├── chat_history.py        # Left sidebar — chat list + quick settings panel
+│   ├── chat_view.py           # Right-top — markdown chat renderer (QTextBrowser)
+│   ├── chat_input.py          # Right-bottom — input field + attachment button
+│   ├── chat_worker.py         # QThread worker driving the LLM generator
+│   └── settings_dialog.py     # Settings modal dialog
+└── web/
+    ├── __init__.py            # Package marker
+    ├── app.py                 # Flask app — routes, WebWorker, SSE streaming
+    ├── main.py                # Web entry point (argparse: --host, --port, --debug)
+    └── templates/
+        ├── base.html          # Bootstrap 5.3 base — navbar, offcanvas sidebar, CSS
+        ├── chat.html          # Chat view — server-rendered history + SSE live updates
+        └── settings.html      # Settings form
 ```
 
 ### Core Package (`pengy/core/`)
@@ -67,6 +78,10 @@ Qt6 widgets wired together in `main_window.py`. See [Desktop UI Layout](#desktop
 ### CLI Package (`pengy/cli/`)
 
 Terminal interface built on `rich`. See [CLI](#cli) section below for details.
+
+### Web Package (`pengy/web/`)
+
+Flask server-side-rendered interface. See [Web UI](#web-ui) section below for details.
 
 ---
 
@@ -178,6 +193,100 @@ Built on `rich`:
 - **Config display:** `rich.Table` with setting/value columns
 - **Sudo password:** `Prompt.ask(..., password=True)` — masked input
 - **"Thinking…" indicator:** Overwritten with `\r` so the cursor sits on the same line
+
+---
+
+## Web UI
+
+The web interface is a single-user Flask application intended to be run on a personal server and accessed remotely (e.g. from a phone). SSL and authentication are expected to be handled by a reverse proxy (nginx).
+
+### Entry Points
+
+```bash
+pengy-web                            # localhost:5000
+pengy-web --host 0.0.0.0             # all interfaces (for nginx reverse proxy)
+pengy-web --host 0.0.0.0 --port 8080
+```
+
+### Layout
+
+```
+┌──navbar: 🐧 Pengy  [model] [Confirm badge]  [⚙]──────────┐
+│                                                             │
+│  ┌─sidebar (260px)─┐  ┌─chat area──────────────────────┐  │
+│  │  [+ New Chat]   │  │  message history (scrollable)  │  │
+│  │                 │  │                                │  │
+│  │  Chat 1   [×]  │  │  User bubble (right-aligned)   │  │
+│  │  Chat 2   [×]  │  │  🔧 tool card (collapsed)       │  │
+│  │  Chat 3   [×]  │  │  Assistant bubble (markdown)   │  │
+│  └─────────────────┘  │                                │  │
+│   (offcanvas on mob.) │  ┌──input + [Send]────────────┐│  │
+│                        │  └────────────────────────────┘│  │
+│                        └────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **Sidebar** — 260 px fixed column on md+ screens; offcanvas drawer on mobile. Lists all chats with delete button; "New Chat" button at top.
+- **Chat area** — Server-rendered message history on page load; SSE appends new content live during generation.
+- **Input** — Auto-expanding textarea; Enter to send, Shift+Enter for newline.
+- **Navbar** — Shows current model and tool confirmation mode badge; gear icon links to settings.
+
+### Message Rendering
+
+| Message type | Appearance |
+|---|---|
+| User | Right-aligned rounded bubble |
+| Assistant | Left-aligned bubble, full markdown + syntax highlighting (Pygments `friendly` style) |
+| Tool request | Collapsed accordion card with amber left border; click header to expand args |
+| Tool result | Injected into card body on completion; green border = done, red = declined |
+| Thinking | Spinner with "Thinking…" text, removed when response arrives |
+
+### WebWorker
+
+`WebWorker` mirrors the GUI's `ChatWorker` pattern. It drives `LLMClient.chat()` in a daemon thread and communicates with the SSE endpoint via a `queue.Queue`. For tool confirmation it blocks on a `threading.Event` until the browser POSTs `/confirm`. For sudo it blocks similarly until the browser POSTs `/sudo`.
+
+The worker remains in the `_workers` dict until the SSE endpoint has drained its event queue, preventing a race condition where fast failures (e.g. bad API key) would be lost before the browser's SSE connection opened.
+
+### Routes
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Redirect to most recent chat (or create new) |
+| POST | `/chat/new` | Create a new chat session |
+| GET | `/chat/<id>` | Render chat page (server-side history) |
+| POST | `/chat/<id>/send` | Append user message, start WebWorker |
+| GET | `/chat/<id>/stream` | SSE endpoint — streams events until final response |
+| POST | `/chat/<id>/confirm` | Unblock tool confirmation (confirmed/declined/yolo) |
+| POST | `/chat/<id>/sudo` | Provide sudo password to blocked worker |
+| POST | `/chat/<id>/delete` | Delete chat and redirect to index |
+| GET/POST | `/settings` | View/update all config fields |
+
+### SSE Event Types
+
+| Type | Payload | Browser action |
+|------|---------|---------------|
+| `tool_request` | `name`, `args`, `auto_approved` | Append tool card; if not auto-approved, show confirmation modal |
+| `tool_result` | `content`, `declined` | Update tool card body and badge |
+| `final_response` | `html`, `usage` | Append assistant bubble |
+| `sudo_request` | — | Show sudo password modal |
+| `error` | `message` | Append error alert, re-enable input |
+| `keepalive` | — | SSE comment (`: keepalive`); browser ignores |
+
+### Tool Confirmation Flow (Web)
+
+```
+SSE sends tool_request (auto_approved=false)
+       │
+       ▼
+Browser shows Bootstrap modal (tool name + args JSON)
+       │
+       ├── Execute              → POST /confirm {confirmed: true}
+       ├── Yes to all this turn → POST /confirm {confirmed: true, yolo_turn: true}
+       └── Decline              → POST /confirm {confirmed: false}
+              │
+              ▼
+       WebWorker._confirm_event is set → generator resumes
+```
 
 ---
 
