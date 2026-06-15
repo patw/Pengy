@@ -52,6 +52,7 @@ class LLMClient:
                 api_key=self.api_key,
                 timeout=300.0,
                 max_retries=0,
+                default_headers={"api-key": self.api_key},
             )
         return self._client
 

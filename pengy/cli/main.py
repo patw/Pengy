@@ -365,6 +365,7 @@ class PengyCLI:
         try:
             req = urllib.request.Request(models_url)
             req.add_header("Authorization", f"Bearer {api_key}")
+            req.add_header("api-key", api_key)
             req.add_header("User-Agent", self.config.get("user_agent", "PengyAgent/1.0"))
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
