@@ -139,6 +139,27 @@ Pengy gives the LLM these tools to operate on your machine:
 
 ---
 
+## Skills
+
+The 11 built-in tools cover the basics, but Pengy is designed to be extended with **skills** — your own custom instructions and scripts stored as plain markdown files.
+
+Skills are not a plugin system. There is no SDK, no manifest file, no packaging. A skill is just a `skillname/skillname_skill.md` file with instructions Pengy can read, optionally backed by a bash or Python script. You point Pengy at a directory of these, and it uses them automatically.
+
+This means your Pengy can do whatever you need it to:
+- Fetch weather from an API
+- Control devices on your home network
+- Query your local databases
+- Generate reports from your own data
+- Run system administration tasks
+- Send notifications, emails, or messages
+- Anything you can describe in a prompt and a script
+
+Skills are also self-authoring — you can ask Pengy to create new skills for you, write the markdown, write the script, and update the skill index, all in one conversation.
+
+**📖 Read the full guide:** [`skills/README.md`](skills/README.md) — covers the philosophy, how skills work, 4 complete examples with code, how to make your own, and a call to action to build your first skill.
+
+---
+
 ## API Compatibility
 
 | Service | Base URL |
