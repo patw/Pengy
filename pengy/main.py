@@ -26,7 +26,7 @@ def main():
     from pengy.core.config import load_config
     from pengy.ui.main_window import MainWindow
 
-    _ICON_PATH = Path(__file__).parent / "assets" / "icon.svg"
+    _ICON_PATH = Path(__file__).parent / "assets" / "icon.png"
 
     scale = load_config().get("ui_scale", 100)
     if scale != 100:
