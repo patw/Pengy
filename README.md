@@ -26,18 +26,39 @@ All three share the same core — same tools, same chat history, same config. Us
 
 ### Install
 
+Pengy requires **Python 3.10+**. On macOS, the default `/usr/bin/python3` may be too old, so the recommended install method is [`uv`](https://docs.astral.sh/uv/), which can install Pengy with a compatible Python automatically:
+
 ```bash
+# Install uv if needed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Everything (GUI + CLI + Web)
-pip install pengy[all]
+uv tool install "pengy[all]"
 
 # CLI only
-pip install pengy[cli]
+uv tool install "pengy[cli]"
 
 # GUI only
-pip install pengy[gui]
+uv tool install "pengy[gui]"
 
 # Web UI only
-pip install pengy[web]
+uv tool install "pengy[web]"
+```
+
+If you already have Python 3.10+ available, `pip` also works:
+
+```bash
+# Everything (GUI + CLI + Web)
+pip install "pengy[all]"
+
+# CLI only
+pip install "pengy[cli]"
+
+# GUI only
+pip install "pengy[gui]"
+
+# Web UI only
+pip install "pengy[web]"
 
 # Minimum (no GUI, no CLI — use as a library)
 pip install pengy
@@ -212,6 +233,12 @@ pengy/
 ```bash
 git clone https://github.com/patw/pengy.git
 cd pengy
+uv sync --extra all
+```
+
+Or, with Python 3.10+ already available:
+
+```bash
 pip install -e ".[all]"
 ```
 
