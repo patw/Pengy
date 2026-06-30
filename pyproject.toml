@@ -65,10 +65,10 @@ pengy-cli = "pengy.cli.main:main"
 pengy-web = "pengy.web.main:main"
 
 [project.urls]
-Homepage = "https://github.com/patw/pengy"
-Repository = "https://github.com/patw/pengy"
-"Bug Tracker" = "https://github.com/patw/pengy/issues"
-"Changelog" = "https://github.com/patw/pengy/releases"
+Homepage = "https://github.com/patw/Pengy"
+Repository = "https://github.com/patw/Pengy"
+"Bug Tracker" = "https://github.com/patw/Pengy/issues"
+"Changelog" = "https://github.com/patw/Pengy/releases"
 
 [tool.setuptools.packages.find]
 include = ["pengy", "pengy.*"]
