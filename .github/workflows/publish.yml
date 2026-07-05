@@ -18,7 +18,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write   # Needed for creating GitHub Releases
       id-token: write   # Needed for trusted publishing (OIDC)
     steps:
       - name: Checkout
@@ -34,6 +34,12 @@ jobs:
 
       - name: Build source distribution and wheel
         run: python -m build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
