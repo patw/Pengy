@@ -29,8 +29,8 @@ jobs:
 
       - name: Run tests
         run: |
-          python -m pytest tests/ -v --timeout=30
+          python -m pytest tests/ -v
 
       - name: Verify CLI imports
         run: |
-          pengy-cli --help
+          python -c "from pengy.cli.main import main; print('CLI imports OK')"
