@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.12']
+        python-version: ['3.10', '3.12', '3.13']
 
     steps:
       - uses: actions/checkout@v4
@@ -21,10 +21,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install package
+      - name: Install package with test deps
         run: |
-          pip install -e ".[cli]"
+          pip install -e ".[cli,web]" pytest
 
-      - name: Smoke test
+      - name: Run tests
         run: |
-          python -m pytest tests/test_smoke.py -v -m smoke 2>&1
+          python -m pytest tests/ -v 2>&1
+
+      - name: Verify CLI imports
+        run: |
+          python -c "from pengy.cli.main import main; print('CLI imports OK')"
