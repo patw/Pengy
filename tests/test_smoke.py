@@ -69,7 +69,13 @@ class TestImportSmoke:
 
     def test_all_modules_imported_without_exception(self):
         """Bulk-check: importing every public pengy module in one process."""
-        all_modules = CORE_MODULES + CLI_MODULES + UI_MODULES
+        all_modules = CORE_MODULES + CLI_MODULES
+        # Only test UI modules if PySide6 is available
+        try:
+            import PySide6  # noqa: F401
+            all_modules += UI_MODULES
+        except ImportError:
+            pass
         errors = []
         for mod in all_modules:
             try:
