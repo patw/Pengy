@@ -18,14 +18,35 @@
 
 I'm a **local-first AI agent** that runs on your machines — connecting to any OpenAI-compatible API (OpenAI, Ollama, Groq, OpenRouter, vLLM, LM Studio, local endpoints) and wielding a set of tools to operate on the filesystem, run code, search the web, fetch URLs, and more.
 
-I have **two interfaces** sharing the same core:
+I have **three interfaces** sharing the same core:
 
 | Interface | Entry Point | Description |
 |-----------|-------------|-------------|
 | **🐧 Pengy Desktop** | `pengy` | Qt6 three-pane GUI with markdown rendering, multi-session sidebar, file attachments |
 | **🐧 Pengy CLI** | `pengy-cli` | Terminal REPL with slash commands, single-shot mode for scripting |
+| **🌐 Pengy Web** | `pengy-web` | Flask server-side-rendered web UI — accessible from any browser on the network |
 
-Both share the same `~/.config/pengy/` — settings and chat history are shared.
+### 🌐 Web UI Details
+
+The Web UI (`pengy/web/main.py` → `pengy-web` command) is a **Flask-based** browser interface:
+
+- **Stack:** Flask 3+ (server-side rendered), Bootstrap 5.3 CSS/JS, Pygments for code highlighting, Markdown for rendering
+- **Default address:** `http://127.0.0.1:5000` (configurable via `--host` and `--port`)
+- **Features:**
+  - Responsive design — sidebar collapses to offcanvas on mobile, static sidebar on desktop
+  - SSE (Server-Sent Events) streaming for tool calls and responses
+  - Tool confirmation modal with "Yes to All This Turn" (YOLO) option
+  - Sudo password prompt modal
+  - Live thinking indicator with spinner
+  - Token usage display (prompt/completion counts)
+  - Chat session management — create, switch, delete chats
+  - Settings page for all config options
+  - Mobile-friendly with safe-area-inset support for notched phones
+  - Full thread safety — `WebWorker` class with `threading.Event` for confirmation/sudo blocking
+- **Dependencies:** `flask>=3.0`, `markdown>=3.5`, `pygments>=2.17` (via `pip install pengy[web]` or `pengy[all]`)
+- **Run it:** `pengy-web` or `python -m pengy.web.main`
+
+All three interfaces share the same `~/.config/pengy/` — settings and chat history are shared.
 
 ## CLI Flags (One-Shot Mode)
 
@@ -126,10 +147,10 @@ This turns the network into a **distributed agent pool** — perfect for:
 
 I was built because patw wanted a **local-first AI agent** that:
 1. Runs on his own hardware with no cloud dependency for tool execution
-2. Works seamlessly from both a desktop GUI and the command line
+2. Works seamlessly from a desktop GUI, a web browser, and the command line
 3. Can use any LLM backend (not locked into one provider)
 4. Has real tools that operate on his filesystem and network
 5. Can be scripted, cronned, and chained together across machines
-6. Shares configuration and history between interfaces
+6. Shares configuration and history between all three interfaces
 
 The name **Pengy** comes from the penguin 🐧 — Linux-native, local-first, and a little bit silly.
