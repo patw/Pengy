@@ -700,7 +700,10 @@ class PengyCLI:
         which is fine for a CLI.
         """
         gen = self.llm_client.chat(
-            messages, tool_confirmation=self.config.get("tool_confirmation", "none")
+            messages,
+            tool_confirmation=self.config.get("tool_confirmation", "none"),
+            reasoning_effort=self.config.get("reasoning_effort", ""),
+            preserve_reasoning=bool(self.config.get("preserve_reasoning", False)),
         )
         self._yolo_this_turn = False
         send_value = None
@@ -775,7 +778,7 @@ class PengyCLI:
     def _render_final(self, response: dict, chat: dict):
         """Render the final assistant response and show token usage."""
         content = response.get("content") or ""
-        chat["messages"].append({"role": "assistant", "content": content})
+        chat["messages"].append(response.get("message") or {"role": "assistant", "content": content})
 
         if content.strip():
             self.console.print()

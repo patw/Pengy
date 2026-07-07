@@ -82,6 +82,41 @@ class SettingsDialog(QDialog):
                 self.confirm_combo.setCurrentIndex(i)
                 break
         confirm_layout.addRow("Tool Confirmation:", self.confirm_combo)
+
+        # Reasoning options (safe defaults: provider default / off)
+        self.reasoning_effort_combo = QComboBox()
+        reasoning_options = [
+            ("Provider default — do not send reasoning option", ""),
+            ("Off / none", "none"),
+            ("Minimal", "minimal"),
+            ("Low", "low"),
+            ("Medium", "medium"),
+            ("High", "high"),
+            ("Extra high", "xhigh"),
+            ("Max", "max"),
+        ]
+        for label, value in reasoning_options:
+            self.reasoning_effort_combo.addItem(label, value)
+        current_effort = config.get("reasoning_effort", "")
+        for i in range(self.reasoning_effort_combo.count()):
+            if self.reasoning_effort_combo.itemData(i) == current_effort:
+                self.reasoning_effort_combo.setCurrentIndex(i)
+                break
+        self.reasoning_effort_combo.setToolTip(
+            "Optional best-effort reasoning depth. Provider default omits the parameter. "
+            "Some proxies/providers reject unsupported values."
+        )
+        confirm_layout.addRow("Reasoning effort:", self.reasoning_effort_combo)
+
+        self.preserve_reasoning_checkbox = QCheckBox(
+            "Preserve returned reasoning fields in conversation history"
+        )
+        self.preserve_reasoning_checkbox.setChecked(bool(config.get("preserve_reasoning", False)))
+        self.preserve_reasoning_checkbox.setToolTip(
+            "Best effort: keeps fields like reasoning_content/reasoning/reasoning_details "
+            "when providers return them. Leave off if your proxy rejects unknown message fields."
+        )
+        confirm_layout.addRow("Reasoning preservation:", self.preserve_reasoning_checkbox)
         layout.addLayout(confirm_layout)
 
         # Context keep turns
@@ -191,6 +226,8 @@ class SettingsDialog(QDialog):
         self.config["model"] = self.model_combo.currentText()
         self.config["system_message"] = self.system_message_input.toPlainText()
         self.config["tool_confirmation"] = self.confirm_combo.currentData()
+        self.config["reasoning_effort"] = self.reasoning_effort_combo.currentData()
+        self.config["preserve_reasoning"] = self.preserve_reasoning_checkbox.isChecked()
         self.config["context_keep_turns"] = self.context_keep_turns_spinbox.value()
         self.config["ui_scale"] = self.scale_combo.currentData()
         self.config["tool_timeout"] = self.timeout_spinbox.value()

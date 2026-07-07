@@ -14,11 +14,14 @@ class ChatWorker(QObject):
     sudo_password_requested = Signal()
 
     def __init__(self, llm_client, messages: list[dict],
-                 tool_confirmation: str = "none"):
+                 tool_confirmation: str = "none", reasoning_effort: str = "",
+                 preserve_reasoning: bool = False):
         super().__init__()
         self.llm_client = llm_client
         self.messages = messages
         self.tool_confirmation = tool_confirmation
+        self.reasoning_effort = reasoning_effort
+        self.preserve_reasoning = preserve_reasoning
         self.generator = None
         self._cancelled = threading.Event()
         self._confirmation_event = threading.Event()
@@ -47,7 +50,10 @@ class ChatWorker(QObject):
         tools.set_sudo_password_provider(self._request_sudo_password)
         try:
             self.generator = self.llm_client.chat(
-                self.messages, self.tool_confirmation,
+                self.messages,
+                self.tool_confirmation,
+                reasoning_effort=self.reasoning_effort,
+                preserve_reasoning=self.preserve_reasoning,
             )
             send_value = None
             while True:

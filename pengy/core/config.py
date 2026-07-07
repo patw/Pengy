@@ -13,7 +13,7 @@ CONFIG_DIR = Path.home() / ".config" / "pengy"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
 
 DEFAULT_SYSTEM_MESSAGE = (
-    "You are a helpful assistant. "
+    "You are a helpful assistant named Pengy. "
     "The current date is {date} and the user is {username} on host {hostname} which is {osinfo}."
 )
 
@@ -23,6 +23,8 @@ DEFAULTS = {
     "model": "gpt-4o",
     "system_message": DEFAULT_SYSTEM_MESSAGE,
     "tool_confirmation": "none",  # "all" | "safe" | "none"
+    "reasoning_effort": "",  # "" (provider default) | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    "preserve_reasoning": False,
     "context_keep_turns": 0,
     "ui_scale": 100,
     "user_agent": "PengyAgent/1.0",

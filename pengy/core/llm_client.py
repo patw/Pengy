@@ -5,6 +5,59 @@ from openai import OpenAI
 
 from pengy.core import tools as _tools_mod
 
+_REASONING_MESSAGE_FIELDS = (
+    "reasoning_content",
+    "reasoning",
+    "reasoning_details",
+)
+
+
+def _get_msg_field(message, field: str):
+    if isinstance(message, dict):
+        return message.get(field)
+    return getattr(message, field, None)
+
+
+def _serialize_tool_calls(tool_calls):
+    serialized = []
+    for tc in tool_calls or []:
+        if isinstance(tc, dict):
+            fn = tc.get("function", {})
+            serialized.append({
+                "id": tc.get("id", ""),
+                "type": tc.get("type", "function"),
+                "function": {
+                    "name": fn.get("name", ""),
+                    "arguments": fn.get("arguments", "{}"),
+                },
+            })
+        else:
+            serialized.append({
+                "id": tc.id,
+                "type": getattr(tc, "type", "function"),
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            })
+    return serialized
+
+
+def _serialize_assistant_message(message, preserve_reasoning: bool = False) -> dict:
+    serialized = {
+        "role": "assistant",
+        "content": _get_msg_field(message, "content") or "",
+    }
+    tool_calls = _get_msg_field(message, "tool_calls")
+    if tool_calls:
+        serialized["tool_calls"] = _serialize_tool_calls(tool_calls)
+    if preserve_reasoning:
+        for field in _REASONING_MESSAGE_FIELDS:
+            value = _get_msg_field(message, field)
+            if value is not None:
+                serialized[field] = value
+    return serialized
+
 
 def _run_tool(name: str, args: dict) -> str:
     """Run a tool in a daemon thread with an outer safety-net timeout.
@@ -59,7 +112,8 @@ class LLMClient:
     def _reset_client(self):
         self._client = None
 
-    def chat(self, messages: list[dict], tool_confirmation: str = "none"):
+    def chat(self, messages: list[dict], tool_confirmation: str = "none",
+             reasoning_effort: str = "", preserve_reasoning: bool = False):
         """
         Send a chat request and handle tool calls.
         Returns the final assistant message content.
@@ -75,12 +129,15 @@ class LLMClient:
 
         while True:
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=current_messages,
-                    tools=_tools_mod.TOOLS,
-                    tool_choice="auto",
-                )
+                request_kwargs = {
+                    "model": self.model,
+                    "messages": current_messages,
+                    "tools": _tools_mod.TOOLS,
+                    "tool_choice": "auto",
+                }
+                if reasoning_effort:
+                    request_kwargs["reasoning_effort"] = reasoning_effort
+                response = self.client.chat.completions.create(**request_kwargs)
             except Exception:
                 self._reset_client()
                 raise
@@ -92,24 +149,12 @@ class LLMClient:
                 accumulated_usage["total_tokens"] += response.usage.total_tokens
 
             assistant_msg = response.choices[0].message
-            current_messages.append(assistant_msg)
+            current_messages.append(_serialize_assistant_message(assistant_msg, preserve_reasoning))
 
             if assistant_msg.tool_calls:
-                serialized_assistant = {
-                    "role": "assistant",
-                    "content": assistant_msg.content or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in assistant_msg.tool_calls
-                    ],
-                }
+                serialized_assistant = _serialize_assistant_message(
+                    assistant_msg, preserve_reasoning
+                )
                 yield {"type": "assistant_tool_calls", "message": serialized_assistant}
 
                 for tool_call in assistant_msg.tool_calls:
@@ -162,5 +207,6 @@ class LLMClient:
                                    "content": declined_msg, "declined": True}
             else:
                 yield {"type": "final_response", "content": assistant_msg.content,
+                       "message": _serialize_assistant_message(assistant_msg, preserve_reasoning),
                        "usage": accumulated_usage}
                 break

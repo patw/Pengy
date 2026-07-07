@@ -194,6 +194,7 @@ class WebWorker:
     def _run(self):
         config = self._config
         chat = self._chat
+        skip_final_save = False
         try:
             tools.set_sudo_password_provider(self._get_sudo_password)
             tools.set_user_agent(config.get("user_agent", "PengyAgent/1.0"))
@@ -207,7 +208,12 @@ class WebWorker:
 
             messages = _build_messages(chat, config)
             tc_mode = config.get("tool_confirmation", "none")
-            gen = llm.chat(messages, tool_confirmation=tc_mode)
+            gen = llm.chat(
+                messages,
+                tool_confirmation=tc_mode,
+                reasoning_effort=config.get("reasoning_effort", ""),
+                preserve_reasoning=bool(config.get("preserve_reasoning", False)),
+            )
             send_value = None
 
             while True:
@@ -284,7 +290,8 @@ class WebWorker:
 
                 elif rtype == "final_response":
                     content = response.get("content") or ""
-                    chat["messages"].append({"role": "assistant", "content": content})
+                    chat["messages"].append(response.get("message") or {"role": "assistant", "content": content})
+                    save_chat(chat)
                     self._queue.put({
                         "type": "final_response",
                         "html": _render_md(content),
@@ -298,7 +305,9 @@ class WebWorker:
         finally:
             self._done = True
             tools.set_sudo_password_provider(None)
-            save_chat(self._chat)
+            # Normal final responses save before queuing final_response. Avoid
+            # saving from error/cancel paths here; tests and callers may tear down
+            # temporary config dirs while a failed worker is unwinding.
             # Do NOT remove from _workers here — the SSE endpoint holds a reference
             # and will clean up once it drains the queue.  Removing here causes a
             # race where a fast failure disappears before the browser SSE connects.
@@ -453,6 +462,10 @@ def settings_view():
         tc = request.form.get("tool_confirmation", "none")
         if tc in ("all", "safe", "none"):
             config["tool_confirmation"] = tc
+        effort = request.form.get("reasoning_effort", "")
+        if effort in ("", "none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            config["reasoning_effort"] = effort
+        config["preserve_reasoning"] = request.form.get("preserve_reasoning") == "1"
         try:
             config["tool_timeout"] = max(1, int(request.form.get("tool_timeout", 60)))
         except ValueError:

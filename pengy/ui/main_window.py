@@ -257,8 +257,13 @@ class MainWindow(QMainWindow):
         self._abandon_worker()
 
         tool_confirmation = self.config.get("tool_confirmation", "none")
-        self.worker = ChatWorker(self.llm_client, messages,
-                                 tool_confirmation=tool_confirmation)
+        self.worker = ChatWorker(
+            self.llm_client,
+            messages,
+            tool_confirmation=tool_confirmation,
+            reasoning_effort=self.config.get("reasoning_effort", ""),
+            preserve_reasoning=bool(self.config.get("preserve_reasoning", False)),
+        )
         self.worker_thread = QThread()
         self.worker.moveToThread(self.worker_thread)
 
@@ -397,7 +402,7 @@ class MainWindow(QMainWindow):
         """Handle the final text response from the LLM."""
         content = response.get("content", "")
         # Add assistant message to chat
-        assistant_msg = {"role": "assistant", "content": content}
+        assistant_msg = response.get("message") or {"role": "assistant", "content": content}
         self.current_chat["messages"].append(assistant_msg)
         self.chat_view.append_message("assistant", content)
 

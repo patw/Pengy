@@ -77,6 +77,25 @@
                value="{{ config.tool_timeout }}" min="1" max="3600">
       </div>
 
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Reasoning Effort</label>
+        <select name="reasoning_effort" class="form-select">
+          <option value="" {% if not config.reasoning_effort %}selected{% endif %}>Provider default (do not send)</option>
+          {% for value,label in [('none','Off / none'),('minimal','Minimal'),('low','Low'),('medium','Medium'),('high','High'),('xhigh','Extra high'),('max','Max')] %}
+          <option value="{{ value }}" {% if config.reasoning_effort == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <div class="form-text">Optional best-effort parameter; unsupported proxies/providers may reject non-default values.</div>
+      </div>
+
+      <div class="form-check mb-3">
+        <input type="checkbox" name="preserve_reasoning" value="1" class="form-check-input" id="preserve_reasoning"
+               {% if config.preserve_reasoning %}checked{% endif %}>
+        <label class="form-check-label" for="preserve_reasoning">Preserve returned reasoning fields</label>
+        <div class="form-text">Keeps reasoning_content/reasoning/reasoning_details in message history when providers return them.</div>
+      </div>
+
       <div class="mb-3">
         <label class="form-label fw-semibold">Context Keep Turns</label>
         <input type="number" name="context_keep_turns" class="form-control"
