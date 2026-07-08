@@ -114,7 +114,7 @@ The web UI is designed for single-user personal use. For remote access, put it b
 - **Web UI** — Responsive Bootstrap interface served by Flask; SSE live streaming; works great on mobile
 - **Slash commands** (CLI) — `/new`, `/load`, `/models`, `/yolo`, `/model`, `/list`, `/delete`, `/attach`, `/compact`, and more
 - **Templated system message** — Auto-fills `{date}`, `{username}`, `{hostname}`, `{osinfo}` at send time
-- **Persistent config** — Settings and chat history live in `~/.config/pengy/`, shared between GUI and CLI
+- **Persistent config** — Settings and chat history live in `~/.config/pengy/`, shared between GUI, CLI, and Web — and across all Pengy versions (Python, Rust, C++)
 
 ---
 
@@ -202,7 +202,7 @@ pengy/
 ├── cli/
 │   └── main.py          # CLI entry point (interactive + single-shot)
 ├── assets/
-│   └── icon.svg         # App icon
+│   └── icon.png         # App icon
 ├── core/
 │   ├── config.py        # Settings load/save + system message templating
 │   ├── chat_manager.py  # Chat session CRUD
@@ -262,3 +262,23 @@ python -m pytest tests/ -v
 | pygments | Syntax highlighting (GUI + Web) |
 | ddgs | DuckDuckGo web search |
 | rich | CLI formatting (tables, panels, markdown) |
+
+---
+
+## Also Available
+
+Pengy (Python) is the **reference implementation**. Two high-performance ports are also fully certified, all sharing the same `~/.config/pengy/` data:
+
+| Edition | Language | Notes |
+|---------|----------|-------|
+| [**Pengy**](https://github.com/patw/Pengy) | Python | Reference implementation — easiest to hack on |
+| [**PengyR**](https://github.com/patw/PengyR) | Rust + Qt6 | High-performance native binary, statically-linked core |
+| [**PengyCPP**](https://github.com/patw/PengyCPP) | C++17 + Qt6 | Highest performance, smallest memory footprint, zero external dependencies |
+
+All three offer the same 11 tools, three interfaces (GUI/CLI/Web), and full chat interop. PengyR and PengyCPP ship pre-built AppImage, `.deb`, `.dmg`, and `.zip` releases for Linux, macOS, and Windows.
+
+---
+
+## License
+
+MIT

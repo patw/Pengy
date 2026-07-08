@@ -34,7 +34,7 @@ All three write to the same `~/.config/pengy/` directory — settings and chat h
 pengy/
 ├── main.py                    # Desktop GUI entry point
 ├── assets/
-│   └── icon.svg               # Penguin app icon (SVG)
+│   └── icon.png               # Penguin app icon
 ├── cli/
 │   ├── __init__.py            # Package marker
 │   └── main.py                # CLI entry point — PengyCLI class (interactive + single-shot)
@@ -476,7 +476,7 @@ LLM API call (non-streaming, full response at once)
 ## App Identity
 
 - **Application name:** "Pengy" (set via `QApplication.setApplicationName`)
-- **Icon:** `pengy/assets/icon.svg` — SVG penguin, loaded at startup via `QApplication.setWindowIcon`
+- **Icon:** `pengy/assets/icon.png` — PNG penguin, loaded at startup via `QApplication.setWindowIcon`
 - The desktop app shows in taskbar, alt-tab, and window decorations on X11/XWayland. On native Wayland, the provided `pengy.desktop` file may be needed for taskbar icon.
 - The CLI has no icon but uses the penguin emoji (🐧) in its welcome panel.
 
