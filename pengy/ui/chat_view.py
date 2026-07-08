@@ -12,31 +12,43 @@ from pygments import highlight
 from pygments.lexers import get_lexer_by_name, TextLexer
 from pygments.formatters import HtmlFormatter
 
-def _build_css() -> str:
+from pengy.ui.theme import get_theme
+
+
+def _build_css(theme: dict[str, str] | None = None) -> str:
+    theme = theme or get_theme()
     fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
     return f"""
 body {{
     font-family: "{fixed}";
     font-size: 10pt;
-    background-color: #ffffff;
-    color: #1e1e2e;
+    background-color: {theme['bg']};
+    color: {theme['fg']};
     margin: 8px;
 }}
-a {{ color: #a05000; text-decoration: none; }}
+a {{ color: {theme['link']}; text-decoration: none; }}
 pre {{ white-space: pre-wrap; word-wrap: break-word; }}
 table {{
-    border: 1px solid #cccccc;
+    border: 1px solid {theme['border']};
     margin: 6px 0;
 }}
 th, td {{
-    border: 1px solid #cccccc;
+    border: 1px solid {theme['border']};
     padding: 4px 10px;
 }}
 th {{
-    background-color: #f0f0f0;
+    background-color: {theme['panel_2']};
     font-weight: bold;
 }}
 img {{ max-width: 600px; }}
+.role-user {{ color:{theme['user_label']}; font-weight:bold; font-size:9pt; margin:8px 0 2px 0; }}
+.role-assistant {{ color:{theme['assistant_label']}; font-weight:bold; font-size:9pt; margin:8px 0 2px 0; }}
+.tool-card {{ border:1px solid {theme['border_soft']}; padding:4px 8px; margin:6px 0; background-color:{theme['tool_bg']}; }}
+.tool-link {{ color:{theme['link']}; text-decoration:none; font-weight:bold; }}
+.tool-pre {{ background-color:{theme['tool_arg_bg']}; color:{theme['code_fg']}; padding:4px; margin:2px 0; font-size:9pt; }}
+.code-pre {{ background-color:{theme['code_bg']}; color:{theme['code_fg']}; padding:10px; margin:6px 0; }}
+.muted {{ color:{theme['muted']}; }}
+.declined {{ color:{theme['danger']}; }}
 """
 
 
@@ -48,6 +60,7 @@ class ChatView(QTextBrowser):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._messages = []
+        self._theme = get_theme()
         self._expanded_tools = set()
         self._image_cache: dict[str, bytes] = {}   # url -> raw bytes (b"" = failed)
         self._image_pending: set[str] = set()
@@ -57,10 +70,17 @@ class ChatView(QTextBrowser):
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         font.setPointSize(10)
         self.setFont(font)
-        self.setStyleSheet(
-            "QTextBrowser { background-color: #ffffff; color: #1e1e2e; border: none; padding: 0; }"
-        )
+        self.apply_theme(self._theme)
         self.setOpenLinks(False)
+
+    def apply_theme(self, theme: dict[str, str]):
+        """Apply a theme and re-render existing messages."""
+        self._theme = theme
+        self.setStyleSheet(
+            f"QTextBrowser {{ background-color: {theme['bg']}; color: {theme['fg']}; border: none; padding: 0; }}"
+        )
+        if self._messages:
+            self._render()
 
     def loadResource(self, type_: int, url: QUrl) -> object:
         """Return cached external images; kick off a background fetch if not yet loaded."""
@@ -168,7 +188,7 @@ class ChatView(QTextBrowser):
             self.verticalScrollBar().setValue(prev_pos)
 
     def _build_html(self) -> str:
-        parts = [f"<html><head><meta charset='utf-8'><style>{_build_css()}</style></head><body>"]
+        parts = [f"<html><head><meta charset='utf-8'><style>{_build_css(self._theme)}</style></head><body>"]
         for msg in self._messages:
             parts.append(self._render_msg(msg))
         parts.append("</body></html>")
@@ -179,13 +199,13 @@ class ChatView(QTextBrowser):
         if role == "user":
             body = self._escape_html(msg["content"]).replace("\n", "<br>")
             return (
-                '<p style="color:#00008b;font-weight:bold;font-size:9pt;margin:8px 0 2px 0;">You &#x1F9D1;</p>'
+                '<p class="role-user">You &#x1F9D1;</p>'
                 f'<p style="margin:2px 0 10px 0;">{body}</p>'
             )
         if role == "assistant":
             html_content = self._render_markdown(msg["content"])
             return (
-                '<p style="color:#006400;font-weight:bold;font-size:9pt;margin:8px 0 2px 0;">Assistant &#x1F916;</p>'
+                '<p class="role-assistant">Assistant &#x1F916;</p>'
                 f'<div style="margin:2px 0 10px 0;">{html_content}</div>'
             )
         if role == "tool_block":
@@ -214,15 +234,14 @@ class ChatView(QTextBrowser):
                 label += "&#8230;"
 
         if result is None and not declined:
-            status = '&nbsp;<i style="color:#888;">(running&#8230;)</i>'
+            status = '&nbsp;<i class="muted">(running&#8230;)</i>'
         elif declined:
-            status = '&nbsp;<i style="color:#cc0000;">(declined)</i>'
+            status = '&nbsp;<i class="declined">(declined)</i>'
         else:
             status = ""
 
         header = (
-            f'<a href="toggle://{tool_call_id}" '
-            f'style="color:#a05000;text-decoration:none;font-weight:bold;">{label}</a>{status}'
+            f'<a href="toggle://{tool_call_id}" class="tool-link">{label}</a>{status}'
         )
 
         inner = f'<div style="margin-bottom:2px;">{header}</div>'
@@ -232,7 +251,7 @@ class ChatView(QTextBrowser):
             inner += (
                 '<div style="margin-top:4px;">'
                 '<b>Arguments:</b>'
-                f'<pre style="background-color:#f0f0f0;padding:4px;margin:2px 0;font-size:9pt;">{args_json}</pre>'
+                f'<pre class="tool-pre">{args_json}</pre>'
                 '</div>'
             )
             if result is not None:
@@ -241,12 +260,12 @@ class ChatView(QTextBrowser):
                 inner += (
                     '<div>'
                     f'<b>{result_label}:</b>'
-                    f'<pre style="background-color:#f5f5f5;padding:4px;margin:2px 0;font-size:9pt;">{result_escaped}</pre>'
+                    f'<pre class="tool-pre">{result_escaped}</pre>'
                     '</div>'
                 )
 
         return (
-            '<div style="border:1px solid #dddddd;padding:4px 8px;margin:6px 0;background-color:#fafafa;">'
+            '<div class="tool-card">'
             f'{inner}'
             '</div>'
         )
@@ -265,11 +284,11 @@ class ChatView(QTextBrowser):
             code = match.group(2)
             try:
                 lexer = get_lexer_by_name(lang, stripnl=False) if lang and lang != "text" else TextLexer()
-                formatter = HtmlFormatter(style="monokai", noclasses=True, nobackground=True)
+                formatter = HtmlFormatter(style=self._theme.get("pygments_style", "friendly"), noclasses=True, nobackground=True)
                 highlighted = highlight(code, lexer, formatter)
-                return f'<pre style="background-color:#f5f5f5;padding:10px;margin:6px 0;">{highlighted}</pre>'
+                return f'<pre class="code-pre">{highlighted}</pre>'
             except Exception:
-                return f'<pre style="background-color:#f5f5f5;padding:10px;margin:6px 0;color:#333;">{self._escape_html(code)}</pre>'
+                return f'<pre class="code-pre">{self._escape_html(code)}</pre>'
 
         html = re.sub(
             r'<pre><code[^>]*class="language-([^"]*)"[^>]*>(.*?)</code></pre>',
@@ -279,13 +298,13 @@ class ChatView(QTextBrowser):
         )
         html = re.sub(
             r'<code[^>]*class="language-([^"]*)"[^>]*>(.*?)</code>',
-            lambda m: f'<pre style="background-color:#f5f5f5;padding:10px;margin:6px 0;color:#333;">{self._escape_html(m.group(2))}</pre>',
+            lambda m: f'<pre class="code-pre">{self._escape_html(m.group(2))}</pre>',
             html,
             flags=re.DOTALL,
         )
         html = re.sub(
             r'<pre><code>(.*?)</code></pre>',
-            lambda m: f'<pre style="background-color:#f5f5f5;padding:10px;margin:6px 0;color:#333;">{self._escape_html(m.group(1))}</pre>',
+            lambda m: f'<pre class="code-pre">{self._escape_html(m.group(1))}</pre>',
             html,
             flags=re.DOTALL,
         )

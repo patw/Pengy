@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 
+from pengy.ui.theme import ACCENT_NAMES, THEME_MODES
+
 
 class SettingsDialog(QDialog):
     """Settings dialog for configuring API and system message."""
@@ -134,6 +136,32 @@ class SettingsDialog(QDialog):
         ctx_row.addRow("Keep tool results:", self.context_keep_turns_spinbox)
         layout.addLayout(ctx_row)
 
+        # Appearance
+        appearance_row = QFormLayout()
+        appearance_row.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.theme_mode_combo = QComboBox()
+        theme_mode_labels = {"system": "System", "light": "Light", "dark": "Dark"}
+        for mode in THEME_MODES:
+            self.theme_mode_combo.addItem(theme_mode_labels.get(mode, mode.title()), mode)
+        current_theme_mode = config.get("theme_mode", "system")
+        for i in range(self.theme_mode_combo.count()):
+            if self.theme_mode_combo.itemData(i) == current_theme_mode:
+                self.theme_mode_combo.setCurrentIndex(i)
+                break
+        appearance_row.addRow("Theme mode:", self.theme_mode_combo)
+
+        self.theme_accent_combo = QComboBox()
+        for accent in ACCENT_NAMES:
+            self.theme_accent_combo.addItem(accent.title(), accent)
+        current_accent = config.get("theme_accent", "default")
+        for i in range(self.theme_accent_combo.count()):
+            if self.theme_accent_combo.itemData(i) == current_accent:
+                self.theme_accent_combo.setCurrentIndex(i)
+                break
+        appearance_row.addRow("Accent color:", self.theme_accent_combo)
+        layout.addLayout(appearance_row)
+
         # UI Scale
         scale_row = QFormLayout()
         scale_row.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
@@ -229,6 +257,8 @@ class SettingsDialog(QDialog):
         self.config["reasoning_effort"] = self.reasoning_effort_combo.currentData()
         self.config["preserve_reasoning"] = self.preserve_reasoning_checkbox.isChecked()
         self.config["context_keep_turns"] = self.context_keep_turns_spinbox.value()
+        self.config["theme_mode"] = self.theme_mode_combo.currentData()
+        self.config["theme_accent"] = self.theme_accent_combo.currentData()
         self.config["ui_scale"] = self.scale_combo.currentData()
         self.config["tool_timeout"] = self.timeout_spinbox.value()
         self.config["user_agent"] = self.user_agent_input.text() or "PengyAgent/1.0"

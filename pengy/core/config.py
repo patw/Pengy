@@ -27,6 +27,8 @@ DEFAULTS = {
     "preserve_reasoning": False,
     "context_keep_turns": 0,
     "ui_scale": 100,
+    "theme_mode": "system",  # "system" | "light" | "dark"
+    "theme_accent": "default",  # "default" | "blue" | "teal" | "green" | "orange" | "red" | "pink" | "purple"
     "user_agent": "PengyAgent/1.0",
     "tool_timeout": 60,
 }

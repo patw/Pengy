@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QAction
 
+from pengy.ui.theme import get_theme
+
 
 class ChatHistoryWidget(QWidget):
     """Widget for managing chat history in the sidebar."""
@@ -19,7 +21,9 @@ class ChatHistoryWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_chat_id = None
+        self._theme = get_theme()
         self.setup_ui()
+        self.apply_theme(self._theme)
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -70,9 +74,9 @@ class ChatHistoryWidget(QWidget):
         status_row_layout.setContentsMargins(0, 0, 0, 0)
         status_row_layout.setSpacing(6)
 
-        qs_label = QLabel("Status")
-        qs_label.setStyleSheet("font-weight: bold; color: #000000;")
-        status_row_layout.addWidget(qs_label)
+        self.status_label = QLabel("Status")
+        self.status_label.setStyleSheet(f"font-weight: bold; color: {self._theme['fg']};")
+        status_row_layout.addWidget(self.status_label)
 
         self.status_dot = QLabel("●")
         self.status_dot.setStyleSheet("color: #a6e3a1; font-size: 14px;")
@@ -92,39 +96,52 @@ class ChatHistoryWidget(QWidget):
         qs_layout.addWidget(qs_divider)
 
         self.model_label = QLabel("Model: gpt-4o")
-        self.model_label.setStyleSheet("color: #000000;")
+        self.model_label.setStyleSheet(f"color: {self._theme['fg']};")
         qs_layout.addWidget(self.model_label)
 
         self.confirm_label = QLabel("Tool Confirm: None")
-        self.confirm_label.setStyleSheet("color: #000000;")
+        self.confirm_label.setStyleSheet(f"color: {self._theme['fg']};")
         qs_layout.addWidget(self.confirm_label)
 
         self.tokens_label = QLabel("Tokens: —")
-        self.tokens_label.setStyleSheet("color: #000000;")
+        self.tokens_label.setStyleSheet(f"color: {self._theme['fg']};")
         qs_layout.addWidget(self.tokens_label)
 
         layout.addWidget(qs_frame)
 
+    def apply_theme(self, theme: dict[str, str]):
+        self._theme = theme
+        self.setStyleSheet(f"""
+            ChatHistoryWidget {{ background-color: {theme['panel']}; color: {theme['fg']}; }}
+            QFrame {{ border-color: {theme['border']}; }}
+        """)
+        self.status_label.setStyleSheet(f"font-weight: bold; color: {theme['fg']};")
+        for label in (self.model_label, self.confirm_label, self.tokens_label):
+            label.setStyleSheet(f"color: {theme['fg']};")
+        self.load_chats([]) if False else None  # keep method import-safe; rows are restyled on reload
+
     def _make_item_widget(self, chat_id: str, title: str) -> QWidget:
         """Create the inline widget for a chat list row."""
         row = QWidget()
+        row.setStyleSheet(f"background-color: {self._theme['panel']}; color: {self._theme['fg']};")
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(4, 2, 2, 2)
         row_layout.setSpacing(4)
 
         title_label = QLabel(title)
-        title_label.setStyleSheet("color: #000000;")
+        title_label.setStyleSheet(f"color: {self._theme['fg']};")
         title_label.setMinimumWidth(0)
         row_layout.addWidget(title_label, 1)
 
-        btn_style = """
-            QPushButton {
+        btn_style = f"""
+            QPushButton {{
                 background-color: transparent;
+                color: {self._theme['fg']};
                 border: none;
                 border-radius: 4px;
                 font-size: 12px;
-            }
-            QPushButton:hover { background-color: #313244; }
+            }}
+            QPushButton:hover {{ background-color: {self._theme['hover']}; }}
         """
 
         save_btn = QPushButton("💾")

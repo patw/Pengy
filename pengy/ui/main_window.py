@@ -5,6 +5,7 @@ import mimetypes
 from PySide6.QtWidgets import (
     QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout,
     QDialog, QPushButton, QDialogButtonBox, QLabel, QInputDialog, QLineEdit,
+    QApplication,
 )
 from PySide6.QtCore import Qt, QThread
 
@@ -20,6 +21,7 @@ from pengy.ui.chat_view import ChatView
 from pengy.ui.chat_input import ChatInputWidget
 from pengy.ui.chat_worker import ChatWorker
 from pengy.ui.settings_dialog import SettingsDialog
+from pengy.ui.theme import get_theme, qt_app_stylesheet
 
 
 class MainWindow(QMainWindow):
@@ -34,7 +36,9 @@ class MainWindow(QMainWindow):
         self.worker_thread = None
         self._abandoned_workers = []  # (thread, worker) kept alive until threads exit
         self._yolo_this_turn = False
+        self._theme = get_theme(self.config)
         self.setup_ui()
+        self.apply_theme()
         self.update_llm_client()
         self.load_chat_list()
         self.chat_history.update_quick_settings(
@@ -89,18 +93,6 @@ class MainWindow(QMainWindow):
 
         self._stop_btn = QPushButton("⏹ Stop")
         self._stop_btn.setFixedHeight(32)
-        self._stop_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #d20f39;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 4px 14px;
-                font-weight: bold;
-                font-size: 11pt;
-            }
-            QPushButton:hover { background-color: #e64553; }
-        """)
         self._stop_btn.clicked.connect(self._stop_worker)
         self._stop_btn.hide()
         input_layout.addWidget(self._stop_btn)
@@ -117,6 +109,28 @@ class MainWindow(QMainWindow):
         main_splitter.setSizes([300, 800])
 
         main_layout.addWidget(main_splitter)
+
+    def apply_theme(self):
+        """Apply the current appearance settings to the main window and child widgets."""
+        self._theme = get_theme(self.config)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(qt_app_stylesheet(self._theme))
+        self.chat_view.apply_theme(self._theme)
+        self.chat_input.apply_theme(self._theme)
+        self.chat_history.apply_theme(self._theme)
+        self._stop_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self._theme['danger']};
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 14px;
+                font-weight: bold;
+                font-size: 11pt;
+            }}
+            QPushButton:hover {{ background-color: {self._theme['danger_hover']}; }}
+        """)
 
     def update_llm_client(self):
         """Recreate the LLM client with current config."""
@@ -146,6 +160,10 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.get_config()
             save_config(self.config)
+            self.apply_theme()
+            self.load_chat_list()
+            if self.current_chat:
+                self.chat_history.select_chat_by_id(self.current_chat["id"])
             self.update_llm_client()
             self.chat_history.update_quick_settings(
                 self.config.get("model", "gpt-4o"),
@@ -440,41 +458,42 @@ class ToolConfirmDialog(QDialog):
         info_text += json.dumps(tool_info.get("args", {}), indent=2)
         info_label = QLabel(info_text)
         info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #000000; padding: 8px;")
+        theme = self.parent()._theme if self.parent() is not None and hasattr(self.parent(), "_theme") else get_theme()
+        info_label.setStyleSheet(f"color: {theme['fg']}; padding: 8px;")
         layout.addWidget(info_label)
 
         # Three buttons: Execute, Yes to all this turn, Cancel
         btn_layout = QHBoxLayout()
 
         execute_btn = QPushButton("Execute")
-        execute_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1e66f5; color: white; border: none;
+        execute_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {theme['primary']}; color: {theme['primary_fg']}; border: none;
                 border-radius: 6px; padding: 8px 18px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #4478f7; }
+            }}
+            QPushButton:hover {{ background-color: {theme['primary_hover']}; }}
         """)
         execute_btn.clicked.connect(self._on_execute)
         btn_layout.addWidget(execute_btn)
 
         yes_all_btn = QPushButton("Yes to All\nThis Turn")
-        yes_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #df8e1d; color: white; border: none;
+        yes_all_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {theme['warning']}; color: white; border: none;
                 border-radius: 6px; padding: 8px 14px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #fea82f; }
+            }}
+            QPushButton:hover {{ background-color: {theme['warning_hover']}; }}
         """)
         yes_all_btn.clicked.connect(self._on_yes_all)
         btn_layout.addWidget(yes_all_btn)
 
         cancel_btn = QPushButton("Cancel")
-        cancel_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #d20f39; color: white; border: none;
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {theme['danger']}; color: white; border: none;
                 border-radius: 6px; padding: 8px 18px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #e64553; }
+            }}
+            QPushButton:hover {{ background-color: {theme['danger_hover']}; }}
         """)
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)

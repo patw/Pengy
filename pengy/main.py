@@ -25,10 +25,12 @@ def main():
 
     from pengy.core.config import load_config
     from pengy.ui.main_window import MainWindow
+    from pengy.ui.theme import get_theme, qt_app_stylesheet
 
     _ICON_PATH = Path(__file__).parent / "assets" / "icon.png"
 
-    scale = load_config().get("ui_scale", 100)
+    config = load_config()
+    scale = config.get("ui_scale", 100)
     if scale != 100:
         os.environ["QT_SCALE_FACTOR"] = str(scale / 100)
 
@@ -41,6 +43,7 @@ def main():
     font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
     font.setPointSize(10)
     app.setFont(font)
+    app.setStyleSheet(qt_app_stylesheet(get_theme(config)))
 
     window = MainWindow()
     window.show()

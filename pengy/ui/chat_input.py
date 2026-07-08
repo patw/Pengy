@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt, QMimeData
 from PySide6.QtGui import QFont, QFontDatabase, QKeyEvent, QImage, QPixmap
 
+from pengy.ui.theme import get_theme
+
 
 _IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
 
@@ -58,19 +60,22 @@ class _InputEdit(QTextEdit):
         self.setPlaceholderText("Type a message... (Enter to send, Shift+Enter for new line)")
         self.setMaximumHeight(60)
         self.setMinimumHeight(40)
-        self.setStyleSheet("""
-            QTextEdit {
-                background-color: #ffffff;
-                color: #1e1e2e;
-                border: 1px solid #ccc;
+        self.apply_theme(get_theme())
+        self.installEventFilter(self)
+
+    def apply_theme(self, theme: dict[str, str]):
+        self.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {theme['input_bg']};
+                color: {theme['input_fg']};
+                border: 1px solid {theme['border']};
                 border-radius: 8px;
                 padding: 6px 10px;
-            }
-            QTextEdit:focus {
-                border: 1px solid #89b4fa;
-            }
+            }}
+            QTextEdit:focus {{
+                border: 1px solid {theme['focus']};
+            }}
         """)
-        self.installEventFilter(self)
 
     def insertFromMimeData(self, source: QMimeData):
         if source.hasImage():
@@ -103,7 +108,9 @@ class ChatInputWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._attachments: list[Path] = []
+        self._theme = get_theme()
         self._setup_ui()
+        self.apply_theme(self._theme)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -128,15 +135,6 @@ class ChatInputWidget(QWidget):
         self._attach_btn = QPushButton("📎")
         self._attach_btn.setFixedSize(32, 32)
         self._attach_btn.setToolTip("Attach a file (text or image)")
-        self._attach_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: 1px solid #ccc;
-                border-radius: 6px;
-                font-size: 16px;
-            }
-            QPushButton:hover { background: #f0f0f0; }
-        """)
         self._attach_btn.clicked.connect(self._pick_file)
         row_layout.addWidget(self._attach_btn)
 
@@ -146,6 +144,20 @@ class ChatInputWidget(QWidget):
         row_layout.addWidget(self._edit)
 
         layout.addWidget(input_row)
+
+    def apply_theme(self, theme: dict[str, str]):
+        self._theme = theme
+        self._edit.apply_theme(theme)
+        self._attach_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {theme['fg']};
+                border: 1px solid {theme['border']};
+                border-radius: 6px;
+                font-size: 16px;
+            }}
+            QPushButton:hover {{ background: {theme['hover']}; }}
+        """)
 
     def _pick_file(self):
         path_str, _ = QFileDialog.getOpenFileName(self, "Attach File")
@@ -167,7 +179,7 @@ class ChatInputWidget(QWidget):
     def _add_chip(self, path: Path):
         chip = QWidget()
         chip.setStyleSheet(
-            "background:#e8f0fe; border:1px solid #c0d0f0; border-radius:4px;"
+            f"background:{self._theme['selection']}; border:1px solid {self._theme['border']}; border-radius:4px;"
         )
         chip_layout = QHBoxLayout(chip)
         chip_layout.setContentsMargins(5, 2, 3, 2)
@@ -175,17 +187,17 @@ class ChatInputWidget(QWidget):
 
         icon = "🖼" if _is_image_file(path) else "📄"
         label = QLabel(f"{icon} {path.name}")
-        label.setStyleSheet("font-size:11px; color:#333; border:none; background:transparent;")
+        label.setStyleSheet(f"font-size:11px; color:{self._theme['fg']}; border:none; background:transparent;")
         chip_layout.addWidget(label)
 
         remove = QPushButton("✕")
         remove.setFixedSize(14, 14)
-        remove.setStyleSheet("""
-            QPushButton {
+        remove.setStyleSheet(f"""
+            QPushButton {{
                 background: transparent; border: none;
-                color: #888; font-size: 9px;
-            }
-            QPushButton:hover { color: #c00; }
+                color: {self._theme['muted']}; font-size: 9px;
+            }}
+            QPushButton:hover {{ color: {self._theme['danger']}; }}
         """)
         remove.clicked.connect(lambda: self._remove_chip(path, chip))
         chip_layout.addWidget(remove)
