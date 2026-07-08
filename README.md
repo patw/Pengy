@@ -108,19 +108,23 @@ The web UI is designed for single-user personal use. For remote access, put it b
 - **Tool confirmation** — Three modes: YOLO (All) skips all confirmations, Safe auto-approves read-only tools, None confirms everything
 - **Context management** — Elide old tool results to save context window space; configurable per-chat
 - **Token usage display** — See prompt/completion token counts after every turn (GUI sidebar + CLI footer)
+- **Theme system** — System, light, and dark modes plus selectable accent colors; applied across the desktop UI with scaled markdown/code rendering
+- **Tasks system** — Reusable prompt templates for repeated workflows, with `%placeholder%` inputs collected at run time
 - **Model discovery** — Fetch available models from your endpoint with one click or `/models` command
 - **Multi-session** — Create, switch, and delete chat sessions; history saved locally as JSON; shared across all interfaces
 - **File attachments** — GUI: attach files from the input bar; CLI: use `/attach <path>` or `@path` inline syntax
 - **Web UI** — Responsive Bootstrap interface served by Flask; SSE live streaming; works great on mobile
 - **Slash commands** (CLI) — `/new`, `/load`, `/models`, `/yolo`, `/model`, `/list`, `/delete`, `/attach`, `/compact`, and more
 - **Templated system message** — Auto-fills `{date}`, `{username}`, `{hostname}`, `{osinfo}` at send time
-- **Persistent config** — Settings and chat history live in `~/.config/pengy/`, shared between GUI, CLI, and Web — and across all Pengy versions (Python, Rust, C++)
+- **Persistent config** — Settings, task templates, and chat history live in `~/.config/pengy/`, shared between GUI, CLI, and Web — and across all Pengy versions (Python, Rust, C++)
 
 ---
 
-## Screenshot
+## Screenshots
 
-![Pengy Interface](screenshot.png)
+| Main chat UI | Settings / theme controls | Tasks templates |
+|---|---|---|
+| ![Pengy main chat UI](pengyui.png) | ![Pengy settings and theme controls](pengyconfig.png) | ![Pengy tasks template manager](pengytasks.png) |
 
 ---
 
@@ -137,7 +141,35 @@ The web UI is designed for single-user personal use. For remote access, put it b
 | Model | Model name, e.g. `gpt-4o`, `llama3`, `gemma` |
 | System Message | Supports `{date}`, `{username}`, `{hostname}`, `{osinfo}` placeholders |
 | Tool Confirmation | YOLO (All) / Safe Only / None — controls which tools require approval |
-| UI Scale (GUI) | 75 / 100 / 125 / 200 % — takes effect on next launch |
+| Theme Mode (GUI) | System / Light / Dark — System follows the OS palette |
+| Accent Color (GUI) | Default, Blue, Teal, Green, Orange, Red, Pink, or Purple |
+| UI Scale (GUI) | 75 / 100 / 125 / 150 / 175 / 200 % — restart for full native-widget scaling |
+
+---
+
+## Theme System
+
+The desktop UI includes a theme system built around two choices:
+
+- **Mode:** `System`, `Light`, or `Dark`. `System` follows the current OS/Qt palette.
+- **Accent:** `Default`, `Blue`, `Teal`, `Green`, `Orange`, `Red`, `Pink`, or `Purple`. The accent drives buttons, links, focus rings, selection colours, and other highlights.
+
+Theme settings are saved in `~/.config/pengy/settings.json` as `theme_mode`, `theme_accent`, and `ui_scale`, so they travel with the rest of your local Pengy configuration. The renderer also scales explicit markdown, code, and input fonts so the chat view tracks the configured UI scale instead of only resizing native widgets.
+
+---
+
+## Tasks
+
+Tasks are reusable prompt templates for workflows you repeat often — for example summarizing a YouTube video, drafting a release note, or running a standard code-review checklist. Open **Tasks** from the desktop sidebar to create, edit, delete, or play templates.
+
+A task has a title and a prompt template. Use `%placeholder%` tokens anywhere in the template to ask for values when the task is played:
+
+```text
+Summarize this YouTube video: %Youtube Video URL%
+Always use the youtube transcription skill.
+```
+
+When you click **▶ Play**, Pengy asks for each unique placeholder once, renders the final prompt, and sends it through the normal chat path so tools, skills, history, and confirmation settings all work exactly like a hand-written prompt. Tasks are stored locally in `~/.config/pengy/tasks.json` and are shared by the Python, Rust, and C++ editions.
 
 ---
 
@@ -206,6 +238,7 @@ pengy/
 ├── core/
 │   ├── config.py        # Settings load/save + system message templating
 │   ├── chat_manager.py  # Chat session CRUD
+│   ├── task_manager.py  # Task template CRUD + placeholder rendering
 │   ├── llm_client.py    # API client (generator protocol for tool handling)
 │   └── tools.py         # Tool definitions and execution
 ├── ui/
@@ -214,7 +247,9 @@ pengy/
 │   ├── chat_view.py     # Markdown chat renderer
 │   ├── chat_input.py    # Input field + file attachment
 │   ├── chat_worker.py   # Background thread driving the LLM generator
-│   └── settings_dialog.py  # Settings dialog
+│   ├── settings_dialog.py  # Settings dialog
+│   ├── tasks_dialog.py     # Task template manager/player
+│   └── theme.py            # Light/dark/accent theme system
 └── web/
     ├── app.py           # Flask application (routes, WebWorker, SSE)
     ├── main.py          # Web entry point (argparse, app.run)
@@ -275,7 +310,7 @@ Pengy (Python) is the **reference implementation**. Two high-performance ports a
 | [**PengyR**](https://github.com/patw/PengyR) | Rust + Qt6 | High-performance native binary, statically-linked core |
 | [**PengyCPP**](https://github.com/patw/PengyCPP) | C++17 + Qt6 | Highest performance, smallest memory footprint, zero external dependencies |
 
-All three offer the same 11 tools, three interfaces (GUI/CLI/Web), and full chat interop. PengyR and PengyCPP ship pre-built AppImage, `.deb`, `.dmg`, and `.zip` releases for Linux, macOS, and Windows.
+All three offer the same 11 tools, desktop theme controls, reusable task templates, three interfaces (GUI/CLI/Web), and full chat/task interop. PengyR and PengyCPP ship pre-built AppImage, `.deb`, `.dmg`, and `.zip` releases for Linux, macOS, and Windows.
 
 ---
 
