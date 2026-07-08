@@ -17,6 +17,7 @@ class ChatHistoryWidget(QWidget):
     chat_selected = Signal(str)
     new_chat_requested = Signal()
     settings_requested = Signal()
+    tasks_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -41,6 +42,12 @@ class ChatHistoryWidget(QWidget):
         self.settings_btn.setFixedHeight(36)
         self.settings_btn.clicked.connect(lambda: self.settings_requested.emit())
         layout.addWidget(self.settings_btn)
+
+        # Tasks button
+        self.tasks_btn = QPushButton("📋 Tasks")
+        self.tasks_btn.setFixedHeight(36)
+        self.tasks_btn.clicked.connect(lambda: self.tasks_requested.emit())
+        layout.addWidget(self.tasks_btn)
 
         layout.addSpacing(8)
 

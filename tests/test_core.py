@@ -308,6 +308,53 @@ class TestChatManager:
 
 
 # ---------------------------------------------------------------------------
+# task_manager tests
+# ---------------------------------------------------------------------------
+
+class TestTaskManager:
+    def test_create_update_delete_task(self, tmp_cfg_dir):
+        from pengy.core import task_manager as tm
+        tm.TASKS_DIR = tmp_cfg_dir
+        tm.TASKS_FILE = tmp_cfg_dir / "tasks.json"
+
+        first = tm.create_task("First", "Prompt one")
+        second = tm.create_task("Second", "Prompt two")
+
+        tasks = tm.load_tasks()
+        assert [t["id"] for t in tasks] == [first["id"], second["id"]]
+        assert tasks[0]["title"] == "First"
+
+        updated = tm.update_task(first["id"], "Updated", "Prompt %thing%")
+        assert updated is not None
+        tasks = tm.load_tasks()
+        assert [t["id"] for t in tasks] == [first["id"], second["id"]]
+        assert tasks[0]["title"] == "Updated"
+        assert tasks[0]["template"] == "Prompt %thing%"
+
+        tm.delete_task(first["id"])
+        tasks = tm.load_tasks()
+        assert [t["id"] for t in tasks] == [second["id"]]
+
+    def test_placeholder_extract_and_render(self):
+        from pengy.core.task_manager import extract_placeholders, render_template
+
+        template = "Summarize %URL% with % Skill %, then revisit %URL%. JSON: {\"ok\": true}"
+        assert extract_placeholders(template) == ["URL", "Skill"]
+        rendered = render_template(template, {"URL": "https://youtu.be/x", "Skill": "youtube transcript"})
+        assert rendered == "Summarize https://youtu.be/x with youtube transcript, then revisit https://youtu.be/x. JSON: {\"ok\": true}"
+
+    def test_corrupt_tasks_recovery(self, tmp_cfg_dir):
+        from pengy.core import task_manager as tm
+        tm.TASKS_DIR = tmp_cfg_dir
+        tm.TASKS_FILE = tmp_cfg_dir / "tasks.json"
+
+        tm.TASKS_FILE.write_text("garbage {{{")
+        assert tm.load_tasks() == []
+        backups = list(tmp_cfg_dir.glob("tasks.json.corrupt-*"))
+        assert len(backups) == 1
+
+
+# ---------------------------------------------------------------------------
 # tools tests
 # ---------------------------------------------------------------------------
 

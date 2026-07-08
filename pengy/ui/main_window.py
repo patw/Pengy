@@ -21,6 +21,7 @@ from pengy.ui.chat_view import ChatView
 from pengy.ui.chat_input import ChatInputWidget
 from pengy.ui.chat_worker import ChatWorker
 from pengy.ui.settings_dialog import SettingsDialog
+from pengy.ui.tasks_dialog import TasksDialog
 from pengy.ui.theme import get_theme, qt_app_stylesheet
 
 
@@ -48,6 +49,7 @@ class MainWindow(QMainWindow):
 
         self.chat_history.chat_selected.connect(self.load_chat)
         self.chat_history.settings_requested.connect(self.open_settings)
+        self.chat_history.tasks_requested.connect(self.open_tasks)
 
         # Create initial chat if none exist
         chats = load_chats()
@@ -169,6 +171,12 @@ class MainWindow(QMainWindow):
                 self.config.get("model", "gpt-4o"),
                 self.config.get("tool_confirmation", "none"),
             )
+
+    def open_tasks(self):
+        """Open the task/template manager."""
+        dialog = TasksDialog(theme=self._theme, parent=self)
+        dialog.task_played.connect(lambda prompt: self.send_message(prompt))
+        dialog.exec()
 
     def load_chat(self, chat_id: str):
         """Load a chat session."""

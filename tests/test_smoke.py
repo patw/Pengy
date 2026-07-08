@@ -21,6 +21,7 @@ CORE_MODULES = [
     "pengy.core.config",
     "pengy.core.llm_client",
     "pengy.core.chat_manager",
+    "pengy.core.task_manager",
     "pengy.core.tools",
 ]
 
@@ -35,6 +36,7 @@ UI_MODULES = [
     "pengy.ui.chat_worker",
     "pengy.ui.main_window",
     "pengy.ui.settings_dialog",
+    "pengy.ui.tasks_dialog",
 ]
 
 
