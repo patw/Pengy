@@ -172,7 +172,7 @@ class SettingsDialog(QDialog):
         current_scale = config.get("ui_scale", 100)
         idx = self._scale_values.index(current_scale) if current_scale in self._scale_values else 1
         self.scale_combo.setCurrentIndex(idx)
-        scale_row.addRow("UI Scale (restart to apply):", self.scale_combo)
+        scale_row.addRow("UI Scale (restart for full UI):", self.scale_combo)
         layout.addLayout(scale_row)
 
         # Tool Timeout

@@ -12,16 +12,22 @@ from pygments import highlight
 from pygments.lexers import get_lexer_by_name, TextLexer
 from pygments.formatters import HtmlFormatter
 
-from pengy.ui.theme import get_theme
+from pengy.ui.theme import get_theme, scaled_font_size
+
+
+def _fmt_pt(value: float) -> str:
+    return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
 def _build_css(theme: dict[str, str] | None = None) -> str:
     theme = theme or get_theme()
     fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
+    body_pt = _fmt_pt(scaled_font_size(10, theme))
+    label_pt = _fmt_pt(scaled_font_size(9, theme))
     return f"""
 body {{
     font-family: "{fixed}";
-    font-size: 10pt;
+    font-size: {body_pt}pt;
     background-color: {theme['bg']};
     color: {theme['fg']};
     margin: 8px;
@@ -41,11 +47,11 @@ th {{
     font-weight: bold;
 }}
 img {{ max-width: 600px; }}
-.role-user {{ color:{theme['user_label']}; font-weight:bold; font-size:9pt; margin:8px 0 2px 0; }}
-.role-assistant {{ color:{theme['assistant_label']}; font-weight:bold; font-size:9pt; margin:8px 0 2px 0; }}
+.role-user {{ color:{theme['user_label']}; font-weight:bold; font-size:{label_pt}pt; margin:8px 0 2px 0; }}
+.role-assistant {{ color:{theme['assistant_label']}; font-weight:bold; font-size:{label_pt}pt; margin:8px 0 2px 0; }}
 .tool-card {{ border:1px solid {theme['border_soft']}; padding:4px 8px; margin:6px 0; background-color:{theme['tool_bg']}; }}
 .tool-link {{ color:{theme['link']}; text-decoration:none; font-weight:bold; }}
-.tool-pre {{ background-color:{theme['tool_arg_bg']}; color:{theme['code_fg']}; padding:4px; margin:2px 0; font-size:9pt; }}
+.tool-pre {{ background-color:{theme['tool_arg_bg']}; color:{theme['code_fg']}; padding:4px; margin:2px 0; font-size:{label_pt}pt; }}
 .code-pre {{ background-color:{theme['code_bg']}; color:{theme['code_fg']}; padding:10px; margin:6px 0; }}
 .muted {{ color:{theme['muted']}; }}
 .declined {{ color:{theme['danger']}; }}
@@ -67,15 +73,19 @@ class ChatView(QTextBrowser):
         self._image_lock = threading.Lock()
         self._image_loaded.connect(self._render)
         self.md_extensions = ["fenced_code", "codehilite", "tables", "footnotes"]
-        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        font.setPointSize(10)
-        self.setFont(font)
+        self._apply_font(self._theme)
         self.apply_theme(self._theme)
         self.setOpenLinks(False)
+
+    def _apply_font(self, theme: dict[str, str]):
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        font.setPointSizeF(scaled_font_size(10, theme))
+        self.setFont(font)
 
     def apply_theme(self, theme: dict[str, str]):
         """Apply a theme and re-render existing messages."""
         self._theme = theme
+        self._apply_font(theme)
         self.setStyleSheet(
             f"QTextBrowser {{ background-color: {theme['bg']}; color: {theme['fg']}; border: none; padding: 0; }}"
         )

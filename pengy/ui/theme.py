@@ -261,14 +261,43 @@ def resolve_theme_mode(mode: str | None) -> str:
     return "dark" if _is_dark_color(window_color) else "light"
 
 
+def ui_scale_factor(config_or_theme: dict | None = None) -> float:
+    """Return the configured UI scale as a multiplier.
+
+    Qt's global scale factor handles native widget sizing after restart, but
+    rich-text HTML and explicit fixed-font widgets need to opt in directly.
+    """
+    raw_scale = (config_or_theme or {}).get("ui_scale", 100)
+    try:
+        scale = float(raw_scale)
+    except (TypeError, ValueError):
+        scale = 100.0
+    # Keep manually-entered config values sane while preserving the Settings
+    # dialog's normal 75–200% range.
+    scale = max(50.0, min(scale, 300.0))
+    return scale / 100.0
+
+
+def scaled_font_size(base_pt: float, config_or_theme: dict | None = None) -> float:
+    """Scale a point-size font value by the configured UI scale."""
+    return max(1.0, base_pt * ui_scale_factor(config_or_theme))
+
+
+def scaled_size(base_px: int, config_or_theme: dict | None = None) -> int:
+    """Scale a pixel-size UI value by the configured UI scale."""
+    return max(1, round(base_px * ui_scale_factor(config_or_theme)))
+
+
 def get_theme(config_or_mode: dict | str | None = None, accent: str | None = None) -> dict[str, str]:
     """Return a composed theme from config or explicit mode/accent values."""
     if isinstance(config_or_mode, dict):
         requested_mode = config_or_mode.get("theme_mode", "system")
         requested_accent = config_or_mode.get("theme_accent", "default")
+        requested_scale = config_or_mode.get("ui_scale", 100)
     else:
         requested_mode = config_or_mode or "system"
         requested_accent = accent or "default"
+        requested_scale = 100
 
     resolved_mode = resolve_theme_mode(requested_mode)
     if requested_accent not in ACCENTS:
@@ -279,6 +308,7 @@ def get_theme(config_or_mode: dict | str | None = None, accent: str | None = Non
     theme.update(ACCENTS[requested_accent])
     theme.update(SEMANTIC)
     theme["requested_mode"] = requested_mode if requested_mode in THEME_MODES else "system"
+    theme["ui_scale"] = str(requested_scale)
     return theme
 
 

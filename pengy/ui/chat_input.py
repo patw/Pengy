@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt, QMimeData
 from PySide6.QtGui import QFont, QFontDatabase, QKeyEvent, QImage, QPixmap
 
-from pengy.ui.theme import get_theme
+from pengy.ui.theme import get_theme, scaled_font_size, scaled_size
 
 
 _IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
@@ -54,16 +54,16 @@ class _InputEdit(QTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        fixed_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        fixed_font.setPointSize(10)
-        self.setFont(fixed_font)
         self.setPlaceholderText("Type a message... (Enter to send, Shift+Enter for new line)")
-        self.setMaximumHeight(60)
-        self.setMinimumHeight(40)
         self.apply_theme(get_theme())
         self.installEventFilter(self)
 
     def apply_theme(self, theme: dict[str, str]):
+        fixed_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        fixed_font.setPointSizeF(scaled_font_size(10, theme))
+        self.setFont(fixed_font)
+        self.setMaximumHeight(scaled_size(60, theme))
+        self.setMinimumHeight(scaled_size(40, theme))
         self.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {theme['input_bg']};

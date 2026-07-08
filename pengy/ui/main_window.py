@@ -22,7 +22,7 @@ from pengy.ui.chat_input import ChatInputWidget
 from pengy.ui.chat_worker import ChatWorker
 from pengy.ui.settings_dialog import SettingsDialog
 from pengy.ui.tasks_dialog import TasksDialog
-from pengy.ui.theme import get_theme, qt_app_stylesheet
+from pengy.ui.theme import get_theme, qt_app_stylesheet, scaled_size
 
 
 class MainWindow(QMainWindow):
@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.chat_input)
 
         self._stop_btn = QPushButton("⏹ Stop")
-        self._stop_btn.setFixedHeight(32)
+        self._stop_btn.setFixedHeight(scaled_size(32, self._theme))
         self._stop_btn.clicked.connect(self._stop_worker)
         self._stop_btn.hide()
         input_layout.addWidget(self._stop_btn)
@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self.chat_view.apply_theme(self._theme)
         self.chat_input.apply_theme(self._theme)
         self.chat_history.apply_theme(self._theme)
+        self._stop_btn.setFixedHeight(scaled_size(32, self._theme))
         self._stop_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {self._theme['danger']};
