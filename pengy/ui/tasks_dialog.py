@@ -122,8 +122,8 @@ class TasksDialog(QDialog):
         text_layout.addWidget(title)
 
         preview = (task.get("template", "") or "").replace("\n", " ")
-        if len(preview) > 140:
-            preview = preview[:140] + "…"
+        if len(preview) > 70:
+            preview = preview[:70] + "…"
         preview_label = QLabel(preview)
         preview_label.setStyleSheet(f"font-size: 11px; color: {self._theme['muted']};")
         preview_label.setMinimumWidth(0)
