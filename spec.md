@@ -258,6 +258,7 @@ The worker remains in the `_workers` dict until the SSE endpoint has drained its
 | GET | `/chat/<id>/stream` | SSE endpoint — streams events until final response |
 | POST | `/chat/<id>/confirm` | Unblock tool confirmation (confirmed/declined/yolo) |
 | POST | `/chat/<id>/sudo` | Provide sudo password to blocked worker |
+| POST | `/chat/<id>/stop` | Cancel running generation for a chat |
 | POST | `/chat/<id>/delete` | Delete chat and redirect to index |
 | GET/POST | `/settings` | View/update all config fields |
 

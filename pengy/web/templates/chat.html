@@ -109,6 +109,9 @@
     <button type="submit" id="sendBtn" class="btn btn-primary align-self-end">
       <i class="bi bi-send-fill"></i>
     </button>
+    <button type="button" id="stopBtn" class="btn btn-danger align-self-end d-none">
+      <i class="bi bi-stop-fill"></i>
+    </button>
   </form>
 </div>
 
@@ -205,8 +208,23 @@ function setProcessing(val) {
   isProcessing = val;
   document.getElementById('messageInput').disabled = val;
   document.getElementById('sendBtn').disabled = val;
+  document.getElementById('stopBtn').classList.toggle('d-none', !val);
   if (!val) document.getElementById('messageInput').focus();
 }
+
+// ── Stop ─────────────────────────────────────────────────────
+
+function stopGeneration() {
+  fetch(`/chat/${CHAT_ID}/stop`, { method: 'POST' })
+    .catch(err => console.error('Stop error:', err));
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  hideThinking();
+  setProcessing(false);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('stopBtn').addEventListener('click', stopGeneration);
+});
 
 // ── Thinking indicator ────────────────────────────────────────
 

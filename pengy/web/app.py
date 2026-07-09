@@ -439,6 +439,15 @@ def chat_sudo(chat_id: str):
     return jsonify({"status": "ok"})
 
 
+@app.route("/chat/<chat_id>/stop", methods=["POST"])
+def chat_stop(chat_id: str):
+    with _workers_lock:
+        worker = _workers.get(chat_id)
+    if worker:
+        worker.cancel()
+    return jsonify({"status": "ok"})
+
+
 @app.route("/chat/<chat_id>/delete", methods=["POST"])
 def chat_delete(chat_id: str):
     with _workers_lock:
