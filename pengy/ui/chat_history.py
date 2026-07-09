@@ -86,8 +86,12 @@ class ChatHistoryWidget(QWidget):
         status_row_layout.addWidget(self.status_label)
 
         self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet("color: #a6e3a1; font-size: 14px;")
+        self.status_dot.setStyleSheet(f"color: {self._theme['success_soft']}; font-size: 14px;")
         status_row_layout.addWidget(self.status_dot)
+
+        self.status_text = QLabel("Idle")
+        self.status_text.setStyleSheet(f"color: {self._theme['fg']};")
+        status_row_layout.addWidget(self.status_text)
         status_row_layout.addStretch()
 
         self._blink_timer = QTimer(self)
@@ -271,26 +275,30 @@ class ChatHistoryWidget(QWidget):
         """Toggle the status dot between idle (green) and thinking (red blinking)."""
         if thinking:
             self._dot_phase = True
-            self.status_dot.setStyleSheet("color: #f38ba8; font-size: 14px;")
+            self.status_dot.setStyleSheet(f"color: {self._theme['danger']}; font-size: 14px;")
+            self.status_text.setText("Thinking…")
             self._blink_timer.start()
         else:
             self._blink_timer.stop()
-            self.status_dot.setStyleSheet("color: #a6e3a1; font-size: 14px;")
+            self.status_dot.setStyleSheet(f"color: {self._theme['success_soft']}; font-size: 14px;")
+            self.status_text.setText("Idle")
 
     def set_tool_running(self, running: bool):
         """Show a solid orange dot while a tool is executing."""
         if running:
             self._blink_timer.stop()
-            self.status_dot.setStyleSheet("color: #fab387; font-size: 14px;")
+            self.status_dot.setStyleSheet(f"color: {self._theme['running']}; font-size: 14px;")
+            self.status_text.setText("Tool running")
         else:
             # Revert to thinking (red blinking) — caller should have set that
             self._dot_phase = True
-            self.status_dot.setStyleSheet("color: #f38ba8; font-size: 14px;")
+            self.status_dot.setStyleSheet(f"color: {self._theme['danger']}; font-size: 14px;")
+            self.status_text.setText("Thinking…")
             self._blink_timer.start()
 
     def _blink_dot(self):
         self._dot_phase = not self._dot_phase
-        color = "#f38ba8" if self._dot_phase else "transparent"
+        color = self._theme['danger'] if self._dot_phase else "transparent"
         self.status_dot.setStyleSheet(f"color: {color}; font-size: 14px;")
 
     _CONFIRM_LABELS = {"all": "Tool Confirm: YOLO", "safe": "Tool Confirm: Safe", "none": "Tool Confirm: None"}

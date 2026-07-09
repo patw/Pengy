@@ -26,7 +26,7 @@ class SettingsDialog(QDialog):
         self.config = config
         self.setWindowTitle("Settings")
         self.setModal(True)
-        self.resize(520, 500)
+        self.resize(520, 520)
 
         layout = QVBoxLayout(self)
 

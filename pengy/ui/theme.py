@@ -261,6 +261,25 @@ def resolve_theme_mode(mode: str | None) -> str:
     return "dark" if _is_dark_color(window_color) else "light"
 
 
+def _dpi_scale_already_applied() -> float:
+    """Return the QT_SCALE_FACTOR baked in at process launch (1.0 if unset).
+
+    main.py sets this env var from ui_scale before QApplication is created,
+    which makes Qt natively scale every logical pixel (fonts and widget
+    geometry alike) for the whole app. ui_scale_factor() must divide that
+    back out, or a value already covered by QT_SCALE_FACTOR gets multiplied
+    again here. Before a restart QT_SCALE_FACTOR still reflects the old
+    setting, so this correctly yields a live-preview delta; after a restart
+    it collapses to a no-op once the two agree.
+    """
+    import os
+    try:
+        v = float(os.environ.get("QT_SCALE_FACTOR", "1.0"))
+    except (TypeError, ValueError):
+        v = 1.0
+    return v if v > 0 else 1.0
+
+
 def ui_scale_factor(config_or_theme: dict | None = None) -> float:
     """Return the configured UI scale as a multiplier.
 
@@ -275,7 +294,7 @@ def ui_scale_factor(config_or_theme: dict | None = None) -> float:
     # Keep manually-entered config values sane while preserving the Settings
     # dialog's normal 75–200% range.
     scale = max(50.0, min(scale, 300.0))
-    return scale / 100.0
+    return (scale / 100.0) / _dpi_scale_already_applied()
 
 
 def scaled_font_size(base_pt: float, config_or_theme: dict | None = None) -> float:
@@ -314,6 +333,8 @@ def get_theme(config_or_mode: dict | str | None = None, accent: str | None = Non
 
 def qt_app_stylesheet(theme: dict[str, str]) -> str:
     """Application/window-level Qt stylesheet for common widgets."""
+    pad_v = scaled_size(5, theme)
+    pad_h = scaled_size(10, theme)
     return f"""
     QMainWindow, QWidget {{
         background-color: {theme['bg']};
@@ -353,7 +374,7 @@ def qt_app_stylesheet(theme: dict[str, str]) -> str:
         color: {theme['fg']};
         border: 1px solid {theme['border']};
         border-radius: 8px;
-        padding: 5px 10px;
+        padding: {pad_v}px {pad_h}px;
     }}
     QPushButton:hover {{
         background-color: {theme['hover']};

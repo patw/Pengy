@@ -133,7 +133,7 @@ class ChatInputWidget(QWidget):
         row_layout.setSpacing(4)
 
         self._attach_btn = QPushButton("📎")
-        self._attach_btn.setFixedSize(32, 32)
+        self._attach_btn.setFixedSize(scaled_size(36, self._theme), scaled_size(36, self._theme))
         self._attach_btn.setToolTip("Attach a file (text or image)")
         self._attach_btn.clicked.connect(self._pick_file)
         row_layout.addWidget(self._attach_btn)
@@ -148,6 +148,8 @@ class ChatInputWidget(QWidget):
     def apply_theme(self, theme: dict[str, str]):
         self._theme = theme
         self._edit.apply_theme(theme)
+        sz = scaled_size(36, theme)
+        self._attach_btn.setFixedSize(sz, sz)
         self._attach_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
