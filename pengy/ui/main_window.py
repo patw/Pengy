@@ -428,21 +428,19 @@ class MainWindow(QMainWindow):
     def _handle_final_response(self, response: dict):
         """Handle the final text response from the LLM."""
         content = response.get("content", "")
-        # Add assistant message to chat
-        assistant_msg = response.get("message") or {"role": "assistant", "content": content}
-        self.current_chat["messages"].append(assistant_msg)
-        self.chat_view.append_message("assistant", content)
 
-        # Show token usage
+        if content:
+            assistant_msg = response.get("message") or {"role": "assistant", "content": content}
+            self.current_chat["messages"].append(assistant_msg)
+            self.chat_view.append_message("assistant", content)
+            save_chat(self.current_chat)
+
         usage = response.get("usage", {})
         if usage:
             self.chat_history.update_token_usage(
                 usage.get("prompt_tokens", 0),
                 usage.get("completion_tokens", 0),
             )
-
-        # Save chat
-        save_chat(self.current_chat)
 
 
 class ToolConfirmDialog(QDialog):
