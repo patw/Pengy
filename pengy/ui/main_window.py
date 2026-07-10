@@ -152,6 +152,12 @@ class MainWindow(QMainWindow):
 
     def create_new_chat(self):
         """Create a new chat session."""
+        chats = load_chats()
+        if chats and chats[0]["title"] == "New Chat" and not chats[0].get("messages"):
+            self.current_chat = chats[0]
+            self.chat_history.select_chat_by_id(chats[0]["id"])
+            self.chat_view.clear()
+            return
         self.current_chat = create_chat()
         self.chat_history.load_chats(load_chats())
         self.chat_history.select_chat_by_id(self.current_chat["id"])

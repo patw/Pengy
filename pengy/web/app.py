@@ -327,6 +327,9 @@ def index():
 
 @app.route("/chat/new", methods=["POST"])
 def new_chat():
+    chats = load_chats()
+    if chats and chats[0]["title"] == "New Chat" and not chats[0].get("messages"):
+        return redirect(url_for("chat_view", chat_id=chats[0]["id"]))
     chat = create_chat()
     return redirect(url_for("chat_view", chat_id=chat["id"]))
 
