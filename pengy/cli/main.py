@@ -122,6 +122,7 @@ class PengyCLI:
         self.llm_client: LLMClient | None = None
         self.current_chat: dict | None = None
         self._no_save = no_save
+        self._output_mode = "pretty"  # pretty | raw | json | silent
         self._update_llm_client()
 
         # "yes to all this turn" — resets each time the LLM returns a fresh
@@ -796,6 +797,24 @@ class PengyCLI:
         content = response.get("content") or ""
         chat["messages"].append(response.get("message") or {"role": "assistant", "content": content})
 
+        # Handle non-pretty output modes
+        if self._output_mode == "silent":
+            return
+
+        if self._output_mode == "json":
+            result = {
+                "content": content,
+                "usage": response.get("usage", {}),
+            }
+            self.console.print_json(data=result)
+            return
+
+        if self._output_mode == "raw":
+            if content.strip():
+                print(content)
+            return
+
+        # Pretty (default) — rich markdown rendering
         if content.strip():
             self.console.print()
             self.console.print(
@@ -918,16 +937,57 @@ def main():
         action="store_true",
         help="Show version information and exit.",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model to use (overrides config).",
+    )
+    parser.add_argument(
+        "--system",
+        type=str,
+        default=None,
+        help="System message template (overrides config).",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        choices=["pretty", "raw", "json", "silent"],
+        default=None,
+        help="Output format for single-shot mode (default: pretty).",
+    )
+    parser.add_argument(
+        "--config-dir",
+        type=str,
+        default=None,
+        help="Use a custom config directory instead of ~/.config/pengy.",
+    )
     args = parser.parse_args()
 
     if args.version:
         _print_version()
         return
 
+    # Apply config directory override as early as possible
+    if args.config_dir:
+        from pengy.core.config import set_config_dir
+        set_config_dir(args.config_dir)
+
+    # Load/apply config overrides from CLI flags
+    config = load_config()
+    if args.model:
+        config["model"] = args.model
+        save_config(config)
+    if args.system:
+        config["system_message"] = args.system
+        save_config(config)
+
     cli = PengyCLI(no_save=args.no_save)
 
     if args.prompt:
         prompt_text = " ".join(args.prompt)
+        if args.output:
+            cli._output_mode = args.output
         cli.run_single_shot(prompt_text)
     else:
         cli.run_interactive()

@@ -21,6 +21,7 @@ def _show_help(exit_code: int = 0):
     print("Options:")
     print("  -h, --help     Show this help message and exit.")
     print("  -v, --version  Show version information and exit.")
+    print("  --config-dir PATH  Use a custom config directory.")
     print()
     print("The desktop GUI launches a PySide6 window. No additional")
     print("command-line options are supported.")
@@ -29,13 +30,27 @@ def _show_help(exit_code: int = 0):
 
 def main():
     """Main entry point for the Pengy desktop GUI."""
-    # Handle -v/--version and -h/--help before doing anything else
+    # Handle flags before doing anything else
     for arg in sys.argv[1:]:
         if arg in ("-v", "--version"):
             print(f"Pengy v{_get_version()}")
             sys.exit(0)
         if arg in ("-h", "--help"):
             _show_help(0)
+
+    # Check for --config-dir
+    config_dir = None
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg == "--config-dir" and i < len(sys.argv):
+            config_dir = sys.argv[i + 1]
+            # Remove the flag and its value from sys.argv so QApplication doesn't choke
+            sys.argv.remove("--config-dir")
+            sys.argv.remove(config_dir)
+            break
+
+    if config_dir:
+        from pengy.core.config import set_config_dir
+        set_config_dir(config_dir)
 
     # Friendly import guard so ``pip install pengy`` (without [gui]) gives a
     # clear message instead of an ugly traceback.

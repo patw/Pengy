@@ -18,10 +18,15 @@ import pytest
 @pytest.fixture
 def tmp_cfg_dir():
     """Temporarily redirect pengy config to a temp directory."""
+    from pengy.core.config import set_config_dir
     with tempfile.TemporaryDirectory() as td:
         cfg = Path(td) / "pengy"
         cfg.mkdir()
+        set_config_dir(str(cfg))
         yield cfg
+    # Reset config dir after test
+    from pengy.core.config import set_config_dir
+    set_config_dir(None)
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +55,6 @@ class TestConfig:
 
     def test_save_load_roundtrip(self, tmp_cfg_dir):
         from pengy.core import config as cfg_mod
-        cfg_mod.CONFIG_DIR = tmp_cfg_dir
-        cfg_mod.CONFIG_FILE = tmp_cfg_dir / "settings.json"
 
         cfg = cfg_mod.load_config()
         cfg["model"] = "test-model"
@@ -64,11 +67,9 @@ class TestConfig:
 
     def test_corrupt_config_recovery(self, tmp_cfg_dir):
         from pengy.core import config as cfg_mod
-        cfg_mod.CONFIG_DIR = tmp_cfg_dir
-        cfg_mod.CONFIG_FILE = tmp_cfg_dir / "settings.json"
 
         # Write garbage
-        cfg_mod.CONFIG_FILE.write_text("this is not valid json {{{")
+        (tmp_cfg_dir / "settings.json").write_text("this is not valid json {{{")
 
         # Should load defaults without crashing
         loaded = cfg_mod.load_config()
@@ -80,11 +81,9 @@ class TestConfig:
 
     def test_defaults_merge(self, tmp_cfg_dir):
         from pengy.core import config as cfg_mod
-        cfg_mod.CONFIG_DIR = tmp_cfg_dir
-        cfg_mod.CONFIG_FILE = tmp_cfg_dir / "settings.json"
 
         # Save partial config
-        cfg_mod.CONFIG_FILE.write_text(json.dumps({"model": "partial"}))
+        (tmp_cfg_dir / "settings.json").write_text(json.dumps({"model": "partial"}))
 
         loaded = cfg_mod.load_config()
         # Partial value preserved
@@ -96,9 +95,7 @@ class TestConfig:
     def test_migrate_yolo_true(self, tmp_cfg_dir):
         """Old yolo_mode=True → tool_confirmation='all'."""
         from pengy.core import config as cfg_mod
-        cfg_mod.CONFIG_DIR = tmp_cfg_dir
-        cfg_mod.CONFIG_FILE = tmp_cfg_dir / "settings.json"
-        cfg_mod.CONFIG_FILE.write_text(json.dumps({"yolo_mode": True}))
+        (tmp_cfg_dir / "settings.json").write_text(json.dumps({"yolo_mode": True}))
 
         loaded = cfg_mod.load_config()
         assert loaded["tool_confirmation"] == "all"
@@ -108,9 +105,7 @@ class TestConfig:
     def test_migrate_auto_readonly_true(self, tmp_cfg_dir):
         """Old auto_approve_readonly=True → tool_confirmation='safe'."""
         from pengy.core import config as cfg_mod
-        cfg_mod.CONFIG_DIR = tmp_cfg_dir
-        cfg_mod.CONFIG_FILE = tmp_cfg_dir / "settings.json"
-        cfg_mod.CONFIG_FILE.write_text(json.dumps({"auto_approve_readonly": True}))
+        (tmp_cfg_dir / "settings.json").write_text(json.dumps({"auto_approve_readonly": True}))
 
         loaded = cfg_mod.load_config()
         assert loaded["tool_confirmation"] == "safe"
@@ -120,9 +115,7 @@ class TestConfig:
     def test_migrate_both_false(self, tmp_cfg_dir):
         """Old defaults (both false) → tool_confirmation='none'."""
         from pengy.core import config as cfg_mod
-        cfg_mod.CONFIG_DIR = tmp_cfg_dir
-        cfg_mod.CONFIG_FILE = tmp_cfg_dir / "settings.json"
-        cfg_mod.CONFIG_FILE.write_text(json.dumps({}))
+        (tmp_cfg_dir / "settings.json").write_text(json.dumps({}))
 
         loaded = cfg_mod.load_config()
         assert loaded["tool_confirmation"] == "none"
@@ -135,8 +128,6 @@ class TestConfig:
 class TestChatManager:
     def test_create_and_get_chat(self, tmp_cfg_dir):
         from pengy.core import chat_manager as cm
-        cm.CHATS_DIR = tmp_cfg_dir
-        cm.CHATS_FILE = tmp_cfg_dir / "chats.json"
 
         chat = cm.create_chat()
         assert chat["title"] == "New Chat"
@@ -149,8 +140,6 @@ class TestChatManager:
 
     def test_delete_chat(self, tmp_cfg_dir):
         from pengy.core import chat_manager as cm
-        cm.CHATS_DIR = tmp_cfg_dir
-        cm.CHATS_FILE = tmp_cfg_dir / "chats.json"
 
         chat = cm.create_chat()
         cm.delete_chat(chat["id"])
@@ -158,8 +147,6 @@ class TestChatManager:
 
     def test_save_chat_updates(self, tmp_cfg_dir):
         from pengy.core import chat_manager as cm
-        cm.CHATS_DIR = tmp_cfg_dir
-        cm.CHATS_FILE = tmp_cfg_dir / "chats.json"
 
         chat = cm.create_chat()
         chat["title"] = "Updated Title"
@@ -170,10 +157,8 @@ class TestChatManager:
 
     def test_corrupt_chats_recovery(self, tmp_cfg_dir):
         from pengy.core import chat_manager as cm
-        cm.CHATS_DIR = tmp_cfg_dir
-        cm.CHATS_FILE = tmp_cfg_dir / "chats.json"
 
-        cm.CHATS_FILE.write_text("garbage {{{")
+        (tmp_cfg_dir / "chats.json").write_text("garbage {{{")
 
         chats = cm.load_chats()
         assert chats == []  # Returns empty list
@@ -183,10 +168,8 @@ class TestChatManager:
 
     def test_corrupt_not_a_list(self, tmp_cfg_dir):
         from pengy.core import chat_manager as cm
-        cm.CHATS_DIR = tmp_cfg_dir
-        cm.CHATS_FILE = tmp_cfg_dir / "chats.json"
 
-        cm.CHATS_FILE.write_text('{"key": "not a list"}')
+        (tmp_cfg_dir / "chats.json").write_text('{"key": "not a list"}')
 
         chats = cm.load_chats()
         assert chats == []
@@ -314,8 +297,6 @@ class TestChatManager:
 class TestTaskManager:
     def test_create_update_delete_task(self, tmp_cfg_dir):
         from pengy.core import task_manager as tm
-        tm.TASKS_DIR = tmp_cfg_dir
-        tm.TASKS_FILE = tmp_cfg_dir / "tasks.json"
 
         first = tm.create_task("First", "Prompt one")
         second = tm.create_task("Second", "Prompt two")
@@ -345,10 +326,8 @@ class TestTaskManager:
 
     def test_corrupt_tasks_recovery(self, tmp_cfg_dir):
         from pengy.core import task_manager as tm
-        tm.TASKS_DIR = tmp_cfg_dir
-        tm.TASKS_FILE = tmp_cfg_dir / "tasks.json"
 
-        tm.TASKS_FILE.write_text("garbage {{{")
+        (tmp_cfg_dir / "tasks.json").write_text("garbage {{{")
         assert tm.load_tasks() == []
         backups = list(tmp_cfg_dir.glob("tasks.json.corrupt-*"))
         assert len(backups) == 1

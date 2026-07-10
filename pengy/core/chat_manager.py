@@ -7,8 +7,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-CHATS_DIR = Path.home() / ".config" / "pengy"
-CHATS_FILE = CHATS_DIR / "chats.json"
+from pengy.core.config import get_config_dir
+
+
+def _chats_path() -> Path:
+    """Return path to chats.json in the current config directory."""
+    return get_config_dir() / "chats.json"
 
 
 def _atomic_write(target: Path, data) -> None:
@@ -55,15 +59,17 @@ def _safe_json_load(path: Path) -> list | None:
 
 def load_chats() -> list[dict]:
     """Load all chat sessions from JSON file, with corruption recovery."""
-    CHATS_DIR.mkdir(parents=True, exist_ok=True)
-    data = _safe_json_load(CHATS_FILE)
+    path = _chats_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _safe_json_load(path)
     return data if data is not None else []
 
 
 def save_chats(chats: list[dict]) -> None:
     """Save all chat sessions to JSON file atomically."""
-    CHATS_DIR.mkdir(parents=True, exist_ok=True)
-    _atomic_write(CHATS_FILE, chats)
+    path = _chats_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, chats)
 
 
 def create_chat() -> dict:

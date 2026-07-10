@@ -15,10 +15,14 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-TASKS_DIR = Path.home() / ".config" / "pengy"
-TASKS_FILE = TASKS_DIR / "tasks.json"
+from pengy.core.config import get_config_dir
 
 _PLACEHOLDER_RE = re.compile(r"%([^%\r\n]+)%")
+
+
+def _tasks_path() -> Path:
+    """Return path to tasks.json in the current config directory."""
+    return get_config_dir() / "tasks.json"
 
 
 def _now() -> str:
@@ -80,8 +84,9 @@ def _normalize_task(task: dict) -> dict:
 
 def load_tasks() -> list[dict]:
     """Load all task templates in insertion order."""
-    TASKS_DIR.mkdir(parents=True, exist_ok=True)
-    data = _safe_json_load(TASKS_FILE)
+    path = _tasks_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _safe_json_load(path)
     if data is None:
         return []
     return [_normalize_task(t) for t in data if isinstance(t, dict)]
@@ -89,8 +94,9 @@ def load_tasks() -> list[dict]:
 
 def save_tasks(tasks: list[dict]) -> None:
     """Save all task templates in the provided order."""
-    TASKS_DIR.mkdir(parents=True, exist_ok=True)
-    _atomic_write(TASKS_FILE, [_normalize_task(t) for t in tasks])
+    path = _tasks_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, [_normalize_task(t) for t in tasks])
 
 
 def create_task(title: str, template: str) -> dict:

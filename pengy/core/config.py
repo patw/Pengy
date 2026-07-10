@@ -9,8 +9,27 @@ import tempfile
 from datetime import date
 from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".config" / "pengy"
-CONFIG_FILE = CONFIG_DIR / "settings.json"
+# Global override for config directory (set via --config-dir)
+_config_dir_override: str | None = None
+
+def set_config_dir(path: str) -> None:
+    """Override the config directory (e.g. from --config-dir flag)."""
+    global _config_dir_override
+    _config_dir_override = path
+
+def get_config_dir() -> Path:
+    """Return the current config directory."""
+    if _config_dir_override:
+        return Path(_config_dir_override).expanduser().resolve()
+    return Path.home() / ".config" / "pengy"
+
+CONFIG_FILE = Path("settings.json")
+CHATS_FILE = Path("chats.json")
+TASKS_FILE = Path("tasks.json")
+
+def _config_path(*parts: str) -> Path:
+    """Resolve a path relative to the config directory."""
+    return get_config_dir().joinpath(*parts)
 
 DEFAULT_SYSTEM_MESSAGE = (
     "You are a helpful assistant named Pengy. "
@@ -89,8 +108,8 @@ def load_config() -> dict:
     On first run (no file exists), writes defaults to disk so the file
     is immediately available for hand-editing.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    saved = _safe_json_load(CONFIG_FILE)
+    _config_path().mkdir(parents=True, exist_ok=True)
+    saved = _safe_json_load(_config_path("settings.json"))
     if saved is not None and isinstance(saved, dict):
         config = {**DEFAULTS, **saved}
         _migrate_config(config, saved)
@@ -130,4 +149,4 @@ def _migrate_config(config: dict, saved: dict) -> None:
 
 def save_config(config: dict) -> None:
     """Save configuration to JSON file atomically."""
-    _atomic_write(CONFIG_FILE, config)
+    _atomic_write(_config_path("settings.json"), config)
