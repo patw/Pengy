@@ -18,9 +18,18 @@ def set_config_dir(path: str) -> None:
     _config_dir_override = path
 
 def get_config_dir() -> Path:
-    """Return the current config directory."""
+    """Return the current config directory.
+
+    Resolution order (highest priority first):
+      1. ``_config_dir_override`` — set via :func:`set_config_dir` (CLI --config-dir, test fixtures)
+      2. ``PENGY_CONFIG_DIR`` env var — CI / global test baseline
+      3. ``~/.config/pengy`` — default user config directory
+    """
     if _config_dir_override:
         return Path(_config_dir_override).expanduser().resolve()
+    env = os.environ.get("PENGY_CONFIG_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
     return Path.home() / ".config" / "pengy"
 
 CONFIG_FILE = Path("settings.json")

@@ -26,18 +26,32 @@ from pengy.web.app import (
 
 @pytest.fixture
 def tmp_dirs():
-    """Temporarily redirect pengy config/chats to temp directories."""
-    with tempfile.TemporaryDirectory() as cfg_dir, tempfile.TemporaryDirectory() as chats_dir:
-        import pengy.core.config as cfg_mod
-        import pengy.core.chat_manager as cm
+    """Temporarily redirect pengy config/chats to a temp directory.
 
-        cfg_dir = Path(cfg_dir)
-        chats_dir = Path(chats_dir)
-        cfg_mod.CONFIG_DIR = cfg_dir
-        cfg_mod.CONFIG_FILE = cfg_dir / "settings.json"
-        cm.CHATS_DIR = chats_dir
-        cm.CHATS_FILE = chats_dir / "chats.json"
-        yield cfg_dir, chats_dir
+    Uses ``set_config_dir`` (the correct API since the config.py refactor)
+    instead of monkey-patching module-level constants that no longer exist.
+    """
+    from pengy.core.config import set_config_dir, get_config_dir
+    from pathlib import Path as _Path
+    from pengy.core import config as cfg_mod
+
+    with tempfile.TemporaryDirectory(prefix="pengy-webtest-") as cfg_dir:
+        cfg_dir = _Path(cfg_dir)
+        cfg_dir.mkdir(exist_ok=True)
+        set_config_dir(str(cfg_dir))
+
+        # Safety assertion — fail loudly rather than corrupt live data
+        resolved = get_config_dir()
+        real = _Path.home() / ".config" / "pengy"
+        assert resolved != real, (
+            f"Config dir not redirected! get_config_dir()={resolved} "
+            f"matches real user config {real}. Aborting to protect live data."
+        )
+
+        yield cfg_dir, cfg_dir  # both config and chats live in the same dir now
+
+    # Reset config dir after test
+    set_config_dir(None)
 
 
 @pytest.fixture
