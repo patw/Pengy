@@ -52,6 +52,22 @@ from rich.text import Text
 
 
 # ---------------------------------------------------------------------------
+# version
+# ---------------------------------------------------------------------------
+
+def _print_version():
+    """Print the Pengy version and exit."""
+    try:
+        from importlib.metadata import version as _v
+        ver = _v("pengy")
+    except Exception:
+        from pengy import __version__
+        ver = __version__
+    print(f"Pengy v{ver}")
+
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
@@ -897,7 +913,16 @@ def main():
         action="store_true",
         help="Don't persist single-shot chats to history.",
     )
+    parser.add_argument(
+        "-v", "--version",
+        action="store_true",
+        help="Show version information and exit.",
+    )
     args = parser.parse_args()
+
+    if args.version:
+        _print_version()
+        return
 
     cli = PengyCLI(no_save=args.no_save)
 
