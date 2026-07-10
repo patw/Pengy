@@ -148,9 +148,22 @@ class PengyCLI:
         chats = load_chats()
         if chats:
             self.current_chat = chats[0]
+            msgs = self.current_chat.get("messages", [])
+            msg_count = len(msgs)
+            # Find the last user message for context
+            last_user = None
+            for m in reversed(msgs):
+                if m.get("role") == "user":
+                    last_user = m.get("content", "")
+                    break
+            last_preview = _truncate(last_user or "", 80)
+
             self.console.print(
-                f"[dim]Resumed chat:[/dim] [bold]{self.current_chat['title']}[/bold]"
+                f"[dim]Resumed:[/dim] [bold]{self.current_chat['title']}[/bold]"
+                f" [dim]({msg_count} messages)[/dim]"
             )
+            if last_preview:
+                self.console.print(f"[dim]Last:[/dim] {last_preview}")
         else:
             self.current_chat = create_chat()
             self.console.print("[dim]New chat created.[/dim]")
@@ -201,7 +214,9 @@ class PengyCLI:
         """Read-Eval-Print-Loop for interactive mode."""
         while True:
             try:
-                raw = Prompt.ask("\n[bold blue]You[/bold blue]")
+                title = self.current_chat.get("title", "?") if self.current_chat else "?"
+                prompt_label = f"[bold blue]{_truncate(title, 30)} › You[/bold blue]"
+                raw = Prompt.ask(f"\n{prompt_label}")
             except (KeyboardInterrupt, EOFError):
                 raise
 
@@ -247,6 +262,21 @@ class PengyCLI:
         elif cmd == "/new":
             self.current_chat = create_chat()
             self.console.print("[green]✓ New chat created.[/green]")
+
+        elif cmd == "/show":
+            self._cmd_show(args)
+
+        elif cmd == "/tail":
+            self._cmd_tail(args)
+
+        elif cmd == "/rename":
+            self._cmd_rename(args)
+
+        elif cmd == "/clear":
+            self._cmd_clear()
+
+        elif cmd == "/export":
+            self._cmd_export(args)
 
         elif cmd == "/yolo":
             self._cmd_yolo(args)
@@ -304,6 +334,11 @@ class PengyCLI:
 
         table.add_row("/help", "Show this help")
         table.add_row("/new", "Start a new chat")
+        table.add_row("/show [N]", "Show full conversation (optional: last N messages)")
+        table.add_row("/tail [N]", "Show the last N messages (default 5)")
+        table.add_row("/rename <title>", "Rename the current chat")
+        table.add_row("/clear", "Clear the terminal screen")
+        table.add_row("/export [path]", "Export current chat as Markdown")
         table.add_row("/config", "Show current configuration")
         table.add_row("/model <name>", "Change the model (e.g. /model gpt-4o)")
         table.add_row("/models", "Fetch available models from the endpoint")
@@ -318,10 +353,175 @@ class PengyCLI:
         table.add_row("/list", "List recent chats")
         table.add_row("/load <index>", "Load a chat by its /list index")
         table.add_row("/delete <index>", "Delete a chat by its /list index")
-        table.add_row("/attach <path>", "Attach a text file to your next message")
+        table.add_row("/attach", "Show file attachment help")
         table.add_row("/quit, /exit", "Exit Pengy CLI")
 
         self.console.print(table)
+
+    def _cmd_show(self, args: list[str]):
+        """Show the current conversation with role labels and message numbers."""
+        if not self.current_chat:
+            self.console.print("[dim]No active chat.[/dim]")
+            return
+        msgs = self.current_chat.get("messages", [])
+        if not msgs:
+            self.console.print("[dim]No messages in this chat.[/dim]")
+            return
+
+        limit = None
+        if args:
+            try:
+                limit = int(args[0])
+            except ValueError:
+                self.console.print("[red]Usage: /show [N]  — show last N messages[/red]")
+                return
+
+        display = msgs[-limit:] if limit else msgs
+
+        self.console.print()
+        self.console.print(
+            f"[bold]Conversation:[/bold] {self.current_chat['title']} "
+            f"[dim]({len(msgs)} messages total{', showing last ' + str(len(display)) if limit else ''})[/dim]"
+        )
+        self.console.print("[dim]" + "─" * 60 + "[/dim]")
+
+        for i, msg in enumerate(display, 1 if not limit else len(msgs) - len(display) + 1):
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts = []
+                for p in content:
+                    if isinstance(p, dict):
+                        if p.get("type") == "text":
+                            parts.append(p.get("text", ""))
+                        elif p.get("type") == "image_url":
+                            parts.append("[image]")
+                    else:
+                        parts.append(str(p))
+                content = " ".join(parts)
+
+            content = str(content) if content else ""
+
+            if role == "user":
+                self.console.print(f"[bold blue]#{i} You:[/bold blue] {content}")
+            elif role == "assistant":
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    tc_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+                    self.console.print(f"[bold green]#{i} Assistant:[/bold green] [dim](tool calls: {', '.join(tc_names)})[/dim]")
+                if content:
+                    preview = _truncate(content, 100)
+                    self.console.print(f"[dim]  {preview}[/dim]")
+            elif role == "tool":
+                tc_id = msg.get("tool_call_id", "?")[:8]
+                preview = _truncate(content, 80)
+                self.console.print(f"[dim]#{i} Tool [{tc_id}]: {preview}[/dim]")
+            elif role == "system":
+                self.console.print(f"[dim italic]#{i} System: {_truncate(content, 100)}[/dim italic]")
+
+        self.console.print("[dim]" + "─" * 60 + "[/dim]")
+
+    def _cmd_tail(self, args: list[str]):
+        """Show the last N messages (default 5)."""
+        if not self.current_chat:
+            self.console.print("[dim]No active chat.[/dim]")
+            return
+        try:
+            n = int(args[0]) if args else 5
+        except ValueError:
+            self.console.print("[red]Usage: /tail [N]  — show last N messages (default 5)[/red]")
+            return
+        self._cmd_show([str(n)])
+
+    def _cmd_rename(self, args: list[str]):
+        """Rename the current chat."""
+        if not self.current_chat:
+            self.console.print("[dim]No active chat.[/dim]")
+            return
+        if not args:
+            self.console.print("[dim]Usage: /rename <new title>[/dim]")
+            return
+        new_title = " ".join(args)
+        old_title = self.current_chat.get("title", "?")
+        self.current_chat["title"] = new_title
+        save_chat(self.current_chat)
+        self.console.print(f"[green]✓ Renamed:[/green] [bold]{old_title}[/bold] → [bold]{new_title}[/bold]")
+
+    def _cmd_clear(self):
+        """Clear the terminal screen."""
+        self.console.clear()
+        self.console.print("[dim]Screen cleared. Use /show to see conversation.[/dim]")
+
+    def _cmd_export(self, args: list[str]):
+        """Export the current chat to a Markdown file."""
+        if not self.current_chat:
+            self.console.print("[dim]No active chat.[/dim]")
+            return
+
+        if args:
+            out_path = Path(args[0]).expanduser().resolve()
+        else:
+            safe_title = re.sub(r'[^a-zA-Z0-9 _-]', '', self.current_chat.get("title", "chat"))
+            safe_title = safe_title.strip()[:50] or "chat"
+            out_path = Path.home() / "Downloads" / f"{safe_title}.md"
+
+        msgs = self.current_chat.get("messages", [])
+        lines = []
+        lines.append(f"# {self.current_chat.get('title', 'Chat')}")
+        lines.append(f"*Exported {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+        lines.append("")
+
+        for msg in msgs:
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts = []
+                for p in content:
+                    if isinstance(p, dict) and p.get("type") == "text":
+                        parts.append(p.get("text", ""))
+                    elif isinstance(p, dict) and p.get("type") == "image_url":
+                        parts.append("[image]")
+                content = " ".join(parts)
+            content = str(content) if content else ""
+
+            if role == "user":
+                lines.append(f"### 🧑 You")
+                lines.append(content)
+                lines.append("")
+            elif role == "assistant":
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    lines.append(f"### 🤖 Assistant (tool calls)")
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        lines.append(f"- **{fn.get('name', '?')}**")
+                        try:
+                            args_json = json.loads(fn.get("arguments", "{}"))
+                            lines.append(f"  ```json\n  {json.dumps(args_json, indent=2)}\n  ```")
+                        except Exception:
+                            lines.append(f"  `{fn.get('arguments', '')}`")
+                    lines.append("")
+                if content:
+                    lines.append(f"### 🤖 Assistant")
+                    lines.append(content)
+                    lines.append("")
+            elif role == "tool":
+                tc_id = msg.get("tool_call_id", "?")
+                lines.append(f"#### 🔧 Tool result (`{tc_id}`)")
+                lines.append("```")
+                lines.append(content)
+                lines.append("```")
+                lines.append("")
+            elif role == "system":
+                lines.append(f"*System: {_truncate(content, 200)}*")
+                lines.append("")
+
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text("\n".join(lines), encoding="utf-8")
+            self.console.print(f"[green]✓ Exported to:[/green] [bold]{out_path}[/bold]")
+        except Exception as e:
+            self.console.print(f"[red]Error exporting:[/red] {e}")
 
     def _save_config(self):
         """Persist the current in-memory config to disk atomically."""
@@ -419,8 +619,8 @@ class PengyCLI:
         table = Table(title="Chat History", border_style="dim")
         table.add_column("#", style="dim", no_wrap=True)
         table.add_column("Title", style="bold")
-        table.add_column("Messages", justify="right")
-        table.add_column("Created")
+        table.add_column("Msgs", justify="right")
+        table.add_column("Preview")
 
         for i, chat in enumerate(chats, 1):
             is_current = (
@@ -429,12 +629,17 @@ class PengyCLI:
             )
             prefix = "→ " if is_current else ""
             msg_count = len(chat.get("messages", []))
-            created = chat.get("created_at", "?")[:16].replace("T", " ")
+            # Get first user message as preview
+            preview = ""
+            for m in chat.get("messages", []):
+                if m.get("role") == "user":
+                    preview = _truncate(str(m.get("content", "")), 50)
+                    break
             table.add_row(
                 str(i),
                 f"{prefix}{chat.get('title', 'Untitled')}",
                 str(msg_count),
-                created,
+                preview,
             )
 
         self.console.print(table)
@@ -459,10 +664,14 @@ class PengyCLI:
             save_chat(self.current_chat)
 
         self.current_chat = chats[idx]
+        msgs = self.current_chat.get("messages", [])
+        msg_count = len(msgs)
         self.console.print(
             f"[green]✓ Loaded:[/green] [bold]{self.current_chat['title']}[/bold] "
-            f"({len(self.current_chat.get('messages', []))} messages)"
+            f"[dim]({msg_count} messages)[/dim]"
         )
+        # Show last exchange for context
+        self._cmd_show(["3"])
 
     def _cmd_delete(self, args: list[str]):
         if not args:
@@ -753,6 +962,14 @@ class PengyCLI:
                     expecting_api_call = False
                     self._render_tool_request(response)
                     confirm = self._get_tool_confirmation(response)
+                    if confirm and confirm.get("abort_run"):
+                        # Send a declined result to the generator and break
+                        send_value = {"confirmed": False, "tool_call_id": response["tool_call_id"]}
+                        try:
+                            gen.send(send_value)
+                        except StopIteration:
+                            pass
+                        break
                     send_value = confirm
                     if confirm and confirm.get("confirmed"):
                         if confirm.get("yolo_turn"):
@@ -888,10 +1105,14 @@ class PengyCLI:
             return {"confirmed": True, "tool_call_id": response["tool_call_id"]}
 
         while True:
-            choice = Prompt.ask(
-                f"  [1] Execute  [2] Yes to all this turn  [3] Decline  [bold][1/2/3][/bold]",
-                default="1",
-            ).strip()
+            try:
+                choice = Prompt.ask(
+                    f"  [1] Execute  [2] Yes to all this turn  [3] Decline  [4] Abort run  [bold][1/2/3/4][/bold]",
+                    default="1",
+                ).strip()
+            except (KeyboardInterrupt, EOFError):
+                self.console.print("\n[red]Run aborted.[/red]")
+                return {"confirmed": False, "tool_call_id": response["tool_call_id"], "abort_run": True}
 
             if choice == "1":
                 return {"confirmed": True, "tool_call_id": response["tool_call_id"]}
@@ -899,8 +1120,11 @@ class PengyCLI:
                 return {"confirmed": True, "yolo_turn": True, "tool_call_id": response["tool_call_id"]}
             elif choice == "3":
                 return None
+            elif choice == "4":
+                self.console.print("[red]Run aborted by user.[/red]")
+                return {"confirmed": False, "tool_call_id": response["tool_call_id"], "abort_run": True}
             else:
-                self.console.print("[red]Please enter 1, 2, or 3.[/red]")
+                self.console.print("[red]Please enter 1, 2, 3, or 4.[/red]")
 
     def _get_sudo_password(self) -> str | None:
         """Prompt for sudo password in the terminal."""

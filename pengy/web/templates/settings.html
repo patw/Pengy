@@ -48,9 +48,16 @@
 
       <div class="mb-3">
         <label class="form-label fw-semibold">Model</label>
-        <input type="text" name="model" class="form-control"
-               value="{{ config.model }}"
-               placeholder="gpt-4o">
+        <div class="input-group">
+          <input type="text" name="model" id="modelInput" class="form-control"
+                 value="{{ config.model }}"
+                 placeholder="gpt-4o">
+          <button type="button" id="fetchModelsBtn" class="btn btn-outline-secondary"
+                  onclick="fetchModels()">
+            <i class="bi bi-cloud-download me-1"></i>Fetch
+          </button>
+        </div>
+        <div id="modelsList" class="mt-2 d-none"></div>
       </div>
 
       <div class="mb-3">
@@ -128,4 +135,42 @@
     </form>
   </div>
 </div>
+
+<script>
+async function fetchModels() {
+  const btn = document.getElementById('fetchModelsBtn');
+  const list = document.getElementById('modelsList');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Fetching…';
+  list.classList.add('d-none');
+
+  try {
+    const resp = await fetch('/models');
+    const data = await resp.json();
+    if (data.error) {
+      list.innerHTML = `<div class="text-danger small">Error: ${data.error}</div>`;
+    } else if (data.models && data.models.length > 0) {
+      let html = '<div class="small fw-semibold mb-1">Available models (click to select):</div>';
+      const current = document.getElementById('modelInput').value;
+      for (const m of data.models) {
+        const active = m === current ? ' active fw-bold' : '';
+        html += `<span class="badge bg-light text-dark me-1 mb-1${active}" style="cursor:pointer;font-size:0.8rem"
+                 onclick="document.getElementById('modelInput').value='${m.replace(/'/g, "&#39;")}';
+                         document.querySelectorAll('#modelsList .badge').forEach(b=>b.classList.remove('active','fw-bold'));
+                         this.classList.add('active','fw-bold')">${m}</span>`;
+      }
+      list.innerHTML = html;
+    } else {
+      list.innerHTML = '<div class="text-muted small">No models returned.</div>';
+    }
+    list.classList.remove('d-none');
+  } catch (e) {
+    list.innerHTML = `<div class="text-danger small">Failed: ${e}</div>`;
+    list.classList.remove('d-none');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-cloud-download me-1"></i>Fetch';
+  }
+}
+</script>
 {% endblock %}

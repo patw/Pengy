@@ -5,6 +5,9 @@ import queue
 import re
 import threading
 import time
+import urllib.request
+from datetime import datetime
+from pathlib import Path
 
 import markdown as _md
 from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
@@ -126,12 +129,7 @@ def _group_messages(raw_messages: list[dict]) -> list[dict]:
 # ─── WebWorker ────────────────────────────────────────────────────────────────
 
 class WebWorker:
-    """Drives the LLMClient generator in a background thread.
-
-    Mirrors the GUI's ChatWorker pattern: blocks on threading.Events for tool
-    confirmation and sudo password, communicates results to the SSE stream via
-    a queue.
-    """
+    """Drives the LLMClient generator in a background thread."""
 
     def __init__(self, chat: dict, config: dict):
         self._chat = {**chat, "messages": list(chat.get("messages", []))}
@@ -194,7 +192,6 @@ class WebWorker:
     def _run(self):
         config = self._config
         chat = self._chat
-        skip_final_save = False
         try:
             tools.set_sudo_password_provider(self._get_sudo_password)
             tools.set_user_agent(config.get("user_agent", "PengyAgent/1.0"))
@@ -235,8 +232,6 @@ class WebWorker:
                     tool_call_id = response.get("tool_call_id", "")
                     args = response.get("args", {})
 
-                    # Mirrors the generator's own skip_confirm logic so we know
-                    # whether the generator will block waiting for a send() value.
                     skip_confirm = (
                         tc_mode == "all"
                         or (tc_mode == "safe" and tools.is_readonly_tool(name))
@@ -254,8 +249,6 @@ class WebWorker:
 
                     if not skip_confirm:
                         if self._yolo_this_turn:
-                            # Generator expects a send() value even though we're
-                            # auto-approving — the generator's skip_confirm was False.
                             send_value = {"confirmed": True, "tool_call_id": tool_call_id}
                         else:
                             self._confirm_event.clear()
@@ -267,8 +260,6 @@ class WebWorker:
                                 self._yolo_this_turn = True
                             send_value = result
                             self._confirm_result = None
-                    # else: generator used statement-yield (skip_confirm=True), it
-                    # doesn't read the send value, so leave send_value=None.
 
                 elif rtype == "tool_result":
                     content = response.get("content", "")
@@ -305,12 +296,6 @@ class WebWorker:
         finally:
             self._done = True
             tools.set_sudo_password_provider(None)
-            # Normal final responses save before queuing final_response. Avoid
-            # saving from error/cancel paths here; tests and callers may tear down
-            # temporary config dirs while a failed worker is unwinding.
-            # Do NOT remove from _workers here — the SSE endpoint holds a reference
-            # and will clean up once it drains the queue.  Removing here causes a
-            # race where a fast failure disappears before the browser SSE connects.
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -359,6 +344,17 @@ def chat_send(chat_id: str):
     if not content:
         return jsonify({"error": "Empty message"}), 400
 
+    # Handle attached files (base64-encoded from client-side)
+    attached_files = data.get("files") or []
+    if attached_files:
+        file_blocks = []
+        for f in attached_files:
+            import base64
+            fname = f.get("name", "file")
+            fcontent = base64.b64decode(f.get("data", "")).decode("utf-8", errors="replace")
+            file_blocks.append(f"[File: {fname}]\n```\n{fcontent}\n```")
+        content = "\n\n".join(file_blocks) + "\n" + content
+
     chat = get_chat(chat_id)
     if not chat:
         return jsonify({"error": "Chat not found"}), 404
@@ -404,7 +400,6 @@ def chat_stream(chat_id: str):
                 else:
                     yield f"data: {json.dumps(event)}\n\n"
         finally:
-            # Clean up now that SSE has drained the queue
             with _workers_lock:
                 if _workers.get(chat_id) is worker:
                     del _workers[chat_id]
@@ -459,6 +454,175 @@ def chat_delete(chat_id: str):
         worker.cancel()
     delete_chat(chat_id)
     return redirect(url_for("index"))
+
+
+# ─── NEW: Export ──────────────────────────────────────────────────────────────
+
+@app.route("/chat/<chat_id>/export")
+def chat_export(chat_id: str):
+    chat = get_chat(chat_id)
+    if not chat:
+        return jsonify({"error": "Chat not found"}), 404
+
+    msgs = chat.get("messages", [])
+    lines = []
+    lines.append(f"# {chat.get('title', 'Chat')}")
+    lines.append(f"*Exported {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+    lines.append("")
+
+    for msg in msgs:
+        role = msg.get("role", "?")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for p in content:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    parts.append(p.get("text", ""))
+                elif isinstance(p, dict) and p.get("type") == "image_url":
+                    parts.append("[image]")
+            content = " ".join(parts)
+        content = str(content) if content else ""
+
+        if role == "user":
+            lines.append("### 🧑 You")
+            lines.append(content)
+            lines.append("")
+        elif role == "assistant":
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                lines.append("### 🤖 Assistant (tool calls)")
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    lines.append(f"- **{fn.get('name', '?')}**")
+                    try:
+                        args_json = json.loads(fn.get("arguments", "{}"))
+                        lines.append(f"  ```json\n  {json.dumps(args_json, indent=2)}\n  ```")
+                    except Exception:
+                        lines.append(f"  `{fn.get('arguments', '')}`")
+                lines.append("")
+            if content:
+                lines.append("### 🤖 Assistant")
+                lines.append(content)
+                lines.append("")
+        elif role == "tool":
+            tc_id = msg.get("tool_call_id", "?")
+            lines.append(f"#### 🔧 Tool result (`{tc_id}`)")
+            lines.append("```")
+            lines.append(content)
+            lines.append("```")
+            lines.append("")
+        elif role == "system":
+            lines.append(f"*System: {content[:200]}*")
+            lines.append("")
+
+    safe_title = re.sub(r'[^a-zA-Z0-9 _-]', '', chat.get("title", "chat"))
+    safe_title = safe_title.strip()[:50] or "chat"
+    filename = f"{safe_title}.md"
+
+    return Response(
+        "\n".join(lines),
+        mimetype="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─── NEW: Rename ──────────────────────────────────────────────────────────────
+
+@app.route("/chat/<chat_id>/rename", methods=["POST"])
+def chat_rename(chat_id: str):
+    data = request.get_json() or {}
+    new_title = (data.get("title") or "").strip()
+    if not new_title:
+        return jsonify({"error": "Empty title"}), 400
+
+    chat = get_chat(chat_id)
+    if not chat:
+        return jsonify({"error": "Chat not found"}), 404
+
+    chat["title"] = new_title
+    save_chat(chat)
+    return jsonify({"status": "ok", "title": new_title})
+
+
+# ─── NEW: Slash Command Handler ───────────────────────────────────────────────
+
+@app.route("/chat/<chat_id>/command", methods=["POST"])
+def chat_command(chat_id: str):
+    """Handle slash commands from the chat input."""
+    data = request.get_json() or {}
+    cmd_text = (data.get("command") or "").strip()
+
+    if not cmd_text.startswith("/"):
+        return jsonify({"error": "Not a command"}), 400
+
+    parts = cmd_text.split()
+    cmd = parts[0].lower()
+    args = parts[1:]
+
+    config = load_config()
+
+    # Commands that return config changes
+    if cmd in ("/yolo",):
+        modes = ["none", "safe", "all"]
+        current = config.get("tool_confirmation", "none")
+        new_mode = args[0].lower() if args and args[0].lower() in modes else modes[(modes.index(current) + 1) % 3]
+        config["tool_confirmation"] = new_mode
+        save_config(config)
+        labels = {"all": "YOLO", "safe": "Safe", "none": "None"}
+        return jsonify({"type": "config", "message": f"Tool Confirmation: {labels[new_mode]}", "config": config})
+
+    if cmd == "/model" and args:
+        config["model"] = args[0]
+        save_config(config)
+        return jsonify({"type": "config", "message": f"Model: {args[0]}", "config": config})
+
+    if cmd in ("/new",):
+        chat = create_chat()
+        return jsonify({"type": "redirect", "url": url_for("chat_view", chat_id=chat["id"])})
+
+    if cmd in ("/export",):
+        return jsonify({"type": "redirect", "url": url_for("chat_export", chat_id=chat_id)})
+
+    if cmd in ("/rename",) and args:
+        new_title = " ".join(args)
+        chat = get_chat(chat_id)
+        if chat:
+            chat["title"] = new_title
+            save_chat(chat)
+            return jsonify({"type": "rename", "title": new_title})
+
+    if cmd in ("/help",):
+        return jsonify({"type": "message", "message": (
+            "Slash commands: /new /yolo [none|safe|all] /model <name> "
+            "/rename <title> /export /help"
+        )})
+
+    return jsonify({"type": "message", "message": f"Unknown command: {cmd}. Try /help."})
+
+
+# ─── NEW: Fetch Models API ────────────────────────────────────────────────────
+
+@app.route("/models")
+def api_models():
+    config = load_config()
+    base_url = config.get("base_url", "").rstrip("/")
+    api_key = config.get("api_key", "")
+    models_url = f"{base_url}/models"
+
+    try:
+        req = urllib.request.Request(models_url)
+        req.add_header("Authorization", f"Bearer {api_key}")
+        req.add_header("api-key", api_key)
+        req.add_header("User-Agent", config.get("user_agent", "PengyAgent/1.0"))
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        model_ids = sorted(m.get("id", "") for m in data.get("data", []) if m.get("id"))
+        return jsonify({"models": model_ids})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
+# ─── Settings ──────────────────────────────────────────────────────────────────
 
 
 @app.route("/settings", methods=["GET", "POST"])

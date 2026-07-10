@@ -7,13 +7,16 @@
 {% endblock %}
 
 {% block navbar_center %}
-<span class="text-muted small d-none d-sm-inline">{{ config.model }}</span>
+<span class="text-muted small d-none d-sm-inline" id="navModel">{{ config.model }}</span>
 <span class="badge
   {% if config.tool_confirmation == 'all' %}bg-warning text-dark
   {% elif config.tool_confirmation == 'safe' %}bg-info text-dark
-  {% else %}bg-secondary{% endif %} small">
-  {{ {'all':'YOLO','safe':'Safe','none':'Confirm'}.get(config.tool_confirmation, 'Confirm') }}
+  {% else %}bg-secondary{% endif %} small" id="navConfirmBadge">
+  {{ {'all':'YOLO','safe':'Safe','none':'None'}.get(config.tool_confirmation, 'None') }}
 </span>
+<button class="btn btn-outline-secondary btn-sm ms-1" onclick="exportChat()" title="Export chat as Markdown">
+  <i class="bi bi-download"></i>
+</button>
 {% endblock %}
 
 {% block sidebar_chats %}
@@ -100,10 +103,16 @@
 <!-- Input area -->
 <div class="input-area">
   <form id="messageForm" class="d-flex gap-2" novalidate>
+    <input type="file" id="fileInput" style="display:none" multiple
+           onchange="handleFiles(this.files)">
+    <button type="button" id="attachBtn" class="btn btn-outline-secondary align-self-end"
+            title="Attach files" onclick="document.getElementById('fileInput').click()">
+      <i class="bi bi-paperclip"></i>
+    </button>
     <textarea id="messageInput"
               class="form-control"
               rows="1"
-              placeholder="Message… (Enter to send, Shift+Enter for newline)"
+              placeholder="Message… (Enter to send, Shift+Enter for newline, / for commands)"
               autocomplete="off"
               autofocus></textarea>
     <button type="submit" id="sendBtn" class="btn btn-primary align-self-end">
@@ -113,9 +122,13 @@
       <i class="bi bi-stop-fill"></i>
     </button>
   </form>
+  <div id="filePreview" class="mt-1 d-none">
+    <small class="text-muted">Attached: <span id="fileNames"></span>
+      <a href="#" onclick="clearFiles()" class="text-danger ms-1">clear</a></small>
+  </div>
 </div>
 
-<!-- ── Tool Confirmation Modal ───────────────────────────────── -->
+<!-- Tool Confirmation Modal -->
 <div class="modal fade" id="confirmModal" tabindex="-1" data-bs-backdrop="static">
   <div class="modal-dialog modal-lg">
     <div class="modal-content">
@@ -124,6 +137,7 @@
           <i class="bi bi-gear-fill text-warning me-2"></i>
           Tool Request: <code id="confirmToolName"></code>
         </h6>
+        <button type="button" class="btn-close" onclick="confirmTool(false)" aria-label="Decline and close"></button>
       </div>
       <div class="modal-body">
         <pre id="confirmToolArgs" class="tool-args" style="max-height:300px"></pre>
@@ -143,7 +157,7 @@
   </div>
 </div>
 
-<!-- ── Sudo Password Modal ───────────────────────────────────── -->
+<!-- Sudo Password Modal -->
 <div class="modal fade" id="sudoModal" tabindex="-1" data-bs-backdrop="static">
   <div class="modal-dialog modal-sm">
     <div class="modal-content">
@@ -164,6 +178,25 @@
   </div>
 </div>
 
+<!-- Rename Modal -->
+<div class="modal fade" id="renameModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title">Rename Chat</h6>
+      </div>
+      <div class="modal-body">
+        <input type="text" id="renameInput" class="form-control"
+               value="{{ chat.title }}" placeholder="Chat title…">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-sm btn-primary" onclick="doRename()">Rename</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
@@ -173,19 +206,23 @@ let isProcessing = false;
 let eventSource = null;
 let pendingToolCallId = null;
 let thinkingEl = null;
-let confirmModal, sudoModal;
+let confirmModal, sudoModal, renameModal;
+let pendingFiles = [];
 
 document.addEventListener('DOMContentLoaded', () => {
   scrollToBottom();
   confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
   sudoModal    = new bootstrap.Modal(document.getElementById('sudoModal'));
+  renameModal  = new bootstrap.Modal(document.getElementById('renameModal'));
 
   document.getElementById('sudoPasswordInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') submitSudo();
   });
+  document.getElementById('renameInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doRename();
+  });
+  document.getElementById('stopBtn').addEventListener('click', stopGeneration);
 });
-
-// ── Helpers ──────────────────────────────────────────────────
 
 function scrollToBottom() {
   const area = document.getElementById('messagesArea');
@@ -202,8 +239,6 @@ function safeId(toolCallId) {
   return 'tc_' + toolCallId.replace(/[^a-zA-Z0-9]/g, '');
 }
 
-// ── Processing state ─────────────────────────────────────────
-
 function setProcessing(val) {
   isProcessing = val;
   document.getElementById('messageInput').disabled = val;
@@ -212,19 +247,65 @@ function setProcessing(val) {
   if (!val) document.getElementById('messageInput').focus();
 }
 
-// ── Stop ─────────────────────────────────────────────────────
+// ── File Attachments ──────────────────────────────────────────
+
+function handleFiles(files) {
+  for (const f of files) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const base64 = e.target.result.split(',')[1];  // strip data:...;base64, prefix
+      pendingFiles.push({name: f.name, data: base64});
+      showFilePreview();
+    };
+    reader.readAsDataURL(f);
+  }
+  document.getElementById('fileInput').value = '';
+}
+
+function showFilePreview() {
+  const names = pendingFiles.map(f => f.name).join(', ');
+  document.getElementById('fileNames').textContent = names;
+  document.getElementById('filePreview').classList.remove('d-none');
+  document.getElementById('attachBtn').classList.add('active');
+}
+
+function clearFiles() {
+  pendingFiles = [];
+  document.getElementById('filePreview').classList.add('d-none');
+  document.getElementById('attachBtn').classList.remove('active');
+}
+
+// ── Stop (works during confirm modal too) ────────────────────
 
 function stopGeneration() {
+  // Close confirm modal if open
+  if (confirmModal._isShown) {
+    confirmModal.hide();
+    // Send decline for pending tool
+    if (pendingToolCallId) {
+      fetch(`/chat/${CHAT_ID}/confirm`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({confirmed: false, tool_call_id: pendingToolCallId, yolo_turn: false}),
+      });
+      pendingToolCallId = null;
+    }
+  }
+  // Close sudo modal if open
+  if (sudoModal._isShown) {
+    sudoModal.hide();
+    fetch(`/chat/${CHAT_ID}/sudo`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({password: null}),
+    });
+  }
   fetch(`/chat/${CHAT_ID}/stop`, { method: 'POST' })
     .catch(err => console.error('Stop error:', err));
   if (eventSource) { eventSource.close(); eventSource = null; }
   hideThinking();
   setProcessing(false);
 }
-
-document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('stopBtn').addEventListener('click', stopGeneration);
-});
 
 // ── Thinking indicator ────────────────────────────────────────
 
@@ -243,29 +324,77 @@ function hideThinking() {
   if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
 }
 
+// ── Export ────────────────────────────────────────────────────
+
+function exportChat() {
+  window.open(`/chat/${CHAT_ID}/export`, '_blank');
+}
+
+// ── Rename ────────────────────────────────────────────────────
+
+function showRename() {
+  document.getElementById('renameInput').value = document.title.replace(' — Pengy', '');
+  renameModal.show();
+  setTimeout(() => document.getElementById('renameInput').focus(), 300);
+}
+
+function doRename() {
+  const newTitle = document.getElementById('renameInput').value.trim();
+  if (!newTitle) return;
+  renameModal.hide();
+  fetch(`/chat/${CHAT_ID}/rename`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title: newTitle}),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.title) {
+      const el = document.querySelector(`[data-chat-id="${CHAT_ID}"] .chat-title`);
+      if (el) el.textContent = data.title;
+      document.title = data.title + ' — Pengy';
+    }
+  });
+}
+
 // ── Send ──────────────────────────────────────────────────────
 
 function doSend() {
   if (isProcessing) return;
   const input = document.getElementById('messageInput');
   const content = input.value.trim();
-  if (!content) return;
+  if (!content && pendingFiles.length === 0) return;
+
+  // Check for slash commands
+  if (content.startsWith('/') && pendingFiles.length === 0) {
+    handleSlashCommand(content);
+    input.value = '';
+    input.style.height = 'auto';
+    return;
+  }
 
   input.value = '';
   input.style.height = 'auto';
 
-  // Remove empty-state placeholder if present
   const placeholder = document.querySelector('#messagesArea .text-center.text-muted');
   if (placeholder) placeholder.remove();
 
-  appendUserMessage(content);
+  const displayContent = content + (pendingFiles.length > 0 ? ' [attached: ' + pendingFiles.map(f => f.name).join(', ') + ']' : '');
+  appendUserMessage(displayContent);
   setProcessing(true);
   showThinking();
+
+  const body = {content};
+  if (pendingFiles.length > 0) {
+    body.files = pendingFiles;
+    pendingFiles = [];
+    clearFiles();
+  }
 
   fetch(`/chat/${CHAT_ID}/send`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({content}),
+    body: JSON.stringify(body),
   })
   .then(r => r.json())
   .then(data => {
@@ -284,7 +413,59 @@ function doSend() {
   });
 }
 
-// Prevent native form submission in all cases; delegate to doSend().
+// ── Slash Commands ────────────────────────────────────────────
+
+function handleSlashCommand(text) {
+  fetch(`/chat/${CHAT_ID}/command`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({command: text}),
+  })
+  .then(r => r.json())
+  .then(data => {
+    switch (data.type) {
+      case 'config':
+        appendSystemMessage(data.message);
+        // Update navbar badges
+        if (data.config) {
+          if (data.config.model) {
+            document.getElementById('navModel').textContent = data.config.model;
+          }
+          const badge = document.getElementById('navConfirmBadge');
+          const tc = data.config.tool_confirmation;
+          if (tc === 'all') { badge.className = 'badge bg-warning text-dark small'; badge.textContent = 'YOLO'; }
+          else if (tc === 'safe') { badge.className = 'badge bg-info text-dark small'; badge.textContent = 'Safe'; }
+          else { badge.className = 'badge bg-secondary small'; badge.textContent = 'None'; }
+        }
+        break;
+      case 'redirect':
+        window.location.href = data.url;
+        break;
+      case 'rename':
+        if (data.title) {
+          const el = document.querySelector(`[data-chat-id="${CHAT_ID}"] .chat-title`);
+          if (el) el.textContent = data.title;
+          document.title = data.title + ' — Pengy';
+        }
+        appendSystemMessage('Chat renamed to: ' + data.title);
+        break;
+      case 'message':
+        appendSystemMessage(data.message);
+        break;
+    }
+  });
+}
+
+function appendSystemMessage(msg) {
+  const el = document.createElement('div');
+  el.className = 'mb-2';
+  el.innerHTML = `<div class="alert alert-info py-1 px-2 mb-0 small"><i class="bi bi-info-circle me-1"></i>${escHtml(msg)}</div>`;
+  document.getElementById('messagesArea').appendChild(el);
+  scrollToBottom();
+}
+
+// ── Form handling ─────────────────────────────────────────────
+
 document.getElementById('messageForm').addEventListener('submit', e => {
   e.preventDefault();
   doSend();
@@ -293,7 +474,7 @@ document.getElementById('messageForm').addEventListener('submit', e => {
 document.getElementById('messageInput').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    doSend();  // call directly — no synthetic submit event needed
+    doSend();
   }
 });
 
@@ -496,5 +677,14 @@ function submitSudo(override) {
 
   showThinking();
 }
+
+// Make the chat title in navbar clickable to rename
+document.addEventListener('DOMContentLoaded', () => {
+  document.title = {{ chat.title | tojson }} + ' — Pengy';
+  // Double-click on page title to rename
+  document.querySelector('.navbar .fw-bold').style.cursor = 'pointer';
+  document.querySelector('.navbar .fw-bold').title = 'Double-click to rename';
+  document.querySelector('.navbar .fw-bold').addEventListener('dblclick', showRename);
+});
 </script>
 {% endblock %}
