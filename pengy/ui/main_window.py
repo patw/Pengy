@@ -212,7 +212,10 @@ class MainWindow(QMainWindow):
                             "args": args,
                         })
                 if msg.get("content"):
-                    self.chat_view.append_message("assistant", msg["content"])
+                    self.chat_view.append_message(
+                        "assistant", msg["content"],
+                        reasoning_content=msg.get("reasoning_content"),
+                    )
             elif msg["role"] == "tool":
                 self.chat_view.append_message("tool_result", {
                     "tool_call_id": msg.get("tool_call_id", ""),
@@ -438,7 +441,8 @@ class MainWindow(QMainWindow):
         if content:
             assistant_msg = response.get("message") or {"role": "assistant", "content": content}
             self.current_chat["messages"].append(assistant_msg)
-            self.chat_view.append_message("assistant", content)
+            reasoning = assistant_msg.get("reasoning_content") or assistant_msg.get("reasoning")
+            self.chat_view.append_message("assistant", content, reasoning_content=reasoning)
             save_chat(self.current_chat)
 
         usage = response.get("usage", {})

@@ -24,6 +24,7 @@ def _build_css(theme: dict[str, str] | None = None) -> str:
     fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
     body_pt = _fmt_pt(scaled_font_size(10, theme))
     label_pt = _fmt_pt(scaled_font_size(9, theme))
+    reasoning_label_pt = _fmt_pt(scaled_font_size(8.5, theme))
     return f"""
 body {{
     font-family: "{fixed}";
@@ -55,6 +56,9 @@ img {{ max-width: 600px; }}
 .code-pre {{ background-color:{theme['code_bg']}; color:{theme['code_fg']}; padding:10px; margin:6px 0; }}
 .muted {{ color:{theme['muted']}; }}
 .declined {{ color:{theme['danger']}; }}
+.reasoning-card {{ border:1px solid {theme['reasoning_border']}; padding:6px 10px; margin:6px 0; background-color:{theme['reasoning_bg']}; }}
+.reasoning-link {{ color:{theme['reasoning_fg']}; text-decoration:none; font-weight:bold; }}
+.reasoning-body {{ color:{theme['muted']}; font-size:{reasoning_label_pt}pt; white-space:pre-wrap; word-wrap:break-word; margin-top:4px; }}
 """
 
 
@@ -68,6 +72,7 @@ class ChatView(QTextBrowser):
         self._messages = []
         self._theme = get_theme()
         self._expanded_tools = set()
+        self._expanded_reasoning: set[int] = set()
         self._image_cache: dict[str, bytes] = {}   # url -> raw bytes (b"" = failed)
         self._image_pending: set[str] = set()
         self._image_lock = threading.Lock()
@@ -152,17 +157,28 @@ class ChatView(QTextBrowser):
                     self._expanded_tools.add(tool_id)
                 self._render()
                 return
+            if anchor.startswith("reasoning://"):
+                idx = int(anchor[len("reasoning://"):])
+                if idx in self._expanded_reasoning:
+                    self._expanded_reasoning.discard(idx)
+                else:
+                    self._expanded_reasoning.add(idx)
+                self._render()
+                return
             if anchor.startswith(("http://", "https://")):
                 QDesktopServices.openUrl(QUrl(anchor))
                 return
         super().mousePressEvent(event)
 
-    def append_message(self, role: str, content):
+    def append_message(self, role: str, content, *, reasoning_content: str = None):
         if role == "user":
             self._messages.append({"role": "user", "content": content})
         elif role == "assistant":
             if content:
-                self._messages.append({"role": "assistant", "content": content})
+                msg = {"role": "assistant", "content": content}
+                if reasoning_content:
+                    msg["reasoning_content"] = reasoning_content
+                self._messages.append(msg)
         elif role == "tool_request":
             tool_call_id = content.get("tool_call_id", f"tc-{len(self._messages)}")
             self._messages.append({
@@ -185,6 +201,7 @@ class ChatView(QTextBrowser):
     def clear(self):
         self._messages = []
         self._expanded_tools = set()
+        self._expanded_reasoning = set()
         super().clear()
 
     def _render(self):
@@ -199,12 +216,12 @@ class ChatView(QTextBrowser):
 
     def _build_html(self) -> str:
         parts = [f"<html><head><meta charset='utf-8'><style>{_build_css(self._theme)}</style></head><body>"]
-        for msg in self._messages:
-            parts.append(self._render_msg(msg))
+        for idx, msg in enumerate(self._messages):
+            parts.append(self._render_msg(msg, idx))
         parts.append("</body></html>")
         return "".join(parts)
 
-    def _render_msg(self, msg: dict) -> str:
+    def _render_msg(self, msg: dict, idx: int = 0) -> str:
         role = msg["role"]
         if role == "user":
             body = self._escape_html(msg["content"]).replace("\n", "<br>")
@@ -213,14 +230,51 @@ class ChatView(QTextBrowser):
                 f'<p style="margin:2px 0 10px 0;">{body}</p>'
             )
         if role == "assistant":
+            parts = []
+            reasoning = msg.get("reasoning_content")
+            if reasoning:
+                parts.append(self._render_reasoning_block(idx, reasoning))
             html_content = self._render_markdown(msg["content"])
-            return (
+            parts.append(
                 '<p class="role-assistant">Assistant &#x1F916;</p>'
                 f'<div style="margin:2px 0 10px 0;">{html_content}</div>'
             )
+            return "".join(parts)
         if role == "tool_block":
             return self._render_tool_block(msg)
         return ""
+
+    def _render_reasoning_block(self, idx: int, reasoning: str) -> str:
+        expanded = idx in self._expanded_reasoning
+        arrow = "&#9660;" if expanded else "&#9654;"
+
+        # First line preview for collapsed state
+        first_line = reasoning.split("\n", 1)[0]
+        preview = first_line[:120] + ("&#8230;" if len(first_line) > 120 else "")
+
+        header = (
+            f'<a href="reasoning://{idx}" class="reasoning-link">'
+            f'{arrow}&nbsp;Reasoning</a>'
+        )
+        inner = f'<div style="margin-bottom:2px;">{header}</div>'
+
+        if expanded:
+            reasoning_escaped = self._escape_html(reasoning)
+            inner += (
+                f'<div class="reasoning-body">{reasoning_escaped}</div>'
+            )
+        else:
+            inner += (
+                f'<div class="reasoning-body muted">'
+                f'{self._escape_html(preview)}'
+                f'</div>'
+            )
+
+        return (
+            '<div class="reasoning-card">'
+            f'{inner}'
+            '</div>'
+        )
 
     def _render_tool_block(self, msg: dict) -> str:
         tool_call_id = msg["tool_call_id"]
