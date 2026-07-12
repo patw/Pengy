@@ -288,7 +288,13 @@ class ChatHistoryWidget(QWidget):
         if running:
             self._blink_timer.stop()
             self.status_dot.setStyleSheet(f"color: {self._theme['running']}; font-size: 14px;")
-            self.status_text.setText("Tool running")
+            self.status_text.setText("Running Tool…")
+            # Force an immediate synchronous repaint so the orange bubble is
+            # visible on screen before the caller unblocks the worker thread.
+            # Otherwise QTimer.singleShot(0, …) races with Qt's paint cycle
+            # and the dot can flip straight from red (thinking) → red again
+            # (tool result) without ever painting the orange state.
+            self.status_dot.repaint()
         else:
             # Revert to thinking (red blinking) — caller should have set that
             self._dot_phase = True
