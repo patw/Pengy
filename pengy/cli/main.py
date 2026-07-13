@@ -78,6 +78,11 @@ def _truncate(text: str, max_len: int = 72) -> str:
     return text[:max_len - 1] + "…"
 
 
+def _preview(text: str, max_len: int = 72) -> str:
+    """Return a single-line preview of possibly multiline/Markdown text."""
+    return _truncate(" ".join(str(text).split()), max_len)
+
+
 _TEXT_EXTENSIONS = {
     '.txt', '.md', '.markdown', '.rst', '.json', '.xml', '.html', '.htm',
     '.css', '.js', '.ts', '.py', '.rb', '.go', '.rs', '.c', '.cpp', '.h',
@@ -403,21 +408,21 @@ class PengyCLI:
             content = str(content) if content else ""
 
             if role == "user":
-                self.console.print(f"[bold blue]#{i} You:[/bold blue] {content}")
+                self.console.print(f"[bold blue]#{i} You:[/bold blue] {_preview(content, 200)}")
             elif role == "assistant":
                 tool_calls = msg.get("tool_calls")
+                suffix = ""
                 if tool_calls:
                     tc_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
-                    self.console.print(f"[bold green]#{i} Assistant:[/bold green] [dim](tool calls: {', '.join(tc_names)})[/dim]")
+                    suffix = f" [dim](tool calls: {', '.join(tc_names)})[/dim]"
+                self.console.print(f"[bold green]#{i} Assistant:[/bold green]{suffix}")
                 if content:
-                    preview = _truncate(content, 100)
-                    self.console.print(f"[dim]  {preview}[/dim]")
+                    self.console.print(f"[dim]  {_preview(content, 100)}[/dim]")
             elif role == "tool":
                 tc_id = msg.get("tool_call_id", "?")[:8]
-                preview = _truncate(content, 80)
-                self.console.print(f"[dim]#{i} Tool [{tc_id}]: {preview}[/dim]")
+                self.console.print(f"[dim]#{i} Tool [{tc_id}]: {_preview(content, 80)}[/dim]")
             elif role == "system":
-                self.console.print(f"[dim italic]#{i} System: {_truncate(content, 100)}[/dim italic]")
+                self.console.print(f"[dim italic]#{i} System: {_preview(content, 100)}[/dim italic]")
 
         self.console.print("[dim]" + "─" * 60 + "[/dim]")
 
