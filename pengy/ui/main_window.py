@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QDialog, QPushButton, QDialogButtonBox, QLabel, QInputDialog, QLineEdit,
     QApplication,
 )
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, QTimer
 
 from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.chat_manager import (
@@ -322,10 +322,14 @@ class MainWindow(QMainWindow):
             self.chat_view.append_message("tool_request", response)
             # Auto-approve if tool_confirmation is "all" or yolo_this_turn is set
             if self.config.get("tool_confirmation") == "all" or self._yolo_this_turn:
-                self.worker.send_confirmation({
-                    "confirmed": True,
-                    "tool_call_id": response["tool_call_id"],
-                })
+                # Defer by one event-loop iteration so Qt can repaint the
+                # orange "Tool running" status bubble before the worker wakes
+                # up and potentially finishes the tool before the next paint.
+                tool_call_id = response["tool_call_id"]
+                QTimer.singleShot(0, lambda cid=tool_call_id: (
+                    self.worker.send_confirmation({"confirmed": True, "tool_call_id": cid})
+                    if self.worker else None
+                ))
             else:
                 self._handle_tool_confirm(response)
         elif response["type"] == "assistant_tool_calls":
