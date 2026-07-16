@@ -78,6 +78,39 @@ else
     warn "No venv — skipping import checks"
 fi
 
+# ── 5b. Entry-point smoke test (--version + --help) ────────────────
+echo "--- Entry-point smoke test ---"
+if [ -d .venv ]; then
+    PY=".venv/bin/python"
+elif [ -d venv ]; then
+    PY="venv/bin/python"
+else
+    PY=""; warn "No venv/.venv — skipping entry-point smoke test"
+fi
+if [ -n "$PY" ]; then
+    PASS=0; FAIL=0
+    smoke() {
+        local label="$1" module="$2"
+        local ver help
+        ver=$("$PY" -m "$module" --version 2>/dev/null)
+        help=$("$PY" -m "$module" --help    2>/dev/null)
+        if echo "$ver" | grep -q "^Pengy v" && \
+           echo "$help" | grep -qiE "usage|options"; then
+            ok "$label --version + --help"
+            PASS=$((PASS+1))
+        else
+            warn "$label --version/--help failed"
+            FAIL=$((FAIL+1))
+        fi
+    }
+    smoke "pengy.cli.main" pengy.cli.main
+    smoke "pengy.web.main" pengy.web.main
+    smoke "pengy.main"     pengy.main
+    if [ "$FAIL" -gt 0 ]; then
+        echo -e "  \033[33m$FAIL entry-point(s) failed smoke test\033[0m"
+    fi
+fi
+
 # ── 6. Skills directory ─────────────────────────────────────────────
 echo "--- Skills ---"
 if [ -f skills/skill_index.md ]; then
