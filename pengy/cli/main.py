@@ -5,7 +5,9 @@ Single-shot mode:  pengy-cli "What is the capital of France?"
 """
 
 import argparse
+import atexit
 import json
+import os
 import re
 import shlex
 import sys
@@ -21,6 +23,33 @@ from pengy.core.chat_manager import (
     clean_dangling_tool_calls, elide_old_tool_results,
 )
 from pengy.core import tools
+
+# ── readline history (Unix only, graceful fallback) ──────────────
+
+_HISTFILE: Path | None = None
+
+def _setup_readline() -> Path | None:
+    """Enable readline line-editing + persistent history if available."""
+    try:
+        import readline
+    except ImportError:
+        return None
+
+    hist_dir = Path(os.environ.get(
+        "XDG_STATE_HOME",
+        os.path.join(os.environ.get("HOME", "~"), ".local", "state"),
+    )) / "pengy"
+    hist_dir.mkdir(parents=True, exist_ok=True)
+    hist_file = hist_dir / "cli_history"
+
+    try:
+        readline.read_history_file(str(hist_file))
+    except (FileNotFoundError, PermissionError):
+        pass
+    readline.set_history_length(1000)
+
+    atexit.register(readline.write_history_file, str(hist_file))
+    return hist_file
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +169,7 @@ class PengyCLI:
 
     def run_interactive(self):
         """Start the interactive REPL."""
+        _setup_readline()  # enable ↑↓ history if readline is available
         self.console.print()
         self.console.print(
             Panel.fit(
@@ -228,6 +258,13 @@ class PengyCLI:
             text = raw.strip()
             if not text:
                 continue
+
+            # Add to readline history
+            try:
+                import readline
+                readline.add_history(text)
+            except ImportError:
+                pass
 
             if text.startswith("/"):
                 self._handle_slash(text)
