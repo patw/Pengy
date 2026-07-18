@@ -35,6 +35,7 @@ classifiers = [
 dependencies = [
     "openai>=1.0.0",
     "ddgs>=9.0.0",
+    "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
