@@ -54,6 +54,7 @@ class ChatWorker(QObject):
                 self.tool_confirmation,
                 reasoning_effort=self.reasoning_effort,
                 preserve_reasoning=self.preserve_reasoning,
+                cancel_fn=self._cancelled.is_set,
             )
             send_value = None
             while True:
@@ -74,6 +75,10 @@ class ChatWorker(QObject):
 
                 if response["type"] == "final_response":
                     break
+                elif response["type"] == "retrying":
+                    # Backoff sleep handled inside the generator; just pass through
+                    # the event so the UI can show "Overloaded, retrying…"
+                    continue
                 elif response["type"] == "tool_request":
                     self._confirmation_event.wait()
                     if self._cancelled.is_set():

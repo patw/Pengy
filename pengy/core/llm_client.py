@@ -1,7 +1,10 @@
 """LLM client for OpenAI-compatible APIs."""
 import json
+import random
 import threading
-from openai import OpenAI
+import time
+from collections.abc import Callable
+from openai import APIStatusError, OpenAI
 
 from pengy.core import tools as _tools_mod
 
@@ -10,6 +13,67 @@ _REASONING_MESSAGE_FIELDS = (
     "reasoning",
     "reasoning_details",
 )
+
+# ── 429 / 529 backoff ────────────────────────────────────────────
+_MAX_RETRIES = 5
+_BASE_DELAY = 1.0          # seconds
+_MAX_DELAY = 60.0          # cap
+_JITTER = 0.25             # ±25 %
+_RETRYABLE_STATUSES = {429, 529}
+
+
+def _retry_after_delay(status_code: int, headers) -> float | None:
+    """Extract Retry-After from response headers.
+
+    OpenAI uses ``retry-after-ms`` (integer milliseconds).
+    Everyone else uses standard ``retry-after`` (seconds or HTTP-date).
+    Anthropic 529 also includes ``retry-after``.
+    Returns seconds, or *None* if the header is absent / unparseable.
+    """
+    # OpenAI-specific: retry-after-ms
+    ms = headers.get("retry-after-ms")
+    if ms is not None:
+        try:
+            return float(ms) / 1000.0
+        except (ValueError, TypeError):
+            pass
+
+    # Standard Retry-After (seconds)
+    ra = headers.get("retry-after")
+    if ra is not None:
+        try:
+            return float(ra)
+        except (ValueError, TypeError):
+            pass
+
+    return None
+
+
+def _backoff_delay(attempt: int, retry_after: float | None) -> float:
+    """Compute sleep seconds for attempt 0..N-1 with jitter."""
+    if retry_after is not None:
+        base = min(retry_after, _MAX_DELAY)
+    else:
+        base = min(_BASE_DELAY * (2 ** attempt), _MAX_DELAY)
+    jitter = base * _JITTER * (random.random() * 2.0 - 1.0)
+    return max(0.1, base + jitter)
+
+
+def _sleep_interruptible(seconds: float, is_cancelled: Callable[[], bool] | None):
+    """Sleep in 500 ms slices, checking *is_cancelled* each slice."""
+    if is_cancelled is None:
+        time.sleep(seconds)
+        return
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if is_cancelled():
+            raise _Cancelled()
+        time.sleep(min(0.5, deadline - time.monotonic()))
+
+
+class _Cancelled(Exception):
+    """Raised inside the generator when the user cancels during a retry sleep."""
+    pass
 
 
 def _get_msg_field(message, field: str):
@@ -113,34 +177,67 @@ class LLMClient:
         self._client = None
 
     def chat(self, messages: list[dict], tool_confirmation: str = "none",
-             reasoning_effort: str = "", preserve_reasoning: bool = False):
+             reasoning_effort: str = "", preserve_reasoning: bool = False,
+             cancel_fn: Callable[[], bool] | None = None):
         """
         Send a chat request and handle tool calls.
-        Returns the final assistant message content.
         Yields intermediate tool call info for UI updates.
 
         *tool_confirmation* is one of:
           "all"  – execute every tool without asking (YOLO)
           "safe" – auto-approve read-only tools; confirm write/execute
           "none" – confirm every tool call
+
+        *cancel_fn*, if given, is polled during retry backoff sleeps so the
+        user can abort a long wait.  Return ``True`` to cancel.
         """
         current_messages = list(messages)
         accumulated_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         while True:
-            try:
-                request_kwargs = {
-                    "model": self.model,
-                    "messages": current_messages,
-                    "tools": _tools_mod.TOOLS,
-                    "tool_choice": "auto",
-                }
-                if reasoning_effort:
-                    request_kwargs["reasoning_effort"] = reasoning_effort
-                response = self.client.chat.completions.create(**request_kwargs)
-            except Exception:
-                self._reset_client()
-                raise
+            # ── API call with 429 / 529 exponential backoff ──────────
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
+                    request_kwargs = {
+                        "model": self.model,
+                        "messages": current_messages,
+                        "tools": _tools_mod.TOOLS,
+                        "tool_choice": "auto",
+                    }
+                    if reasoning_effort:
+                        request_kwargs["reasoning_effort"] = reasoning_effort
+                    response = self.client.chat.completions.create(**request_kwargs)
+                    break  # success — exit retry loop
+                except APIStatusError as e:
+                    if e.status_code not in _RETRYABLE_STATUSES or attempt >= _MAX_RETRIES:
+                        self._reset_client()
+                        raise
+                    # 429 / 529 — backoff and retry
+                    headers = getattr(e.response, "headers", {}) if e.response is not None else {}
+                    ra = _retry_after_delay(e.status_code, headers)
+                    delay = _backoff_delay(attempt, ra)
+                    yield {
+                        "type": "retrying",
+                        "attempt": attempt + 1,
+                        "max_attempts": _MAX_RETRIES,
+                        "delay_secs": round(delay, 1),
+                        "status_code": e.status_code,
+                        "message": e.message or str(e),
+                    }
+                    try:
+                        _sleep_interruptible(delay, cancel_fn)
+                    except _Cancelled:
+                        yield {
+                            "type": "final_response",
+                            "content": "Request cancelled during backoff.",
+                            "message": None,
+                            "usage": accumulated_usage,
+                        }
+                        return
+                    self._reset_client()
+                except Exception:
+                    self._reset_client()
+                    raise
 
             # Accumulate token usage across all calls in this turn
             if response.usage:

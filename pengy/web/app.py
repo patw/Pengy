@@ -210,6 +210,7 @@ class WebWorker:
                 tool_confirmation=tc_mode,
                 reasoning_effort=config.get("reasoning_effort", ""),
                 preserve_reasoning=bool(config.get("preserve_reasoning", False)),
+                cancel_fn=lambda: self._cancelled,
             )
             send_value = None
 
@@ -222,6 +223,12 @@ class WebWorker:
                     break
                 send_value = None
                 rtype = response.get("type", "")
+
+                if rtype == "retrying":
+                    # Backoff sleep handled inside the generator; push event
+                    # through so the SSE stream shows "Overloaded, retrying…"
+                    self._queue.put(response)
+                    continue
 
                 if rtype == "assistant_tool_calls":
                     self._yolo_this_turn = False
