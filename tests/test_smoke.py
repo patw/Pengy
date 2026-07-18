@@ -23,6 +23,7 @@ CORE_MODULES = [
     "pengy.core.chat_manager",
     "pengy.core.task_manager",
     "pengy.core.tools",
+    "pengy.core.image_utils",
 ]
 
 CLI_MODULES = [

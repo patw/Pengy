@@ -25,10 +25,17 @@ jobs:
         run: |
           pip install -e ".[cli,web]" pytest
 
+      - name: Verify dependency integrity
+        run: pip check
+
       - name: Run tests
         run: |
           python -m pytest tests/ -v 2>&1
 
-      - name: Verify CLI imports
+      - name: Entry-point smoke tests
         run: |
-          python -c "from pengy.cli.main import main; print('CLI imports OK')"
+          pengy-cli --version 2>&1 | grep -q "^Pengy v" || (echo "FAIL: pengy-cli --version" && exit 1)
+          pengy-cli --help 2>&1 | grep -qiE "usage|options" || (echo "FAIL: pengy-cli --help" && exit 1)
+          pengy-web --version 2>&1 | grep -q "^Pengy v" || (echo "FAIL: pengy-web --version" && exit 1)
+          pengy-web --help 2>&1 | grep -qiE "usage|options" || (echo "FAIL: pengy-web --help" && exit 1)
+          echo "Entry-points OK"
