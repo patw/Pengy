@@ -174,10 +174,11 @@ class TestCliEntryPoint:
         from pengy.cli.main import PengyCLI
 
         text = "hello @/definitely/not/a/file.txt world"
-        cleaned, blocks = PengyCLI._resolve_attachments(text)
+        cleaned, blocks, images = PengyCLI._resolve_attachments(text)
         # Non-existent paths are left as-is (could be @mentions, etc.)
         assert cleaned == text
         assert blocks == ""
+        assert images == []
 
     def test_resolve_attachments_real_file(self, tmp_path):
         """@path to a real text file injects content."""
@@ -187,10 +188,11 @@ class TestCliEntryPoint:
         f.write_text("print('hello')")
 
         text = f"look at @{f} and tell me"
-        cleaned, blocks = PengyCLI._resolve_attachments(text)
+        cleaned, blocks, images = PengyCLI._resolve_attachments(text)
         assert cleaned == "look at  and tell me"
         assert "demo.py" in blocks
         assert "print('hello')" in blocks
+        assert images == []
 
     def test_confirm_display_values(self):
         """All confirmation modes have a display string."""
