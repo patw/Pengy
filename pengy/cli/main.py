@@ -1105,10 +1105,14 @@ class PengyCLI:
         if len(args_preview) > 60:
             args_preview = args_preview[:59] + "…"
 
+        args_json = json.dumps(args, indent=2)
+        if len(args_json) > 4000:
+            args_json = args_json[:4000] + "\n\n[... truncated ...]"
+
         self.console.print()
         self.console.print(
             Panel(
-                f"[bold]{name}[/bold]\n{json.dumps(args, indent=2)}",
+                f"[bold]{name}[/bold]\n{args_json}",
                 title=f"🔧 Tool: {name} [{args_preview}]",
                 title_align="left",
                 border_style="yellow",

@@ -5,9 +5,10 @@ import mimetypes
 from PySide6.QtWidgets import (
     QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout,
     QDialog, QPushButton, QDialogButtonBox, QLabel, QInputDialog, QLineEdit,
-    QApplication,
+    QApplication, QPlainTextEdit,
 )
 from PySide6.QtCore import Qt, QThread, QTimer
+from PySide6.QtGui import QTextOption
 
 from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.chat_manager import (
@@ -471,17 +472,34 @@ class ToolConfirmDialog(QDialog):
         self.setWindowTitle(f"Confirm Tool: {tool_info['name']}")
         self.setModal(True)
         self.resize(480, 320)
+        self.setMaximumWidth(600)
+
+        theme = self.parent()._theme if self.parent() is not None and hasattr(self.parent(), "_theme") else get_theme()
 
         layout = QVBoxLayout(self)
 
-        # Tool info
-        info_text = f"Execute tool: <b>{tool_info['name']}</b>\n\nArguments:\n"
-        info_text += json.dumps(tool_info.get("args", {}), indent=2)
-        info_label = QLabel(info_text)
-        info_label.setWordWrap(True)
-        theme = self.parent()._theme if self.parent() is not None and hasattr(self.parent(), "_theme") else get_theme()
-        info_label.setStyleSheet(f"color: {theme['fg']}; padding: 8px;")
-        layout.addWidget(info_label)
+        # Tool name header
+        header_label = QLabel(f"Execute tool: <b>{tool_info['name']}</b>")
+        header_label.setStyleSheet(f"color: {theme['fg']}; padding: 8px;")
+        layout.addWidget(header_label)
+
+        args_label = QLabel("Arguments:")
+        args_label.setStyleSheet(f"color: {theme['fg']}; padding: 0 8px;")
+        layout.addWidget(args_label)
+
+        # Arguments — QPlainTextEdit wraps long unbroken tokens (paths, URLs,
+        # hashes) that QLabel's word-wrap would refuse to break, which used to
+        # force the whole dialog to grow as wide as the longest argument line.
+        args_text = json.dumps(tool_info.get("args", {}), indent=2)
+        max_len = 4000
+        if len(args_text) > max_len:
+            args_text = args_text[:max_len] + f"\n... [truncated, {len(args_text)} chars total]"
+        args_edit = QPlainTextEdit(args_text)
+        args_edit.setReadOnly(True)
+        args_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        args_edit.setWordWrapMode(QTextOption.WrapMode.WrapAnywhere)
+        args_edit.setStyleSheet(f"color: {theme['fg']}; padding: 4px;")
+        layout.addWidget(args_edit, stretch=1)
 
         # Three buttons: Execute, Yes to all this turn, Cancel
         btn_layout = QHBoxLayout()
