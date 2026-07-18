@@ -943,10 +943,9 @@ class PengyCLI:
         tools.set_user_agent(self.config.get("user_agent", "PengyAgent/1.0"))
         tools.set_tool_timeout(self.config.get("tool_timeout", 60))
 
-    @staticmethod
-    def _build_messages(chat: dict, _current_text: str) -> list[dict]:
+    def _build_messages(self, chat: dict, _current_text: str) -> list[dict]:
         """Build the message list for an API call from a chat session."""
-        config = load_config()
+        config = self.config
         system_msg = config.get("system_message", "")
         messages: list[dict] = []
         if system_msg:
@@ -1243,16 +1242,17 @@ def main():
         from pengy.core.config import set_config_dir
         set_config_dir(args.config_dir)
 
-    # Load/apply config overrides from CLI flags
-    config = load_config()
-    if args.model:
-        config["model"] = args.model
-        save_config(config)
-    if args.system:
-        config["system_message"] = args.system
-        save_config(config)
-
     cli = PengyCLI(no_save=args.no_save)
+
+    # In-memory config overrides from CLI flags — never persisted, so a
+    # one-shot `--model`/`--system` doesn't rewrite the shared settings.json
+    # used by the GUI, web, and the other Pengy editions.
+    if args.model:
+        cli.config["model"] = args.model
+    if args.system:
+        cli.config["system_message"] = args.system
+    if args.model or args.system:
+        cli._update_llm_client()
 
     if args.prompt:
         prompt_text = " ".join(args.prompt)

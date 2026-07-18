@@ -341,10 +341,10 @@ def chat_view(chat_id: str):
 def chat_send(chat_id: str):
     data = request.get_json() or {}
     content = (data.get("content") or "").strip()
-    if not content:
-        return jsonify({"error": "Empty message"}), 400
 
-    # Handle attached files (base64-encoded from client-side)
+    # Handle attached files (base64-encoded from client-side).
+    # Injected before the empty check so a files-only send is valid,
+    # matching the Rust and C++ web frontends and the client-side JS.
     attached_files = data.get("files") or []
     if attached_files:
         file_blocks = []
@@ -354,6 +354,9 @@ def chat_send(chat_id: str):
             fcontent = base64.b64decode(f.get("data", "")).decode("utf-8", errors="replace")
             file_blocks.append(f"[File: {fname}]\n```\n{fcontent}\n```")
         content = "\n\n".join(file_blocks) + "\n" + content
+
+    if not content.strip():
+        return jsonify({"error": "Empty message"}), 400
 
     chat = get_chat(chat_id)
     if not chat:

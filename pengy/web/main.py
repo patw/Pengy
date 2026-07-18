@@ -1,7 +1,6 @@
 """Pengy Web — entry point."""
 
 import argparse
-import webbrowser
 
 
 def _get_version() -> str:
@@ -35,11 +34,6 @@ def main():
         default=None,
         help="Use a custom config directory instead of ~/.config/pengy.",
     )
-    parser.add_argument(
-        "--no-browser",
-        action="store_true",
-        help="Don't auto-open a browser on startup.",
-    )
     args = parser.parse_args()
 
     if args.version:
@@ -53,9 +47,6 @@ def main():
     from pengy.web.app import app
     url = f"http://{args.host}:{args.port}"
     print(f"🐧 Pengy Web listening on {url}")
-
-    if not args.no_browser:
-        webbrowser.open(url)
 
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
 

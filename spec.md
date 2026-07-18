@@ -125,10 +125,11 @@ Flask server-side-rendered interface. See [Web UI](#web-ui) section below for de
 - Auto-scrolls to bottom on new content
 
 ### Right-Bottom Pane (Chat Input)
-- **📎 Attach button** — Opens file picker; accepts text files only (detected by extension, MIME type, and UTF-8 sniff); binary files are rejected with an error dialog
-- **File chips** — Selected files shown as removable badges above the input; cleared after send
+- **📎 Attach button** — Opens file picker; accepts text files (detected by extension, MIME type, and UTF-8 sniff) and images (JPEG, PNG, GIF, WebP); other binary files are rejected with an error dialog
+- **Image paste** — Clipboard images are pasted directly into the chat (saved to a temp file, sent as base64 data URIs)
+- **File chips** — Selected files shown as removable badges above the input (🖼 for images, 📄 for text); cleared after send
 - **Text input** — Multi-line QPlainTextEdit; Enter to send, Shift+Enter for newline
-- On send: attached file contents are injected into the message as fenced code blocks before the user's text
+- On send: attached text file contents are injected into the message as fenced code blocks before the user's text; images are sent as image content parts
 
 ---
 
@@ -164,21 +165,33 @@ The `_drive_generator()` method runs the LLM generator **in the main thread** (u
 3. Useful for scripting: `pengy-cli "summarize this file" && pengy-cli "translate to French"`
 4. The `--no-save` flag prevents single-shot chats from polluting the sidebar history
 
+Flags (shared with the Rust and C++ CLIs): `--no-save`, `--model NAME`, `--system MSG`, `--output pretty|raw|json|silent`, `--config-dir PATH`, `-v/--version`. `--model` and `--system` are in-memory overrides — they never modify `settings.json`.
+
 ### Slash Commands
 
 | Command | Description |
 |---------|-------------|
 | `/help` | Show the command reference table |
 | `/new` | Start a new chat session |
+| `/show [n]` | Show the full conversation (optional: last n messages) |
+| `/tail [n]` | Show the last n messages (default 5) |
+| `/rename <title>` | Rename the current chat |
+| `/clear` | Clear the terminal screen |
+| `/export [path]` | Export the current chat as Markdown |
 | `/yolo [all\|safe\|none]` | Set tool confirmation: all (YOLO), safe (read-only), none — cycles if no arg |
 | `/config` | Show current configuration (base URL, model, timeout, etc.) |
 | `/model <name>` | Switch models (e.g. `/model gpt-4o`) |
 | `/models` | Fetch available models from the endpoint's `GET /v1/models` |
+| `/baseurl <url>` | Change the API base URL |
+| `/apikey <key>` | Set the API key |
+| `/timeout <sec>` | Set tool execution timeout |
+| `/agent <string>` | Set the user agent string |
+| `/context-keep <n>` | Set context elision keep-turns (0 = keep all) |
 | `/list` | List recent chats with index, title, message count, and creation date |
 | `/load <index>` | Load a chat by its `/list` index |
 | `/delete <index>` | Delete a chat by its `/list` index |
 | `/attach <path>` | Attach a text file (or use `@path` inline in your prompt) |
-| `/system` | Show the system message template and rendered output |
+| `/system [message]` | Show or set the system message template |
 | `/compact` | Elide old tool results to free context window space |
 | `/quit`, `/exit`, `/q` | Exit the CLI |
 
@@ -260,6 +273,10 @@ The worker remains in the `_workers` dict until the SSE endpoint has drained its
 | POST | `/chat/<id>/sudo` | Provide sudo password to blocked worker |
 | POST | `/chat/<id>/stop` | Cancel running generation for a chat |
 | POST | `/chat/<id>/delete` | Delete chat and redirect to index |
+| GET | `/chat/<id>/export` | Download the chat as a Markdown file |
+| POST | `/chat/<id>/rename` | Rename a chat |
+| POST | `/chat/<id>/command` | Web slash commands (`/new /yolo /model /rename /export /help`) typed in the chat input |
+| GET | `/models` | Fetch available models from the endpoint (settings page Fetch button) |
 | GET/POST | `/settings` | View/update all config fields |
 
 ### SSE Event Types
@@ -300,12 +317,16 @@ Browser shows Bootstrap modal (tool name + args JSON)
   "base_url": "https://api.openai.com/v1",
   "api_key": "",
   "model": "gpt-4o",
-  "system_message": "You are a helpful assistant. The current date is {date} and the user is {username} on host {hostname} which is {osinfo}.",
+  "system_message": "You are a helpful assistant named Pengy. The current date is {date} and the user is {username} on host {hostname} which is {osinfo}.",
   "tool_confirmation": "none",
+  "reasoning_effort": "",
+  "preserve_reasoning": false,
+  "context_keep_turns": 0,
   "ui_scale": 100,
+  "theme_mode": "system",
+  "theme_accent": "default",
   "user_agent": "PengyAgent/1.0",
-  "tool_timeout": 60,
-  "context_keep_turns": 0
+  "tool_timeout": 60
 }
 ```
 
@@ -316,10 +337,14 @@ Browser shows Bootstrap modal (tool name + args JSON)
 | `model` | string | `gpt-4o` | Model name |
 | `system_message` | string | (see above) | Template; `{date}`, `{username}`, `{hostname}`, `{osinfo}` filled at send time |
 | `tool_confirmation` | string | `"none"` | Tool confirmation mode: `"all"` (YOLO — skip all confirmations), `"safe"` (auto-approve read-only tools; confirm write/execute), `"none"` (confirm every tool) |
+| `reasoning_effort` | string | `""` | Passed as `reasoning_effort` on API calls when set: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` (`""` = provider default) |
+| `preserve_reasoning` | bool | `false` | Keep reasoning fields (`reasoning_content`, `reasoning`, `reasoning_details`) on assistant messages sent back to the API |
+| `context_keep_turns` | int | `0` | Number of recent turns whose tool results are kept; older ones are elided to `[tool output from earlier turn elided]`. 0 = keep all. |
 | `ui_scale` | int | `100` | Sets `QT_SCALE_FACTOR` on next launch (75/100/125/200); CLI ignores this |
+| `theme_mode` | string | `"system"` | Desktop theme: `"system"`, `"light"`, or `"dark"` |
+| `theme_accent` | string | `"default"` | Desktop accent color: `default`/`blue`/`teal`/`green`/`orange`/`red`/`pink`/`purple` |
 | `user_agent` | string | `PengyAgent/1.0` | User-Agent header for HTTP requests (downloads, URL fetches) |
 | `tool_timeout` | int | `60` | Timeout in seconds for tool execution (-1 = no timeout) |
-| `context_keep_turns` | int | `0` | Number of recent turns whose tool results are kept; older ones are elided to `[tool output from earlier turn elided]`. 0 = keep all. |
 
 ### System Message Templating
 
@@ -375,7 +400,7 @@ Performs an exact string replacement in an existing file. `old_str` must match *
 ### `run_bash(command)`
 Executes a bash command via `subprocess.run`. Timeout configurable via `tool_timeout` (default 60s). Captures stdout and stderr.
 
-**sudo support:** If the command contains `sudo`, the password provider callback is invoked. In the GUI this shows a `QInputDialog`; in the CLI it uses `Prompt.ask(..., password=True)`. The password is passed via `sudo -S` (stdin); the password prompt line is stripped from stderr. Cancelling returns a cancellation message to the LLM. The password is cached for the session so subsequent sudo commands don't re-prompt.
+**sudo support:** If the command contains `sudo`, the password provider callback is invoked. In the GUI this shows a `QInputDialog`; in the CLI it uses `Prompt.ask(..., password=True)`. The password is passed via `sudo -S` (stdin); the password prompt line is stripped from stderr. Cancelling returns a cancellation message to the LLM. The password is cached for the duration of the LLM run (so multi-step sudo workflows within one turn don't re-prompt) and cleared when the run completes.
 
 ### `run_python(code)`
 Writes code to a temp file and executes it with `python3`. Timeout configurable via `tool_timeout` (default 60s). Captures stdout and stderr.
@@ -466,11 +491,20 @@ LLM API call (non-streaming, full response at once)
 | Base URL | QLineEdit | OpenAI-compatible endpoint |
 | API Key | QLineEdit (masked) | Stored in settings.json (plaintext) |
 | Model | QComboBox (editable) | Pre-populated with current model; "↻ Fetch" button calls `GET /v1/models` to populate the dropdown |
+| User Agent | QLineEdit | User-Agent for tool HTTP requests |
 | System Message | QTextEdit | Supports `{date}`, `{username}`, etc. templates |
 | Tool Confirmation | QComboBox | "YOLO (All)", "Safe Only", "None" — controls which tools require confirmation |
+| Reasoning effort | QComboBox | Provider default / none / minimal / low / medium / high / xhigh / max |
+| Reasoning preservation | QCheckBox | Keep reasoning fields on messages sent back to the API |
 | Keep tool results | QSpinBox | Number of recent turns to keep tool results for (0 = keep all) |
+| Theme mode | QComboBox | System / Light / Dark |
+| Accent color | QComboBox | Default / Blue / Teal / Green / Orange / Red / Pink / Purple |
 | UI Scale | QComboBox | 75%, 100%, 125%, 200% — takes effect on relaunch |
 | Tool timeout | QSpinBox | Seconds (-1 = no timeout) |
+
+## Tasks (Prompt Templates)
+
+Tasks are reusable prompt templates stored in `~/.config/pengy/tasks.json` (same format across all Pengy editions). Each task has a title and a template body; `%placeholder%` tokens are collected via a form when the task is played, and the rendered prompt is sent through the normal chat path. Managed via the Tasks dialog in the desktop GUI (currently GUI-only — no CLI or web surface).
 
 ---
 
@@ -512,7 +546,7 @@ pip install openai ddgs rich
 
 **System message templating at send time:** Templates are resolved fresh on every send so `{date}` is always accurate regardless of when the config was saved.
 
-**Sudo via `-S`:** Rather than a PTY (which would handle any interactive prompt but adds significant complexity), the app specifically detects `sudo` in bash commands, prompts for a password, and passes it to `sudo -S`. Covers the common case with minimal added complexity. The password is cached in memory for the session to avoid re-prompting on multi-step workflows.
+**Sudo via `-S`:** Rather than a PTY (which would handle any interactive prompt but adds significant complexity), the app specifically detects `sudo` in bash commands, prompts for a password, and passes it to `sudo -S`. Covers the common case with minimal added complexity. The password is cached in memory for the duration of the LLM run to avoid re-prompting on multi-step workflows, and cleared when the run completes.
 
 **File attachment injection (GUI):** Attached files are formatted as fenced code blocks and prepended to the message text before sending. The LLM sees them as part of the user turn, so no special API handling is needed.
 
