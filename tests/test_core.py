@@ -4,6 +4,7 @@ Run with:  python -m pytest tests/ -v
 """
 
 import json
+import io
 import os
 import tempfile
 from pathlib import Path
@@ -549,3 +550,135 @@ class TestLLMClient:
         )
         assert client.base_url == "http://localhost:1234/v1"
         assert client.model == "test-model"
+
+
+# ---------------------------------------------------------------------------
+# image_utils tests
+# ---------------------------------------------------------------------------
+
+class TestImageUtils:
+    def test_png_convert_to_jpeg(self):
+        from pengy.core.image_utils import preprocess
+        from PIL import Image
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            path = f.name
+        try:
+            # Create a 200x200 red PNG
+            img = Image.new("RGB", (200, 200), color=(255, 0, 0))
+            img.save(path, "PNG")
+            orig_size = Path(path).stat().st_size
+
+            buf, mime = preprocess(Path(path))
+            # Should convert PNG → JPEG
+            assert mime == "image/jpeg"
+            # JPEG should be much smaller than raw PNG
+            assert len(buf) < orig_size
+            assert len(buf) < 5000
+        finally:
+            os.unlink(path)
+
+    def test_oversized_dimensions_downscaled(self):
+        from pengy.core.image_utils import preprocess
+        from PIL import Image
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            path = f.name
+        try:
+            # Create a 6000x4000 image (bigger than default 4096)
+            img = Image.new("RGB", (6000, 4000), color=(0, 0, 255))
+            img.save(path, "PNG")
+
+            buf, mime = preprocess(Path(path), max_dimension=2048)
+            # Should be downscaled
+            assert mime == "image/jpeg"
+            result = Image.open(io.BytesIO(buf))
+            assert result.width <= 2048
+            assert result.height <= 2048
+        finally:
+            os.unlink(path)
+
+    def test_jpeg_passthrough_within_limits(self):
+        from pengy.core.image_utils import preprocess
+        from PIL import Image
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            path = f.name
+        try:
+            # Create a small JPEG
+            img = Image.new("RGB", (100, 100), color=(0, 255, 0))
+            img.save(path, "JPEG", quality=85)
+
+            buf, mime = preprocess(Path(path))
+            # Should stay JPEG since already within limits
+            assert mime == "image/jpeg"
+            assert len(buf) > 0
+        finally:
+            os.unlink(path)
+
+    def test_max_mb_enforced(self):
+        from pengy.core.image_utils import preprocess
+        from PIL import Image
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            path = f.name
+        try:
+            # Create a large PNG (simple color, compresses well)
+            img = Image.new("RGB", (2048, 2048), color=(128, 0, 64))
+            img.save(path, "PNG")
+
+            # Force a low max_mb — it'll need to shrink dimensions
+            buf, mime = preprocess(Path(path), max_mb=0.05, max_dimension=4096)
+            assert mime == "image/jpeg"
+            # Should be under 0.05 MB (51 KB)
+            assert len(buf) < 51200
+        finally:
+            os.unlink(path)
+
+    def test_rgba_png_flattened_to_jpeg(self):
+        from pengy.core.image_utils import preprocess
+        from PIL import Image
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            path = f.name
+        try:
+            # Create RGBA PNG with transparency
+            img = Image.new("RGBA", (64, 64), color=(255, 0, 0, 128))
+            img.save(path, "PNG")
+
+            buf, mime = preprocess(Path(path))
+            assert mime == "image/jpeg"
+            # Should decode as valid JPEG
+            result = Image.open(io.BytesIO(buf))
+            assert result.mode == "RGB"
+        finally:
+            os.unlink(path)
+
+    def test_bad_file_raises(self):
+        from pengy.core.image_utils import preprocess
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            f.write(b"not an image at all")
+            path = f.name
+        try:
+            import pytest
+            with pytest.raises(Exception):
+                preprocess(Path(path))
+        finally:
+            os.unlink(path)
+
+    def test_default_constants(self):
+        from pengy.core.image_utils import DEFAULT_MAX_DIMENSION, DEFAULT_MAX_MB, DEFAULT_QUALITY
+        assert DEFAULT_MAX_DIMENSION == 4096
+        assert DEFAULT_MAX_MB == 4.5
+        assert DEFAULT_QUALITY == 85
+
+    def test_webp_stays_webp_if_small(self):
+        from pengy.core.image_utils import preprocess
+        from PIL import Image
+        with tempfile.NamedTemporaryFile(suffix=".webp", delete=False) as f:
+            path = f.name
+        try:
+            img = Image.new("RGB", (32, 32), color=(128, 128, 128))
+            img.save(path, "WEBP")
+
+            buf, mime = preprocess(Path(path))
+            # Should stay WebP since within limits
+            assert mime in ("image/webp", "image/jpeg")
+            assert len(buf) > 0
+        finally:
+            os.unlink(path)

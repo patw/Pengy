@@ -22,6 +22,7 @@ from pengy.core.chat_manager import (
     load_chats, create_chat, save_chat, delete_chat,
     clean_dangling_tool_calls, elide_old_tool_results,
 )
+from pengy.core.image_utils import preprocess as preprocess_image
 from pengy.core import tools
 
 # ── readline history (Unix only, graceful fallback) ──────────────
@@ -120,6 +121,8 @@ _TEXT_EXTENSIONS = {
     '.env', '.csv', '.tsv', '.sql', '.graphql', '.proto', '.tf',
     '.log', '.diff', '.patch',
 }
+
+_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
 
 
 def _is_text_file(path: Path) -> bool:
@@ -221,21 +224,33 @@ class PengyCLI:
         tools.set_sudo_password_provider(self._get_sudo_password)
         chat = None
         try:
+            # Resolve @path attachments
+            resolved_text, files_content, image_paths = self._resolve_attachments(prompt_text)
+            if files_content:
+                prompt_text = files_content + "\n" + resolved_text
+            elif resolved_text != prompt_text:
+                prompt_text = resolved_text
+
+            display_content = prompt_text
+            if image_paths:
+                img_placeholders = [f"[Image: {p.name}]" for p in image_paths]
+                display_content = "\n".join(img_placeholders + ([prompt_text] if prompt_text else []))
+
             if self._no_save:
                 chat = {
                     "id": str(uuid.uuid4()),
-                    "title": _truncate(prompt_text, 50),
-                    "messages": [{"role": "user", "content": prompt_text}],
+                    "title": _truncate(display_content, 50),
+                    "messages": [{"role": "user", "content": display_content}],
                     "created_at": datetime.now().isoformat(),
                 }
             else:
                 chat = create_chat()
-                chat["title"] = _truncate(prompt_text, 50)
-                chat["messages"].append({"role": "user", "content": prompt_text})
+                chat["title"] = _truncate(display_content, 50)
+                chat["messages"].append({"role": "user", "content": display_content})
                 save_chat(chat)
 
-            messages = self._build_messages(chat, prompt_text)
-            self._drive_generator(messages, chat)
+            messages = self._build_messages(chat, prompt_text,
+                                            image_paths=image_paths if image_paths else None)
         except KeyboardInterrupt:
             self.console.print("\n[dim]Cancelled.[/dim]")
         finally:
@@ -271,18 +286,25 @@ class PengyCLI:
                 continue
 
             # Check for @path syntax (file attachment)
-            resolved_text, files_content = self._resolve_attachments(text)
+            resolved_text, files_content, image_paths = self._resolve_attachments(text)
             if files_content:
                 text = files_content + "\n" + resolved_text
             elif resolved_text != text:
                 text = resolved_text
 
-            # Normal message
-            self.current_chat["messages"].append({"role": "user", "content": text})
-            if self.current_chat["title"] == "New Chat":
-                self.current_chat["title"] = _truncate(text, 50)
+            # Build display version (stored in history)
+            display_content = text
+            if image_paths:
+                img_placeholders = [f"[Image: {p.name}]" for p in image_paths]
+                display_content = "\n".join(img_placeholders + ([text] if text else []))
 
-            messages = self._build_messages(self.current_chat, text)
+            # Normal message
+            self.current_chat["messages"].append({"role": "user", "content": display_content})
+            if self.current_chat["title"] == "New Chat":
+                self.current_chat["title"] = _truncate(display_content, 50)
+
+            messages = self._build_messages(self.current_chat, display_content,
+                                            image_paths=image_paths if image_paths else None)
             self._drive_generator(messages, self.current_chat)
 
     # ------------------------------------------------------------------
@@ -878,9 +900,11 @@ class PengyCLI:
         """Show how to use attachment; the @path syntax is demonstrated."""
         self.console.print(
             "[bold]File attachment:[/bold]\n"
-            "  Use [cyan]@path/to/file[/cyan] anywhere in your message to attach a text file.\n"
-            "  Example: [dim]Look at @src/main.py and fix the bug[/dim]\n"
-            "  The file's content will be injected as a fenced code block before your prompt."
+            "  Use [cyan]@path/to/file[/cyan] anywhere in your message to attach a file.\n"
+            "  Text files are injected as fenced code blocks.\n"
+            "  Image files (.png, .jpg, .gif, .webp) are sent as vision input.\n"
+            "  Example: [dim]What's in @screenshot.png?[/dim]\n"
+            "  Example: [dim]Look at @src/main.py and fix the bug[/dim]"
         )
 
     def _cmd_compact(self):
@@ -905,22 +929,29 @@ class PengyCLI:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _resolve_attachments(text: str) -> tuple[str, str]:
-        """Scan *text* for @path references and return (cleaned_text, fenced_blocks)."""
+    def _resolve_attachments(text: str) -> tuple[str, str, list[Path]]:
+        """Scan *text* for @path references.
+
+        Returns ``(cleaned_text, fenced_blocks, image_paths)``.
+        """
         resolved = text
         blocks = []
+        image_paths = []
         for match in re.finditer(r'@(\S+)', text):
             raw = match.group(1)
-            # Strip trailing punctuation that isn't part of the path
             path_str = raw.rstrip(',;:.!?)]}')
             if not path_str:
                 continue
             p = Path(path_str).expanduser().resolve()
-            if p.exists() and p.is_file() and _is_text_file(p):
-                blocks.append(_inject_file_content(p))
-                resolved = resolved.replace(match.group(0), "", 1)
+            if p.exists() and p.is_file():
+                if p.suffix.lower() in _IMAGE_EXTENSIONS:
+                    image_paths.append(p)
+                    resolved = resolved.replace(match.group(0), "", 1)
+                elif _is_text_file(p):
+                    blocks.append(_inject_file_content(p))
+                    resolved = resolved.replace(match.group(0), "", 1)
         resolved = resolved.strip()
-        return resolved, "\n\n".join(blocks)
+        return resolved, "\n\n".join(blocks), image_paths
 
     # ------------------------------------------------------------------
     # LLM interaction
@@ -943,7 +974,8 @@ class PengyCLI:
         tools.set_user_agent(self.config.get("user_agent", "PengyAgent/1.0"))
         tools.set_tool_timeout(self.config.get("tool_timeout", 60))
 
-    def _build_messages(self, chat: dict, _current_text: str) -> list[dict]:
+    def _build_messages(self, chat: dict, _current_text: str,
+                         image_paths: list[Path] | None = None) -> list[dict]:
         """Build the message list for an API call from a chat session."""
         config = self.config
         system_msg = config.get("system_message", "")
@@ -958,6 +990,46 @@ class PengyCLI:
         raw = clean_dangling_tool_calls(raw)
         raw = elide_old_tool_results(raw, config.get("context_keep_turns", 0))
         messages.extend(raw)
+
+        # If the last message is a user message with image attachments,
+        # replace its content with the multimodal array.
+        if image_paths:
+            import base64
+            last_user_idx = None
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    last_user_idx = i
+                    break
+            if last_user_idx is not None:
+                max_dim = config.get("image_max_dimension", 4096)
+                max_mb = config.get("image_max_mb", 4.5)
+                quality = config.get("image_quality", 85)
+                parts = []
+                for img_path in image_paths:
+                    try:
+                        img_bytes, mime = preprocess_image(
+                            img_path,
+                            max_dimension=max_dim, max_mb=max_mb, quality=quality,
+                        )
+                        b64 = base64.b64encode(img_bytes).decode()
+                        parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"},
+                        })
+                    except Exception:
+                        pass
+                # Extract the text from the display content
+                display = messages[last_user_idx].get("content", "")
+                if isinstance(display, str):
+                    # Remove [Image: ...] placeholders to get plain text
+                    text_part = display
+                    for img_path in image_paths:
+                        text_part = text_part.replace(f"[Image: {img_path.name}]", "")
+                    text_part = text_part.strip()
+                    if text_part:
+                        parts.append({"type": "text", "text": text_part})
+                messages[last_user_idx] = {"role": "user", "content": parts}
+
         return messages
 
     def _drive_generator(self, messages: list[dict], chat: dict):

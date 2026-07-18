@@ -22,6 +22,7 @@ from pengy.core.chat_manager import (
     create_chat, delete_chat, get_chat, load_chats, save_chat,
     clean_dangling_tool_calls, elide_old_tool_results,
 )
+from pengy.core.image_utils import preprocess as preprocess_image
 from pengy.core import tools
 
 
@@ -172,9 +173,10 @@ def _group_messages(raw_messages: list[dict]) -> list[dict]:
 class WebWorker:
     """Drives the LLMClient generator in a background thread."""
 
-    def __init__(self, chat: dict, config: dict):
+    def __init__(self, chat: dict, config: dict, messages_override: list[dict] | None = None):
         self._chat = {**chat, "messages": list(chat.get("messages", []))}
         self._config = config
+        self._messages_override = messages_override  # pre-built API messages
         self._queue: queue.Queue = queue.Queue()
         self._confirm_event = threading.Event()
         self._confirm_result: dict | None = None
@@ -244,7 +246,7 @@ class WebWorker:
                 model=config.get("model", "gpt-4o"),
             )
 
-            messages = _build_messages(chat, config)
+            messages = self._messages_override or _build_messages(chat, config)
             tc_mode = config.get("tool_confirmation", "none")
             gen = llm.chat(
                 messages,
@@ -390,20 +392,90 @@ def chat_send(chat_id: str):
     data = request.get_json() or {}
     content = (data.get("content") or "").strip()
 
-    # Handle attached files (base64-encoded from client-side).
-    # Injected before the empty check so a files-only send is valid,
-    # matching the Rust and C++ web frontends and the client-side JS.
-    attached_files = data.get("files") or []
-    if attached_files:
-        file_blocks = []
-        for f in attached_files:
-            import base64
-            fname = f.get("name", "file")
-            fcontent = base64.b64decode(f.get("data", "")).decode("utf-8", errors="replace")
-            file_blocks.append(f"[File: {fname}]\n```\n{fcontent}\n```")
-        content = "\n\n".join(file_blocks) + "\n" + content
+    config = load_config()
 
-    if not content.strip():
+    # Handle attached files (base64-encoded from client-side).
+    attached_files = data.get("files") or []
+    text_blocks = []
+    image_parts = []
+
+    if attached_files:
+        import base64
+        import tempfile
+        max_dim = config.get("image_max_dimension", 4096)
+        max_mb = config.get("image_max_mb", 4.5)
+        quality = config.get("image_quality", 85)
+
+        for f in attached_files:
+            fname = f.get("name", "file")
+            fmime = f.get("mime", "")
+            fdata = base64.b64decode(f.get("data", ""))
+
+            # Detect image by MIME or extension
+            is_image = fmime.startswith("image/") or any(
+                fname.lower().endswith(ext)
+                for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+            )
+
+            if is_image:
+                # Write to temp file for preprocessing
+                suffix = Path(fname).suffix or ".png"
+                fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="pengy_web_")
+                os.close(fd)
+                try:
+                    Path(tmp_path).write_bytes(fdata)
+                    img_bytes, img_mime = preprocess_image(
+                        Path(tmp_path),
+                        max_dimension=max_dim, max_mb=max_mb, quality=quality,
+                    )
+                    b64 = base64.b64encode(img_bytes).decode()
+                    image_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{img_mime};base64,{b64}"},
+                    })
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            else:
+                try:
+                    fcontent = fdata.decode("utf-8", errors="replace")
+                    text_blocks.append(f"[File: {fname}]\n```\n{fcontent}\n```")
+                except Exception:
+                    pass
+
+    # Build the final content/message
+    if image_parts:
+        # Multimodal message with images + optional text
+        parts = list(image_parts)
+        if text_blocks:
+            parts.append({"type": "text", "text": "\n\n".join(text_blocks)})
+        if content:
+            parts.append({"type": "text", "text": content})
+        # Message content is the multimodal array
+        user_content = parts
+        # For display/saving, use a placeholder-based string
+        display_parts = [f"[Image: {f.get('name', 'image')}]" for f in attached_files
+                         if f.get("mime", "").startswith("image/") or any(
+                             f.get("name", "").lower().endswith(ext)
+                             for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"))]
+        if text_blocks:
+            display_parts.append("\n\n".join(text_blocks))
+        if content:
+            display_parts.append(content)
+        display_content = "\n".join(display_parts)
+    elif text_blocks:
+        content = "\n\n".join(text_blocks) + "\n" + content
+        display_content = content
+        user_content = content
+    else:
+        display_content = content
+        user_content = content
+
+    if not (content.strip() or text_blocks or image_parts):
         return jsonify({"error": "Empty message"}), 400
 
     chat = get_chat(chat_id)
@@ -415,13 +487,26 @@ def chat_send(chat_id: str):
     if existing:
         existing.cancel()
 
-    chat["messages"].append({"role": "user", "content": content})
+    # Store the display version in chat history (no base64 bloat)
+    chat["messages"].append({"role": "user", "content": display_content})
     if chat.get("title") == "New Chat":
-        chat["title"] = content[:50] + ("…" if len(content) > 50 else "")
+        chat["title"] = display_content[:50] + ("…" if len(display_content) > 50 else "")
     save_chat(chat)
 
-    config = load_config()
-    worker = WebWorker(chat, config)
+    # The worker will build the proper API message from chat history
+    # Build the real API messages (with actual image data) for the worker
+    api_messages = None
+    if image_parts:
+        api_messages = _build_messages(chat, config)
+        # Replace the last user message with the multimodal version
+        # The last message in api_messages should be the user message
+        # Find and replace it
+        for i in range(len(api_messages) - 1, -1, -1):
+            if api_messages[i].get("role") == "user":
+                api_messages[i]["content"] = user_content  # multimodal array
+                break
+
+    worker = WebWorker(chat, config, messages_override=api_messages)
     with _workers_lock:
         _workers[chat_id] = worker
     worker.start()

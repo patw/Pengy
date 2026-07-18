@@ -1,7 +1,6 @@
 """Main window for Pengy."""
 import base64
 import json
-import mimetypes
 from PySide6.QtWidgets import (
     QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout,
     QDialog, QPushButton, QDialogButtonBox, QLabel, QInputDialog, QLineEdit,
@@ -16,6 +15,7 @@ from pengy.core.chat_manager import (
     clean_dangling_tool_calls, elide_old_tool_results,
 )
 from pengy.core.llm_client import LLMClient
+from pengy.core.image_utils import preprocess as preprocess_image
 from pengy.core import tools
 from pengy.ui.chat_history import ChatHistoryWidget
 from pengy.ui.chat_view import ChatView
@@ -258,10 +258,15 @@ class MainWindow(QMainWindow):
 
         if images:
             content_parts = []
+            max_dim = self.config.get("image_max_dimension", 4096)
+            max_mb = self.config.get("image_max_mb", 4.5)
+            quality = self.config.get("image_quality", 85)
             for img_path in images:
                 try:
-                    b64 = base64.b64encode(img_path.read_bytes()).decode()
-                    mime = mimetypes.guess_type(str(img_path))[0] or "image/jpeg"
+                    img_bytes, mime = preprocess_image(
+                        img_path, max_dimension=max_dim, max_mb=max_mb, quality=quality
+                    )
+                    b64 = base64.b64encode(img_bytes).decode()
                     content_parts.append({
                         "type": "image_url",
                         "image_url": {"url": f"data:{mime};base64,{b64}"},

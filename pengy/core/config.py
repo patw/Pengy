@@ -59,6 +59,9 @@ DEFAULTS = {
     "theme_accent": "default",  # "default" | "blue" | "teal" | "green" | "orange" | "red" | "pink" | "purple"
     "user_agent": "PengyAgent/1.0",
     "tool_timeout": 60,
+    "image_max_dimension": 4096,  # px — Anthropic limit is 8000, 4096 is safe
+    "image_max_mb": 4.5,           # MB — Anthropic limit is 5
+    "image_quality": 85,            # JPEG quality 0–100
 }
 
 
