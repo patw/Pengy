@@ -251,6 +251,7 @@ class PengyCLI:
 
             messages = self._build_messages(chat, prompt_text,
                                             image_paths=image_paths if image_paths else None)
+            self._drive_generator(messages, chat)
         except KeyboardInterrupt:
             self.console.print("\n[dim]Cancelled.[/dim]")
         finally:
