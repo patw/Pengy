@@ -214,8 +214,12 @@ class WebWorker:
             if remaining <= 0:
                 yield {"type": "error", "message": "Stream timeout"}
                 break
+            # When the worker is done, poll quickly (0.1 s) so a reconnecting
+            # client doesn't sit through a full 25 s keepalive wait just to
+            # learn the stream is over.
+            poll_timeout = 0.1 if self._done else min(remaining, 25.0)
             try:
-                event = self._queue.get(timeout=min(remaining, 25.0))
+                event = self._queue.get(timeout=poll_timeout)
                 yield event
                 if event.get("type") in ("final_response", "error"):
                     break
@@ -377,6 +381,9 @@ def chat_view(chat_id: str):
     chats = load_chats()
     config = load_config()
     turns = _group_messages(chat.get("messages", []))
+    with _workers_lock:
+        worker = _workers.get(chat_id)
+    has_active_worker = worker is not None and not worker._done
     return render_template(
         "chat.html",
         chat=chat,
@@ -384,6 +391,7 @@ def chat_view(chat_id: str):
         config=config,
         turns=turns,
         pygments_css=_pygments_css(),
+        has_active_worker=has_active_worker,
     )
 
 
@@ -529,6 +537,11 @@ def chat_stream(chat_id: str):
             yield f"data: {json.dumps({'type': 'error', 'message': 'No active task'})}\n\n"
             return
 
+        # Tell the browser to retry after 1 s if the connection drops
+        # (default is 3 s).  This makes reconnection after phone sleep / app
+        # switch feel snappier.
+        yield "retry: 1000\n\n"
+
         try:
             for event in worker.iter_events():
                 if event.get("type") == "keepalive":
@@ -537,7 +550,13 @@ def chat_stream(chat_id: str):
                     yield f"data: {json.dumps(event)}\n\n"
         finally:
             with _workers_lock:
-                if _workers.get(chat_id) is worker:
+                # Only remove the worker if it's actually done.  If the client
+                # disconnected mid-task (e.g. phone slept, tab backgrounded),
+                # keep the worker alive so a reconnecting SSE client can pick
+                # up remaining events.  The worker will be cleaned up when it
+                # finishes and a subsequent connection drains it, or when a
+                # new task starts for this chat, or when the chat is deleted.
+                if worker._done and _workers.get(chat_id) is worker:
                     del _workers[chat_id]
 
     return Response(
