@@ -202,12 +202,14 @@
 {% block scripts %}
 <script>
 const CHAT_ID = {{ chat.id | tojson }};
+const HAS_ACTIVE_WORKER = {{ has_active_worker | tojson }};
 let isProcessing = false;
 let eventSource = null;
 let pendingToolCallId = null;
 let thinkingEl = null;
 let confirmModal, sudoModal, renameModal;
 let pendingFiles = [];
+let wakeLock = null;
 
 document.addEventListener('DOMContentLoaded', () => {
   scrollToBottom();
@@ -222,6 +224,45 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter') doRename();
   });
   document.getElementById('stopBtn').addEventListener('click', stopGeneration);
+
+  // ── Mobile resilience: visibility & bfcache ───────────────────
+  // When the page becomes visible again (user returns from another app or
+  // the phone wakes up), re-acquire the wake lock and re-open SSE if the
+  // connection was killed while backgrounded.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && isProcessing) {
+      acquireWakeLock();
+      if (!eventSource || eventSource.readyState !== EventSource.OPEN) {
+        openSSE();
+      }
+    }
+  });
+
+  // Handle back-forward cache restoration (some browsers freeze the page
+  // instead of unloading it when navigating away).
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted && isProcessing) {
+      acquireWakeLock();
+      if (!eventSource || eventSource.readyState !== EventSource.OPEN) {
+        openSSE();
+      }
+    }
+  });
+
+  // Restore any draft text that was preserved across a sync reload.
+  const draft = sessionStorage.getItem('pengy_draft_' + CHAT_ID);
+  if (draft) {
+    document.getElementById('messageInput').value = draft;
+    sessionStorage.removeItem('pengy_draft_' + CHAT_ID);
+  }
+
+  // If the page loaded with an active worker (e.g. reloaded mid-task),
+  // auto-resume SSE so the user sees live updates without manual action.
+  if (HAS_ACTIVE_WORKER) {
+    setProcessing(true);
+    showThinking();
+    openSSE();
+  }
 });
 
 function scrollToBottom() {
@@ -239,11 +280,45 @@ function safeId(toolCallId) {
   return 'tc_' + toolCallId.replace(/[^a-zA-Z0-9]/g, '');
 }
 
+// ── Wake Lock (prevents screen sleep during tasks) ───────────
+
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch (err) {
+    // Silently ignore — wake lock is best-effort, not critical
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLock) {
+    wakeLock.release();
+    wakeLock = null;
+  }
+}
+
+// ── Sync reload (preserves typed input across page reload) ───
+
+function reloadToSync() {
+  const input = document.getElementById('messageInput');
+  if (input && input.value.trim()) {
+    sessionStorage.setItem('pengy_draft_' + CHAT_ID, input.value);
+  }
+  window.location.reload();
+}
+
 function setProcessing(val) {
   isProcessing = val;
   document.getElementById('messageInput').disabled = val;
   document.getElementById('sendBtn').disabled = val;
   document.getElementById('stopBtn').classList.toggle('d-none', !val);
+  if (val) {
+    acquireWakeLock();
+  } else {
+    releaseWakeLock();
+  }
   if (!val) document.getElementById('messageInput').focus();
 }
 
@@ -493,9 +568,26 @@ function openSSE() {
   eventSource = new EventSource(`/chat/${CHAT_ID}/stream`);
   eventSource.onmessage = e => handleEvent(JSON.parse(e.data));
   eventSource.onerror = () => {
-    eventSource.close(); eventSource = null;
-    hideThinking();
-    setProcessing(false);
+    // Don't close immediately — EventSource auto-reconnects when the
+    // connection drops (e.g. phone slept, user switched apps). When the
+    // phone wakes up, the connection is re-established automatically and
+    // the browser fires onopen + onmessage for any queued events.
+    //
+    // Only act if the EventSource has given up entirely (CLOSED), which
+    // happens when the server returns a non-retryable HTTP status. In that
+    // case the task may have completed while we were disconnected — reload
+    // the page to sync state from the server.
+    if (eventSource && eventSource.readyState === EventSource.CLOSED) {
+      eventSource.close();
+      eventSource = null;
+      if (isProcessing) {
+        reloadToSync();
+      } else {
+        hideThinking();
+        setProcessing(false);
+      }
+    }
+    // If readyState is CONNECTING, let the browser auto-reconnect.
   };
 }
 
@@ -538,6 +630,19 @@ function handleEvent(data) {
 
     case 'error':
       hideThinking();
+      if (data.message === 'No active task') {
+        // The task is no longer running on the server — either it completed
+        // while we were disconnected (phone slept), or it was stopped /
+        // cancelled.  If we still think a task is running, reload to sync
+        // the final state from the server.  Otherwise just clean up silently.
+        if (eventSource) { eventSource.close(); eventSource = null; }
+        if (isProcessing) {
+          reloadToSync();
+        } else {
+          setProcessing(false);
+        }
+        return;
+      }
       appendError(data.message || 'Unknown error');
       if (eventSource) { eventSource.close(); eventSource = null; }
       setProcessing(false);
