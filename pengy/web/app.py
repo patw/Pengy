@@ -74,16 +74,25 @@ def _fix_file_urls(html: str) -> str:
     return html
 
 
+# One reusable parser guarded by a lock; constructing a fresh Markdown() per
+# message (as _md.markdown() does) is ~6x slower and this runs for every
+# assistant message when a chat page is rendered. The lock keeps concurrent
+# Flask request/worker threads from interleaving reset()/convert().
+_md_parser = _md.Markdown(
+    extensions=["fenced_code", "codehilite", "tables"],
+    extension_configs={
+        "codehilite": {"css_class": "highlight", "guess_lang": True}
+    },
+)
+_md_lock = threading.Lock()
+
+
 def _render_md(content: str) -> str:
     if not content:
         return ""
-    html = _md.markdown(
-        content,
-        extensions=["fenced_code", "codehilite", "tables"],
-        extension_configs={
-            "codehilite": {"css_class": "highlight", "guess_lang": True}
-        },
-    )
+    with _md_lock:
+        _md_parser.reset()
+        html = _md_parser.convert(content)
     return _fix_file_urls(html)
 
 

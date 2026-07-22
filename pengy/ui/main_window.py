@@ -197,10 +197,13 @@ class MainWindow(QMainWindow):
         self.chat_history.select_chat_by_id(chat_id)
         self.chat_view.clear()
 
-        # Render existing messages
+        # Render existing messages. Append without rendering so the whole chat
+        # is built once at the end — rendering per message is O(n^2) (each
+        # append rebuilds the full HTML and calls setHtml) and makes opening a
+        # long chat take tens of seconds.
         for msg in chat.get("messages", []):
             if msg["role"] == "user":
-                self.chat_view.append_message("user", msg["content"])
+                self.chat_view.append_message("user", msg["content"], render=False)
             elif msg["role"] == "assistant":
                 if msg.get("tool_calls"):
                     for tc in msg["tool_calls"]:
@@ -212,18 +215,20 @@ class MainWindow(QMainWindow):
                             "tool_call_id": tc["id"],
                             "name": tc["function"]["name"],
                             "args": args,
-                        })
+                        }, render=False)
                 if msg.get("content"):
                     self.chat_view.append_message(
                         "assistant", msg["content"],
                         reasoning_content=msg.get("reasoning_content"),
+                        render=False,
                     )
             elif msg["role"] == "tool":
                 self.chat_view.append_message("tool_result", {
                     "tool_call_id": msg.get("tool_call_id", ""),
                     "content": msg["content"],
                     "declined": False,
-                })
+                }, render=False)
+        self.chat_view.render_now()
 
     def send_message(self, text: str, images: list = None):
         """Send a message to the LLM."""

@@ -78,6 +78,9 @@ class ChatView(QTextBrowser):
         self._image_lock = threading.Lock()
         self._image_loaded.connect(self._render)
         self.md_extensions = ["fenced_code", "codehilite", "tables", "footnotes"]
+        # One reusable parser; constructing a fresh Markdown() per message is
+        # ~6x slower and this method is called for every message on every render.
+        self._md = markdown.Markdown(extensions=self.md_extensions)
         self._apply_font(self._theme)
         self.apply_theme(self._theme)
         self.setOpenLinks(False)
@@ -170,7 +173,7 @@ class ChatView(QTextBrowser):
                 return
         super().mousePressEvent(event)
 
-    def append_message(self, role: str, content, *, reasoning_content: str = None):
+    def append_message(self, role: str, content, *, reasoning_content: str = None, render: bool = True):
         if role == "user":
             self._messages.append({"role": "user", "content": content})
         elif role == "assistant":
@@ -196,6 +199,11 @@ class ChatView(QTextBrowser):
                     msg["result"] = content.get("content", "")
                     msg["declined"] = content.get("declined", False)
                     break
+        if render:
+            self._render()
+
+    def render_now(self):
+        """Force a full re-render. Use after a batch of append_message(render=False)."""
         self._render()
 
     def clear(self):
@@ -335,8 +343,8 @@ class ChatView(QTextBrowser):
         )
 
     def _render_markdown(self, text: str) -> str:
-        md = markdown.Markdown(extensions=self.md_extensions)
-        html = md.convert(text)
+        self._md.reset()
+        html = self._md.convert(text)
         # Qt doesn't support border-collapse; cellspacing="0" removes inter-cell gaps
         # so the CSS border on each cell reads as a single collapsed border visually.
         html = html.replace("<table>", '<table cellspacing="0">')

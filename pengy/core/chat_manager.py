@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,28 @@ from pengy.core.config import get_config_dir
 def _chats_path() -> Path:
     """Return path to chats.json in the current config directory."""
     return get_config_dir() / "chats.json"
+
+
+# ---------------------------------------------------------------------------
+# in-memory cache
+# ---------------------------------------------------------------------------
+# chats.json is a single (potentially large) file that gets fully re-parsed on
+# every read. A short-lived process reads it many times per user action
+# (startup loads it, then get_chat re-loads it; the web chat view loads it
+# twice per request). We cache the parsed list keyed by the file's
+# (mtime_ns, size); any external writer (the CLI, or the Rust/C++ editions
+# sharing ~/.config/pengy/) bumps mtime and transparently invalidates us.
+_cache_lock = threading.Lock()
+_cache_key: tuple[int, int] | None = None   # (st_mtime_ns, st_size)
+_cache_chats: list[dict] | None = None
+
+
+def _stat_key(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
 
 
 def _atomic_write(target: Path, data) -> None:
@@ -58,18 +81,42 @@ def _safe_json_load(path: Path) -> list | None:
 
 
 def load_chats() -> list[dict]:
-    """Load all chat sessions from JSON file, with corruption recovery."""
+    """Load all chat sessions from JSON file, with corruption recovery.
+
+    Returns a shallow copy of the cached list, so callers may freely
+    insert/remove/replace entries without disturbing the cache. The parse is
+    skipped entirely when the file is unchanged since the last read or write.
+    """
+    global _cache_key, _cache_chats
     path = _chats_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = _safe_json_load(path)
-    return data if data is not None else []
+
+    with _cache_lock:
+        key = _stat_key(path)
+        if key is not None and key == _cache_key and _cache_chats is not None:
+            return list(_cache_chats)
+
+        data = _safe_json_load(path)
+        if data is None:
+            data = []
+        # _safe_json_load may have moved a corrupt file aside; re-stat so the
+        # cache key reflects whatever is on disk now.
+        _cache_chats = data
+        _cache_key = _stat_key(path)
+        return list(data)
 
 
 def save_chats(chats: list[dict]) -> None:
     """Save all chat sessions to JSON file atomically."""
+    global _cache_key, _cache_chats
     path = _chats_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(path, chats)
+    with _cache_lock:
+        _atomic_write(path, chats)
+        # Prime the cache with what we just wrote so the next load_chats() (e.g.
+        # the load→mutate→save cycle in save_chat) skips a re-parse.
+        _cache_chats = list(chats)
+        _cache_key = _stat_key(path)
 
 
 def create_chat() -> dict:
