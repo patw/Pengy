@@ -367,6 +367,9 @@ class PengyCLI:
         elif cmd == "/apikey":
             self._cmd_apikey(args)
 
+        elif cmd == "/llm-timeout":
+            self._cmd_llm_timeout(args)
+
         elif cmd == "/timeout":
             self._cmd_timeout(args)
 
@@ -409,6 +412,7 @@ class PengyCLI:
         table.add_row("/models", "Fetch available models from the endpoint")
         table.add_row("/baseurl <url>", "Set the API base URL (e.g. /baseurl http://localhost:11434/v1)")
         table.add_row("/apikey <key>", "Set the API key")
+        table.add_row("/llm-timeout <sec>", "Set LLM API request timeout in seconds")
         table.add_row("/timeout <sec>", "Set tool execution timeout in seconds")
         table.add_row("/agent <string>", "Set the user agent string")
         table.add_row("/context-keep <n>", "Set how many recent turns to keep when compacting")
@@ -618,6 +622,7 @@ class PengyCLI:
         table.add_row("API Key", "••••" if self.config.get("api_key") else "(not set)")
         table.add_row("Tool Confirmation", self._confirm_display())
         table.add_row("Context keep turns", str(self.config.get("context_keep_turns", 0)))
+        table.add_row("LLM Timeout", f"{self.config.get('llm_timeout', 300)}s")
         table.add_row("Tool Timeout", f"{self.config.get('tool_timeout', 60)}s")
         table.add_row("User Agent", self.config.get("user_agent", "—"))
 
@@ -805,11 +810,35 @@ class PengyCLI:
         self._update_llm_client()
         self.console.print(f"[green]✓ API key updated.[/green]")
 
+    def _cmd_llm_timeout(self, args: list[str]):
+        """Set the LLM API request timeout in seconds."""
+        if not args:
+            self.console.print(
+                f"[dim]Current LLM timeout:[/dim] {self.config.get('llm_timeout', 300)}s"
+            )
+            self.console.print("[dim]Usage: /llm-timeout <seconds>[/dim]")
+            return
+        try:
+            secs = int(args[0])
+        except ValueError:
+            self.console.print("[red]Invalid number. Usage: /llm-timeout <seconds>[/red]")
+            return
+        if secs < 1:
+            self.console.print("[red]Timeout must be at least 1 second.[/red]")
+            return
+        old = self.config.get("llm_timeout", 300)
+        self.config["llm_timeout"] = secs
+        self._save_config()
+        self._update_llm_client()
+        self.console.print(
+            f"[green]✓ LLM timeout changed:[/green] {old}s → [bold]{secs}s[/bold]"
+        )
+
     def _cmd_timeout(self, args: list[str]):
         """Set the tool execution timeout in seconds."""
         if not args:
             self.console.print(
-                f"[dim]Current timeout:[/dim] {self.config.get('tool_timeout', 60)}s"
+                f"[dim]Current tool timeout:[/dim] {self.config.get('tool_timeout', 60)}s"
             )
             self.console.print("[dim]Usage: /timeout <seconds>[/dim]")
             return
@@ -826,7 +855,7 @@ class PengyCLI:
         self._save_config()
         tools.set_tool_timeout(secs)
         self.console.print(
-            f"[green]✓ Timeout changed:[/green] {old}s → [bold]{secs}s[/bold]"
+            f"[green]✓ Tool timeout changed:[/green] {old}s → [bold]{secs}s[/bold]"
         )
 
     def _cmd_agent(self, args: list[str]):
@@ -971,6 +1000,7 @@ class PengyCLI:
             base_url=self.config.get("base_url", "https://api.openai.com/v1"),
             api_key=self.config.get("api_key", ""),
             model=self.config.get("model", "gpt-4o"),
+            llm_timeout=self.config.get("llm_timeout", 300),
         )
         tools.set_user_agent(self.config.get("user_agent", "PengyAgent/1.0"))
         tools.set_tool_timeout(self.config.get("tool_timeout", 60))

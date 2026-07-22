@@ -155,10 +155,12 @@ def _run_tool(name: str, args: dict) -> str:
 class LLMClient:
     """Client for interacting with OpenAI-compatible LLM APIs."""
 
-    def __init__(self, base_url: str, api_key: str, model: str):
+    def __init__(self, base_url: str, api_key: str, model: str,
+                 llm_timeout: float = 300.0):
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
+        self.llm_timeout = llm_timeout
         self._client = None
 
     @property
@@ -167,7 +169,7 @@ class LLMClient:
             self._client = OpenAI(
                 base_url=self.base_url,
                 api_key=self.api_key,
-                timeout=300.0,
+                timeout=self.llm_timeout,
                 max_retries=0,
                 default_headers={"api-key": self.api_key},
             )

@@ -142,6 +142,7 @@ class MainWindow(QMainWindow):
             base_url=self.config["base_url"],
             api_key=self.config["api_key"],
             model=self.config["model"],
+            llm_timeout=self.config.get("llm_timeout", 300),
         )
         tools.set_user_agent(self.config.get("user_agent", "PengyAgent/1.0"))
         tools.set_tool_timeout(self.config.get("tool_timeout", 60))

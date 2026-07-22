@@ -41,7 +41,8 @@ class TestConfig:
         assert DEFAULTS["model"] == "gpt-4o"
         assert DEFAULTS["tool_confirmation"] == "none"
         assert DEFAULTS["context_keep_turns"] == 0
-        assert DEFAULTS["tool_timeout"] == 60
+        assert DEFAULTS["tool_timeout"] == 300
+        assert DEFAULTS["llm_timeout"] == 300
 
     def test_render_system_message(self):
         from pengy.core.config import render_system_message
@@ -91,7 +92,7 @@ class TestConfig:
         assert loaded["model"] == "partial"
         # Default filled in
         assert loaded["tool_confirmation"] == "none"
-        assert loaded["tool_timeout"] == 60
+        assert loaded["tool_timeout"] == 300
 
     def test_migrate_yolo_true(self, tmp_cfg_dir):
         """Old yolo_mode=True → tool_confirmation='all'."""

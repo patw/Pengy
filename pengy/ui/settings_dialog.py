@@ -175,6 +175,17 @@ class SettingsDialog(QDialog):
         scale_row.addRow("UI Scale (restart for full UI):", self.scale_combo)
         layout.addLayout(scale_row)
 
+        # LLM Timeout
+        llm_timeout_row = QFormLayout()
+        llm_timeout_row.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.llm_timeout_spinbox = QSpinBox()
+        self.llm_timeout_spinbox.setRange(1, 3600)
+        self.llm_timeout_spinbox.setSuffix(" sec")
+        self.llm_timeout_spinbox.setToolTip("HTTP timeout for each LLM API request")
+        self.llm_timeout_spinbox.setValue(config.get("llm_timeout", 300))
+        llm_timeout_row.addRow("LLM timeout:", self.llm_timeout_spinbox)
+        layout.addLayout(llm_timeout_row)
+
         # Tool Timeout
         timeout_row = QFormLayout()
         timeout_row.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
@@ -260,6 +271,7 @@ class SettingsDialog(QDialog):
         self.config["theme_mode"] = self.theme_mode_combo.currentData()
         self.config["theme_accent"] = self.theme_accent_combo.currentData()
         self.config["ui_scale"] = self.scale_combo.currentData()
+        self.config["llm_timeout"] = self.llm_timeout_spinbox.value()
         self.config["tool_timeout"] = self.timeout_spinbox.value()
         self.config["user_agent"] = self.user_agent_input.text() or "PengyAgent/1.0"
         return self.config

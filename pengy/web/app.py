@@ -248,6 +248,7 @@ class WebWorker:
                 base_url=config.get("base_url", "https://api.openai.com/v1"),
                 api_key=config.get("api_key", ""),
                 model=config.get("model", "gpt-4o"),
+                llm_timeout=config.get("llm_timeout", 300),
             )
 
             messages = self._messages_override or _build_messages(chat, config)
@@ -840,6 +841,10 @@ def settings_view():
         if effort in ("", "none", "minimal", "low", "medium", "high", "xhigh", "max"):
             config["reasoning_effort"] = effort
         config["preserve_reasoning"] = request.form.get("preserve_reasoning") == "1"
+        try:
+            config["llm_timeout"] = max(1, int(request.form.get("llm_timeout", 300)))
+        except ValueError:
+            pass
         try:
             config["tool_timeout"] = max(1, int(request.form.get("tool_timeout", 60)))
         except ValueError:
