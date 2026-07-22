@@ -1,4 +1,5 @@
 """Chat view with markdown rendering for Pengy."""
+import base64
 import json
 import re
 import threading
@@ -101,9 +102,11 @@ class ChatView(QTextBrowser):
             self._render()
 
     def loadResource(self, type_: int, url: QUrl) -> object:
-        """Return cached external images; kick off a background fetch if not yet loaded."""
+        """Return cached external images, data URIs, or local files."""
         if type_ == QTextDocument.ResourceType.ImageResource:
             url_str = url.toString()
+
+            # ── HTTP/HTTPS: cached network fetch ──────────────────
             if url_str.startswith(("http://", "https://")):
                 should_fetch = False
                 with self._image_lock:
@@ -128,6 +131,40 @@ class ChatView(QTextBrowser):
                         return image
 
                 return None  # not yet loaded; Qt leaves a blank space until re-render
+
+            # ── Data URIs: decode base64 ourselves ────────────────
+            if url_str.startswith("data:"):
+                try:
+                    # Format: data:[<mediatype>][;base64],<data>
+                    header, encoded = url_str.split(",", 1)
+                    is_base64 = ";base64" in header
+                    if is_base64:
+                        raw = base64.b64decode(encoded)
+                    else:
+                        raw = encoded.encode("utf-8")
+                    image = QImage()
+                    image.loadFromData(raw)
+                    if not image.isNull():
+                        if image.width() > 600:
+                            image = image.scaledToWidth(
+                                600, Qt.TransformationMode.SmoothTransformation
+                            )
+                        return image
+                except Exception:
+                    pass
+                return None
+
+            # ── Local file:// images ──────────────────────────────
+            if url_str.startswith("file://"):
+                local_path = url.toLocalFile()
+                image = QImage()
+                if image.load(local_path):
+                    if image.width() > 600:
+                        image = image.scaledToWidth(
+                            600, Qt.TransformationMode.SmoothTransformation
+                        )
+                    return image
+                return None
 
         return super().loadResource(type_, url)
 
