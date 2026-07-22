@@ -179,9 +179,10 @@ class ChatHistoryWidget(QWidget):
             title = chat.get("title", "Untitled")
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, chat_id)
-            item.setSizeHint(self._make_item_widget(chat_id, title).sizeHint())
+            widget = self._make_item_widget(chat_id, title)
+            item.setSizeHint(widget.sizeHint())
             self.chat_list.addItem(item)
-            self.chat_list.setItemWidget(item, self._make_item_widget(chat_id, title))
+            self.chat_list.setItemWidget(item, widget)
 
     def on_item_clicked(self, item: QListWidgetItem):
         """Handle chat selection."""

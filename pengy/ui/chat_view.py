@@ -82,6 +82,11 @@ class ChatView(QTextBrowser):
         # One reusable parser; constructing a fresh Markdown() per message is
         # ~6x slower and this method is called for every message on every render.
         self._md = markdown.Markdown(extensions=self.md_extensions)
+        # Cache the Pygments HtmlFormatter (depends only on theme, not code).
+        # Recreating it per code block was wasteful — it runs for every code
+        # block in every message on every render.
+        self._pygments_formatter = None
+        self._lexer_cache: dict[str, object] = {}
         self._apply_font(self._theme)
         self.apply_theme(self._theme)
         self.setOpenLinks(False)
@@ -95,6 +100,12 @@ class ChatView(QTextBrowser):
         """Apply a theme and re-render existing messages."""
         self._theme = theme
         self._apply_font(theme)
+        # Rebuild the Pygments formatter only when the theme changes,
+        # not on every code block highlight.
+        self._pygments_formatter = HtmlFormatter(
+            style=self._theme.get("pygments_style", "friendly"),
+            noclasses=True, nobackground=True,
+        )
         self.setStyleSheet(
             f"QTextBrowser {{ background-color: {theme['bg']}; color: {theme['fg']}; border: none; padding: 0; }}"
         )
@@ -392,8 +403,16 @@ class ChatView(QTextBrowser):
             lang = match.group(1) or "text"
             code = match.group(2)
             try:
-                lexer = get_lexer_by_name(lang, stripnl=False) if lang and lang != "text" else TextLexer()
-                formatter = HtmlFormatter(style=self._theme.get("pygments_style", "friendly"), noclasses=True, nobackground=True)
+                if lang and lang != "text":
+                    if lang not in self._lexer_cache:
+                        self._lexer_cache[lang] = get_lexer_by_name(lang, stripnl=False)
+                    lexer = self._lexer_cache[lang]
+                else:
+                    lexer = TextLexer()
+                formatter = self._pygments_formatter or HtmlFormatter(
+                    style=self._theme.get("pygments_style", "friendly"),
+                    noclasses=True, nobackground=True,
+                )
                 highlighted = highlight(code, lexer, formatter)
                 return f'<pre class="code-pre">{highlighted}</pre>'
             except Exception:

@@ -248,13 +248,11 @@ class LLMClient:
                 accumulated_usage["total_tokens"] += response.usage.total_tokens
 
             assistant_msg = response.choices[0].message
-            current_messages.append(_serialize_assistant_message(assistant_msg, preserve_reasoning))
+            serialized = _serialize_assistant_message(assistant_msg, preserve_reasoning)
+            current_messages.append(serialized)
 
             if assistant_msg.tool_calls:
-                serialized_assistant = _serialize_assistant_message(
-                    assistant_msg, preserve_reasoning
-                )
-                yield {"type": "assistant_tool_calls", "message": serialized_assistant}
+                yield {"type": "assistant_tool_calls", "message": serialized}
 
                 for tool_call in assistant_msg.tool_calls:
                     tool_name = tool_call.function.name
