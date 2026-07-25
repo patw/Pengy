@@ -1,14 +1,50 @@
 <!DOCTYPE html>
-<html lang="en">
+<!-- data-bs-theme drives Bootstrap 5.3's built-in dark mode. Rendered server-side
+     for explicit light/dark so it works with JS disabled; "system" is resolved by
+     the inline script below (before first paint, so there's no light flash). -->
+<html lang="en" data-bs-theme="{{ 'dark' if theme_mode == 'dark' else 'light' }}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>{% block title %}Pengy{% endblock %}</title>
+  <link rel="icon" href="{{ url_for('favicon') }}" type="image/png" sizes="any">
+  <script>
+    (function () {
+      var mode = {{ (theme_mode or 'system') | tojson }};
+      function resolve() {
+        return mode === 'system'
+          ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : mode;
+      }
+      document.documentElement.setAttribute('data-bs-theme', resolve());
+      // Follow the OS live when set to "system"
+      if (mode === 'system' && window.matchMedia) {
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
+          document.documentElement.setAttribute('data-bs-theme', resolve());
+        });
+      }
+    })();
+  </script>
   <link rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
   <link rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
   <style>
+    /* ── Theme tokens ────────────────────────────────────────── */
+    /* Everything else uses Bootstrap's own --bs-* vars, which already flip
+       with data-bs-theme. These two are the extras we need: a surface for
+       code/tool blocks and a colour for inline code. */
+    :root, [data-bs-theme="light"] {
+      --pengy-code-bg: #f6f8fa;
+      --pengy-code-fg: #24292e;
+      --pengy-inline-code-fg: #d63384;
+    }
+    [data-bs-theme="dark"] {
+      --pengy-code-bg: #1c1f24;
+      --pengy-code-fg: #d7dae0;
+      --pengy-inline-code-fg: #ff8bc4;
+    }
+
     /* ── Layout ──────────────────────────────────────────────── */
     html, body { height: 100%; overflow: hidden; }
 
@@ -198,7 +234,7 @@
     }
 
     .tool-args, .tool-output {
-      background: #f6f8fa;
+      background: var(--pengy-code-bg);
       border-radius: 4px;
       padding: 0.5rem 0.6rem;
       margin-top: 0.4rem;
@@ -207,7 +243,7 @@
       white-space: pre-wrap;
       word-break: break-all;
       font-size: 0.78rem;
-      color: #24292e;
+      color: var(--pengy-code-fg);
     }
 
     /* ── Thinking indicator ──────────────────────────────────── */
@@ -220,8 +256,26 @@
       font-size: 0.85rem;
     }
 
+    /* ── Jump to bottom ──────────────────────────────────────── */
+    /* Anchored to the input area and floated up over the message list, so it
+       sits still while the messages scroll underneath it. */
+    #jumpBottomBtn {
+      position: absolute;
+      right: 1rem;
+      top: -3rem;
+      z-index: 5;
+      border-radius: 999px;
+      width: 2.5rem;
+      height: 2.5rem;
+      padding: 0;
+      display: none;
+      box-shadow: 0 2px 8px rgba(0,0,0,.25);
+    }
+    #jumpBottomBtn.show { display: block; }
+
     /* ── Input area ──────────────────────────────────────────── */
     .input-area {
+      position: relative;
       padding: 0.6rem 0.75rem;
       border-top: 1px solid var(--bs-border-color);
       background: var(--bs-body-bg);
@@ -244,15 +298,16 @@
     .markdown-body p:last-child { margin-bottom: 0; }
     .markdown-body h1,.markdown-body h2,.markdown-body h3 { margin-top:0.75rem; margin-bottom:0.4rem; }
     .markdown-body pre {
-      background: #f6f8fa;
+      background: var(--pengy-code-bg);
+      color: var(--pengy-code-fg);
       border-radius: 4px;
       padding: 0.75rem;
       overflow-x: auto;
     }
     .markdown-body code { font-size: 0.84em; }
     .markdown-body :not(pre)>code {
-      background: #f6f8fa;
-      color: #d63384;
+      background: var(--pengy-code-bg);
+      color: var(--pengy-inline-code-fg);
       padding: 0.1em 0.3em;
       border-radius: 3px;
     }
@@ -297,9 +352,9 @@
       <div class="chat-list px-2 pb-2">
         {% block sidebar_chats %}{% endblock %}
       </div>
-      <div class="mt-auto border-top p-2 d-md-none">
+      <div class="mt-auto border-top p-2">
         <a href="{{ url_for('settings_view') }}" class="btn btn-outline-secondary w-100"
-           data-bs-dismiss="offcanvas">
+           onclick="dismissSidebar(event)">
           <i class="bi bi-gear me-1"></i> Settings
         </a>
       </div>
@@ -310,7 +365,7 @@
   <div class="app-shell">
 
     <!-- ── Navbar ─────────────────────────────────────────────── -->
-    <nav class="navbar navbar-light bg-light border-bottom px-2 py-2 flex-shrink-0">
+    <nav class="navbar bg-body-tertiary border-bottom px-2 py-2 flex-shrink-0">
       <!-- Left group -->
       <div class="d-flex align-items-center gap-1">
         <button class="btn btn-outline-secondary d-md-none"
@@ -354,6 +409,21 @@
     // Dismiss offcanvas when clicking sidebar links (without blocking navigation).
     // Bootstrap's data-bs-dismiss="offcanvas" calls e.preventDefault() which kills
     // link hrefs — so we handle it ourselves instead.
+    function dismissSidebar(event) {
+      const offcanvas = document.getElementById('sidebarOffcanvas');
+      if (!offcanvas) return;
+      const bsOffcanvas = bootstrap.Offcanvas.getInstance(offcanvas);
+      if (bsOffcanvas && offcanvas.classList.contains('show')) {
+        event.preventDefault();
+        bsOffcanvas.hide();
+        // Wait for the offcanvas to close, then navigate
+        offcanvas.addEventListener('hidden.bs.offcanvas', function() {
+          window.location.href = event.currentTarget.href;
+        }, { once: true });
+      }
+      // If sidebar is not shown (desktop mode), let the click navigate normally
+    }
+
     document.addEventListener('click', function(e) {
       const link = e.target.closest('.chat-list-item');
       if (!link) return;

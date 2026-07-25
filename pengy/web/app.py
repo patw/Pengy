@@ -97,7 +97,25 @@ def _render_md(content: str) -> str:
 
 
 def _pygments_css() -> str:
-    return HtmlFormatter(style="friendly").get_style_defs(".highlight")
+    """Syntax-highlight CSS for both themes, scoped by ``data-bs-theme``.
+
+    Both rule sets are always emitted; the ``data-bs-theme`` attribute on
+    <html> decides which one applies, so switching themes needs no reload.
+    Styles match the desktop GUI (see ui/theme.py): friendly / monokai.
+    """
+    light = HtmlFormatter(style="friendly").get_style_defs(
+        '[data-bs-theme="light"] .highlight'
+    )
+    dark = HtmlFormatter(style="monokai").get_style_defs(
+        '[data-bs-theme="dark"] .highlight'
+    )
+    return light + "\n" + dark
+
+
+def _theme_mode(config: dict) -> str:
+    """Return the configured theme mode, validated. 'system' is resolved client-side."""
+    mode = config.get("theme_mode", "system")
+    return mode if mode in ("system", "light", "dark") else "system"
 
 
 def _build_messages(chat: dict, config: dict) -> list[dict]:
@@ -402,6 +420,7 @@ def chat_view(chat_id: str):
         turns=turns,
         pygments_css=_pygments_css(),
         has_active_worker=has_active_worker,
+        theme_mode=_theme_mode(config),
     )
 
 
@@ -769,6 +788,13 @@ def chat_command(chat_id: str):
 
     config = load_config()
 
+    def _public(cfg: dict) -> dict:
+        """Only the fields the client actually renders — never the API key."""
+        return {
+            "model": cfg.get("model", ""),
+            "tool_confirmation": cfg.get("tool_confirmation", "none"),
+        }
+
     # Commands that return config changes
     if cmd in ("/yolo",):
         modes = ["none", "safe", "all"]
@@ -776,13 +802,21 @@ def chat_command(chat_id: str):
         new_mode = args[0].lower() if args and args[0].lower() in modes else modes[(modes.index(current) + 1) % 3]
         config["tool_confirmation"] = new_mode
         save_config(config)
-        labels = {"all": "YOLO", "safe": "Safe", "none": "None"}
-        return jsonify({"type": "config", "message": f"Tool Confirmation: {labels[new_mode]}", "config": config})
+        labels = {"all": "YOLO", "safe": "Safe", "none": "Confirm All"}
+        return jsonify({
+            "type": "config",
+            "message": f"Tool Confirmation: {labels[new_mode]}",
+            "config": _public(config),
+        })
 
     if cmd == "/model" and args:
         config["model"] = args[0]
         save_config(config)
-        return jsonify({"type": "config", "message": f"Model: {args[0]}", "config": config})
+        return jsonify({
+            "type": "config",
+            "message": f"Model: {args[0]}",
+            "config": _public(config),
+        })
 
     if cmd in ("/new",):
         chat = create_chat()
@@ -830,6 +864,21 @@ def api_models():
         return jsonify({"error": str(e)}), 502
 
 
+# ─── Favicon ───────────────────────────────────────────────────
+
+
+_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+
+
+@app.route("/favicon.ico")
+def favicon():
+    """Serve the PNG favicon."""
+    png_path = _ASSETS_DIR / "icon.png"
+    if not png_path.is_file():
+        return "", 404
+    return send_file(str(png_path), mimetype="image/png")
+
+
 # ─── Settings ──────────────────────────────────────────────────────────────────
 
 
@@ -846,6 +895,9 @@ def settings_view():
         tc = request.form.get("tool_confirmation", "none")
         if tc in ("all", "safe", "none"):
             config["tool_confirmation"] = tc
+        mode = request.form.get("theme_mode", "system")
+        if mode in ("system", "light", "dark"):
+            config["theme_mode"] = mode
         effort = request.form.get("reasoning_effort", "")
         if effort in ("", "none", "minimal", "low", "medium", "high", "xhigh", "max"):
             config["reasoning_effort"] = effort
@@ -865,4 +917,7 @@ def settings_view():
         save_config(config)
         saved = True
     chats = load_chats()
-    return render_template("settings.html", config=config, saved=saved, chats=chats)
+    return render_template(
+        "settings.html", config=config, saved=saved, chats=chats,
+        theme_mode=_theme_mode(config),
+    )

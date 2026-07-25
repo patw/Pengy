@@ -61,6 +61,16 @@
       </div>
 
       <div class="mb-3">
+        <label class="form-label fw-semibold">Theme</label>
+        <select name="theme_mode" class="form-select">
+          {% for value, label in [('system','Follow system'),('light','Light'),('dark','Dark')] %}
+          <option value="{{ value }}" {% if theme_mode == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        <div class="form-text">Shared with the desktop app via <code>theme_mode</code></div>
+      </div>
+
+      <div class="mb-3">
         <label class="form-label fw-semibold">Tool Confirmation</label>
         <select name="tool_confirmation" class="form-select">
           <option value="none"
@@ -151,28 +161,49 @@ async function fetchModels() {
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Fetching…';
   list.classList.add('d-none');
 
+  function showNote(text, cls) {
+    list.replaceChildren();
+    const note = document.createElement('div');
+    note.className = cls;
+    note.textContent = text;
+    list.appendChild(note);
+  }
+
   try {
     const resp = await fetch('/models');
     const data = await resp.json();
     if (data.error) {
-      list.innerHTML = `<div class="text-danger small">Error: ${data.error}</div>`;
+      showNote('Error: ' + data.error, 'text-danger small');
     } else if (data.models && data.models.length > 0) {
-      let html = '<div class="small fw-semibold mb-1">Available models (click to select):</div>';
-      const current = document.getElementById('modelInput').value;
+      // Built with DOM APIs rather than an HTML string so model names coming
+      // back from the endpoint can't inject markup.
+      list.replaceChildren();
+      const heading = document.createElement('div');
+      heading.className = 'small fw-semibold mb-1';
+      heading.textContent = 'Available models (click to select):';
+      list.appendChild(heading);
+
+      const input = document.getElementById('modelInput');
       for (const m of data.models) {
-        const active = m === current ? ' active fw-bold' : '';
-        html += `<span class="badge bg-light text-dark me-1 mb-1${active}" style="cursor:pointer;font-size:0.8rem"
-                 onclick="document.getElementById('modelInput').value='${m.replace(/'/g, "&#39;")}';
-                         document.querySelectorAll('#modelsList .badge').forEach(b=>b.classList.remove('active','fw-bold'));
-                         this.classList.add('active','fw-bold')">${m}</span>`;
+        const badge = document.createElement('span');
+        badge.className = 'badge text-bg-secondary me-1 mb-1'
+          + (m === input.value ? ' active fw-bold' : '');
+        badge.style.cursor = 'pointer';
+        badge.style.fontSize = '0.8rem';
+        badge.textContent = m;
+        badge.addEventListener('click', () => {
+          input.value = m;
+          list.querySelectorAll('.badge').forEach(b => b.classList.remove('active', 'fw-bold'));
+          badge.classList.add('active', 'fw-bold');
+        });
+        list.appendChild(badge);
       }
-      list.innerHTML = html;
     } else {
-      list.innerHTML = '<div class="text-muted small">No models returned.</div>';
+      showNote('No models returned.', 'text-muted small');
     }
     list.classList.remove('d-none');
   } catch (e) {
-    list.innerHTML = `<div class="text-danger small">Failed: ${e}</div>`;
+    showNote('Failed: ' + e, 'text-danger small');
     list.classList.remove('d-none');
   } finally {
     btn.disabled = false;

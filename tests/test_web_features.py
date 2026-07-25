@@ -176,6 +176,139 @@ class TestCommands:
         assert resp.status_code == 400
 
 
+class TestCommandConfigIsNarrowed:
+    """Command responses must not ship the whole config — notably the API key.
+
+    The browser only needs the two fields it renders in the navbar.
+    """
+
+    SECRET = "sk-must-never-reach-the-browser"
+
+    def _with_key(self):
+        config = load_config()
+        config["api_key"] = self.SECRET
+        save_config(config)
+
+    @pytest.mark.parametrize("command", ["/yolo safe", "/model gpt-test-1"])
+    def test_api_key_absent_from_response(self, client, command):
+        self._with_key()
+        chat = make_chat()
+        resp = client.post(f"/chat/{chat['id']}/command", json={"command": command})
+
+        assert "api_key" not in resp.get_json()["config"]
+        assert self.SECRET not in resp.get_data(as_text=True)
+
+    @pytest.mark.parametrize("command", ["/yolo safe", "/model gpt-test-1"])
+    def test_only_the_rendered_fields_are_exposed(self, client, command):
+        self._with_key()
+        chat = make_chat()
+        resp = client.post(f"/chat/{chat['id']}/command", json={"command": command})
+
+        assert set(resp.get_json()["config"]) == {"model", "tool_confirmation"}
+
+    def test_other_settings_stay_server_side(self, client):
+        """base_url / system_message leak environment detail the UI never shows."""
+        self._with_key()
+        chat = make_chat()
+        resp = client.post(f"/chat/{chat['id']}/command", json={"command": "/yolo safe"})
+
+        payload = resp.get_json()["config"]
+        for field in ("base_url", "system_message", "user_agent"):
+            assert field not in payload
+
+    def test_narrowing_did_not_break_the_navbar_fields(self, client):
+        """The two fields the JS reads must still be present and correct."""
+        chat = make_chat()
+        resp = client.post(f"/chat/{chat['id']}/command", json={"command": "/yolo all"})
+
+        payload = resp.get_json()["config"]
+        assert payload["tool_confirmation"] == "all"
+        assert payload["model"] == load_config()["model"]
+
+
+class TestConfirmationLabels:
+    """The safest mode ("none" = confirm every call) must not read as "None"."""
+
+    @pytest.mark.parametrize("mode,expected", [
+        ("all", "YOLO"),
+        ("safe", "Safe"),
+        ("none", "Confirm All"),
+    ])
+    def test_navbar_badge_label(self, client, mode, expected):
+        config = load_config()
+        config["tool_confirmation"] = mode
+        save_config(config)
+
+        chat = make_chat()
+        html = client.get(f"/chat/{chat['id']}").data.decode()
+        badge = html[html.index('id="navConfirmBadge"'):]
+        badge = badge[:badge.index("</span>")]
+        assert expected in badge
+
+    def test_safest_mode_badge_is_not_bare_none(self, client):
+        config = load_config()
+        config["tool_confirmation"] = "none"
+        save_config(config)
+
+        chat = make_chat()
+        html = client.get(f"/chat/{chat['id']}").data.decode()
+        badge = html[html.index('id="navConfirmBadge"'):]
+        badge = badge[:badge.index("</span>")]
+        assert ">\n  None" not in badge and "> None" not in badge
+
+    def test_yolo_command_reports_the_same_label(self, client):
+        chat = make_chat()
+        resp = client.post(f"/chat/{chat['id']}/command", json={"command": "/yolo none"})
+        assert "Confirm All" in resp.get_json()["message"]
+
+
+class TestFavicon:
+    def test_served_as_png(self, client):
+        resp = client.get("/favicon.ico")
+        if resp.status_code == 404:
+            pytest.skip("icon.png not present in this checkout")
+        assert resp.mimetype == "image/png"
+
+    def test_referenced_in_the_page_head(self, client):
+        chat = make_chat()
+        html = client.get(f"/chat/{chat['id']}").data.decode()
+        assert 'rel="icon"' in html
+
+
+class TestScrollAffordances:
+    """The message list must not yank the reader to the bottom mid-tool-run.
+
+    The behaviour itself is client-side; these assert the pieces are wired up,
+    which is as far as a template test can reach without a browser.
+    """
+
+    def test_jump_to_latest_button_present(self, client):
+        chat = make_chat()
+        html = client.get(f"/chat/{chat['id']}").data.decode()
+        assert 'id="jumpBottomBtn"' in html
+
+    def test_sticky_append_helper_present(self, client):
+        chat = make_chat()
+        html = client.get(f"/chat/{chat['id']}").data.decode()
+        assert "function appendToArea(" in html
+        assert "function isNearBottom(" in html
+
+    def test_streamed_appends_go_through_the_sticky_helper(self, client):
+        """Direct appendChild + scrollToBottom in these paths is the old bug."""
+        chat = make_chat()
+        html = client.get(f"/chat/{chat['id']}").data.decode()
+
+        for fn in ("appendToolRequest", "appendAssistantMessage", "appendError"):
+            body = html[html.index(f"function {fn}("):]
+            body = body[:body.index("\n}")]
+            assert "appendToArea(" in body, f"{fn} bypasses the sticky-scroll guard"
+
+    def test_scroll_listener_keeps_the_button_in_sync(self, client):
+        chat = make_chat()
+        html = client.get(f"/chat/{chat['id']}").data.decode()
+        assert "'scroll', updateJumpBtn" in html
+
+
 # ── /models fetch ──────────────────────────────────────────────────────────────
 
 class _ModelsHandler(BaseHTTPRequestHandler):

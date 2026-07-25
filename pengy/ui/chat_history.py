@@ -3,7 +3,7 @@ import re
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QListWidget,
     QListWidgetItem, QMenu, QFrame, QLabel, QHBoxLayout,
-    QFileDialog,
+    QFileDialog, QMessageBox,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QAction
@@ -242,9 +242,28 @@ class ChatHistoryWidget(QWidget):
                 self._delete_item(item)
                 return
 
+    def _item_title(self, item: QListWidgetItem) -> str:
+        """Best-effort title for a row, for use in prompts."""
+        widget = self.chat_list.itemWidget(item)
+        label = widget.findChild(QLabel) if widget else None
+        return label.text() if label else "this chat"
+
     def _delete_item(self, item: QListWidgetItem):
-        """Remove a chat item from the list and storage."""
+        """Remove a chat item from the list and storage, after confirming."""
         chat_id = item.data(Qt.ItemDataRole.UserRole)
+
+        # Deletion is immediate and unrecoverable, and the 🗑 button sits on
+        # every row — one stray click used to be enough to lose a chat.
+        reply = QMessageBox.question(
+            self,
+            "Delete Chat",
+            f'Delete "{self._item_title(item)}"?\n\nThis cannot be undone.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
         from pengy.core.chat_manager import delete_chat
         delete_chat(chat_id)
         self.chat_list.takeItem(self.chat_list.row(item))
@@ -308,7 +327,13 @@ class ChatHistoryWidget(QWidget):
         color = self._theme['danger'] if self._dot_phase else "transparent"
         self.status_dot.setStyleSheet(f"color: {color}; font-size: 14px;")
 
-    _CONFIRM_LABELS = {"all": "Tool Confirm: YOLO", "safe": "Tool Confirm: Safe", "none": "Tool Confirm: None"}
+    # "none" is the *safest* mode — it confirms every call. Labelling it "None"
+    # read as "no confirmations", which is exactly backwards.
+    _CONFIRM_LABELS = {
+        "all": "Tool Confirm: YOLO",
+        "safe": "Tool Confirm: Safe",
+        "none": "Tool Confirm: Confirm All",
+    }
 
     def update_quick_settings(self, model: str, tool_confirmation: str):
         """Update the quick settings display."""

@@ -25,16 +25,65 @@ from pengy.core.chat_manager import (
 from pengy.core.image_utils import preprocess as preprocess_image
 from pengy.core import tools
 
-# ── readline history (Unix only, graceful fallback) ──────────────
+# ── readline history + completion (Unix only, graceful fallback) ──
 
 _HISTFILE: Path | None = None
 
+# Every slash command the REPL dispatches, for tab completion.
+# Keep in sync with PengyCLI._handle_slash and PengyCLI._cmd_help.
+SLASH_COMMANDS = (
+    "/help", "/new", "/show", "/tail", "/rename", "/clear", "/export",
+    "/yolo", "/config", "/model", "/models", "/list", "/load", "/baseurl",
+    "/apikey", "/llm-timeout", "/timeout", "/agent", "/context-keep",
+    "/system", "/delete", "/attach", "/compact", "/quit", "/exit", "/q",
+)
+
+# Sub-arguments worth completing once the command is typed.
+_SLASH_ARGS = {
+    "/yolo": ("all", "safe", "none"),
+}
+
+
+def _complete_slash(text: str, state: int) -> str | None:
+    """readline completer for slash commands and their known arguments.
+
+    Only engages when the line starts with "/" so it never interferes with
+    ordinary prompt text.
+    """
+    import readline
+
+    line = readline.get_line_buffer()
+    stripped = line.lstrip()
+    if not stripped.startswith("/"):
+        return None
+
+    parts = stripped.split()
+    completing_arg = len(parts) > 1 or (parts and line.endswith(" "))
+
+    if completing_arg:
+        options = _SLASH_ARGS.get(parts[0].lower(), ())
+    else:
+        options = SLASH_COMMANDS
+
+    matches = [o for o in options if o.startswith(text)]
+    return matches[state] if state < len(matches) else None
+
+
 def _setup_readline() -> Path | None:
-    """Enable readline line-editing + persistent history if available."""
+    """Enable readline line-editing, persistent history, and completion."""
     try:
         import readline
     except ImportError:
         return None
+
+    readline.set_completer(_complete_slash)
+    # "/" and "-" are part of command names, so they must not split words.
+    readline.set_completer_delims(" \t\n")
+    # libedit (macOS) uses a different binding syntax than GNU readline.
+    if "libedit" in (getattr(readline, "__doc__", "") or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
 
     hist_dir = Path(os.environ.get(
         "XDG_STATE_HOME",
@@ -76,7 +125,7 @@ _rich = _require_rich()
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
@@ -761,6 +810,14 @@ class PengyCLI:
         target = chats[idx]
         title = target.get("title", "Untitled")
 
+        # Deletion is immediate and unrecoverable; a mistyped index shouldn't
+        # silently destroy a chat.
+        if not Confirm.ask(
+            f'Delete [bold]"{title}"[/bold]? This cannot be undone.', default=False
+        ):
+            self.console.print("[dim]Cancelled.[/dim]")
+            return
+
         if self.current_chat and target["id"] == self.current_chat["id"]:
             self.current_chat = None
 
@@ -987,11 +1044,13 @@ class PengyCLI:
     # LLM interaction
     # ------------------------------------------------------------------
 
-    _CONFIRM_DISPLAY = {"all": "YOLO", "safe": "Safe", "none": "None"}
+    # "none" is the *safest* mode — it confirms every call. Labelling it "None"
+    # read as "no confirmations", which is exactly backwards.
+    _CONFIRM_DISPLAY = {"all": "YOLO", "safe": "Safe", "none": "Confirm All"}
 
     def _confirm_display(self) -> str:
         return self._CONFIRM_DISPLAY.get(
-            self.config.get("tool_confirmation", "none"), "None"
+            self.config.get("tool_confirmation", "none"), "Confirm All"
         )
 
     def _update_llm_client(self):

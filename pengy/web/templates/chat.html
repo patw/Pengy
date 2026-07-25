@@ -9,10 +9,11 @@
 {% block navbar_center %}
 <span class="text-muted small d-none d-sm-inline" id="navModel">{{ config.model }}</span>
 <span class="badge
-  {% if config.tool_confirmation == 'all' %}bg-warning text-dark
-  {% elif config.tool_confirmation == 'safe' %}bg-info text-dark
-  {% else %}bg-secondary{% endif %} small" id="navConfirmBadge">
-  {{ {'all':'YOLO','safe':'Safe','none':'None'}.get(config.tool_confirmation, 'None') }}
+  {% if config.tool_confirmation == 'all' %}text-bg-warning
+  {% elif config.tool_confirmation == 'safe' %}text-bg-info
+  {% else %}text-bg-secondary{% endif %} small" id="navConfirmBadge"
+  title="Tool confirmation mode">
+  {{ {'all':'YOLO','safe':'Safe','none':'Confirm All'}.get(config.tool_confirmation, 'Confirm All') }}
 </span>
 <button class="btn btn-outline-secondary btn-sm ms-1" onclick="exportChat()" title="Export chat as Markdown">
   <i class="bi bi-download"></i>
@@ -102,6 +103,10 @@
 
 <!-- Input area -->
 <div class="input-area">
+  <button type="button" id="jumpBottomBtn" class="btn btn-secondary"
+          title="Jump to latest" aria-label="Jump to latest">
+    <i class="bi bi-arrow-down"></i>
+  </button>
   <form id="messageForm" class="d-flex gap-2" novalidate>
     <input type="file" id="fileInput" style="display:none" multiple
            onchange="handleFiles(this.files)">
@@ -225,6 +230,11 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('stopBtn').addEventListener('click', stopGeneration);
 
+  // Jump-to-latest button + keep its visibility in sync with manual scrolling
+  document.getElementById('jumpBottomBtn').addEventListener('click', scrollToBottom);
+  document.getElementById('messagesArea').addEventListener('scroll', updateJumpBtn,
+                                                           { passive: true });
+
   // ── Mobile resilience: visibility & bfcache ───────────────────
   // When the page becomes visible again (user returns from another app or
   // the phone wakes up), re-acquire the wake lock and re-open SSE if the
@@ -265,9 +275,37 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
+// ── Scrolling ─────────────────────────────────────────────────
+// Auto-scroll is "sticky": we only follow new content if the user was already
+// parked at the bottom. Otherwise they've scrolled up to read something and
+// yanking them back down mid-read is infuriating — instead we surface the
+// jump-to-latest button. Mirrors the desktop ChatView behaviour.
+
+const NEAR_BOTTOM_PX = 60;
+
+function isNearBottom() {
+  const area = document.getElementById('messagesArea');
+  return area.scrollHeight - area.scrollTop - area.clientHeight <= NEAR_BOTTOM_PX;
+}
+
+function updateJumpBtn() {
+  const btn = document.getElementById('jumpBottomBtn');
+  if (btn) btn.classList.toggle('show', !isNearBottom());
+}
+
 function scrollToBottom() {
   const area = document.getElementById('messagesArea');
   area.scrollTop = area.scrollHeight;
+  updateJumpBtn();
+}
+
+// Append and follow only if the user was pinned to the bottom *before* the
+// append — checking afterwards is useless, since the new content has already
+// pushed scrollHeight past them.
+function appendToArea(el) {
+  const pinned = isNearBottom();
+  document.getElementById('messagesArea').appendChild(el);
+  if (pinned) scrollToBottom(); else updateJumpBtn();
 }
 
 function escHtml(text) {
@@ -394,8 +432,7 @@ function showThinking() {
   thinkingEl.innerHTML =
     '<div class="spinner-border spinner-border-sm" role="status"></div>' +
     '<span>Thinking…</span>';
-  document.getElementById('messagesArea').appendChild(thinkingEl);
-  scrollToBottom();
+  appendToArea(thinkingEl);
 }
 
 function hideThinking() {
@@ -511,9 +548,9 @@ function handleSlashCommand(text) {
           }
           const badge = document.getElementById('navConfirmBadge');
           const tc = data.config.tool_confirmation;
-          if (tc === 'all') { badge.className = 'badge bg-warning text-dark small'; badge.textContent = 'YOLO'; }
-          else if (tc === 'safe') { badge.className = 'badge bg-info text-dark small'; badge.textContent = 'Safe'; }
-          else { badge.className = 'badge bg-secondary small'; badge.textContent = 'None'; }
+          if (tc === 'all') { badge.className = 'badge text-bg-warning small'; badge.textContent = 'YOLO'; }
+          else if (tc === 'safe') { badge.className = 'badge text-bg-info small'; badge.textContent = 'Safe'; }
+          else { badge.className = 'badge text-bg-secondary small'; badge.textContent = 'Confirm All'; }
         }
         break;
       case 'redirect':
@@ -538,8 +575,7 @@ function appendSystemMessage(msg) {
   const el = document.createElement('div');
   el.className = 'mb-2';
   el.innerHTML = `<div class="alert alert-info py-1 px-2 mb-0 small"><i class="bi bi-info-circle me-1"></i>${escHtml(msg)}</div>`;
-  document.getElementById('messagesArea').appendChild(el);
-  scrollToBottom();
+  appendToArea(el);
 }
 
 // ── Form handling ─────────────────────────────────────────────
@@ -656,6 +692,7 @@ function appendUserMessage(content) {
   const el = document.createElement('div');
   el.className = 'msg-user';
   el.innerHTML = `<div class="bubble-user">${escHtml(content)}</div>`;
+  // The user just hit send — always take them to their own message.
   document.getElementById('messagesArea').appendChild(el);
   scrollToBottom();
 }
@@ -682,8 +719,7 @@ function appendToolRequest(data) {
         </div>
       </div>
     </div>`;
-  document.getElementById('messagesArea').appendChild(el);
-  scrollToBottom();
+  appendToArea(el);
 }
 
 function updateToolResult(data) {
@@ -700,6 +736,7 @@ function updateToolResult(data) {
     }
   }
 
+  const pinned = isNearBottom();
   const resultArea = document.getElementById(`result-${sid}`);
   if (resultArea) {
     if (data.declined) {
@@ -708,7 +745,7 @@ function updateToolResult(data) {
       resultArea.innerHTML = `<pre class="tool-output">${escHtml(data.content)}</pre>`;
     }
   }
-  scrollToBottom();
+  if (pinned) scrollToBottom(); else updateJumpBtn();
 }
 
 function appendAssistantMessage(html, usage) {
@@ -728,16 +765,14 @@ function appendAssistantMessage(html, usage) {
       <div class="markdown-body">${html || '<em class="text-muted">(empty response)</em>'}</div>
       ${usageHtml}
     </div>`;
-  document.getElementById('messagesArea').appendChild(el);
-  scrollToBottom();
+  appendToArea(el);
 }
 
 function appendError(message) {
   const el = document.createElement('div');
   el.className = 'mb-3';
   el.innerHTML = `<div class="alert alert-danger py-2 mb-0"><i class="bi bi-exclamation-triangle me-2"></i>${escHtml(message)}</div>`;
-  document.getElementById('messagesArea').appendChild(el);
-  scrollToBottom();
+  appendToArea(el);
 }
 
 // ── Tool confirmation ────────────────────────────────────────
@@ -750,7 +785,7 @@ function confirmTool(confirmed, yoloTurn = false) {
   const badge = document.getElementById(`badge-${sid}`);
   if (badge) {
     if (confirmed) {
-      badge.className = 'badge ms-1 ' + (yoloTurn ? 'bg-warning text-dark' : 'bg-secondary');
+      badge.className = 'badge ms-1 ' + (yoloTurn ? 'text-bg-warning' : 'text-bg-secondary');
       badge.textContent = yoloTurn ? 'yolo' : 'running…';
     } else {
       badge.className = 'badge ms-1 bg-danger';

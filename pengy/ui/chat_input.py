@@ -52,18 +52,24 @@ class _InputEdit(QTextEdit):
     submit_pressed = Signal()
     image_pasted = Signal(Path)
 
+    # Grow with the text instead of scrolling inside a two-line box.
+    # Unscaled px; run through scaled_size() so ui_scale still applies.
+    _MIN_H = 40
+    _MAX_H = 200
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setPlaceholderText("Type a message... (Enter to send, Shift+Enter for new line)")
         self.apply_theme(get_theme())
         self.installEventFilter(self)
+        self.textChanged.connect(self._autosize)
 
     def apply_theme(self, theme: dict[str, str]):
+        self._theme = theme
         fixed_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         fixed_font.setPointSizeF(scaled_font_size(10, theme))
         self.setFont(fixed_font)
-        self.setMaximumHeight(scaled_size(60, theme))
-        self.setMinimumHeight(scaled_size(40, theme))
+        self._autosize()
         self.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {theme['input_bg']};
@@ -76,6 +82,29 @@ class _InputEdit(QTextEdit):
                 border: 1px solid {theme['focus']};
             }}
         """)
+
+    def _autosize(self):
+        """Resize the box to fit its content, clamped to [_MIN_H, _MAX_H]."""
+        theme = getattr(self, "_theme", None) or get_theme()
+        lo = scaled_size(self._MIN_H, theme)
+        hi = scaled_size(self._MAX_H, theme)
+        # Keep the document's wrap width in step with the widget, otherwise the
+        # reported height lags a frame behind on the first character of a line.
+        doc = self.document()
+        doc.setTextWidth(self.viewport().width())
+        margins = self.contentsMargins()
+        chrome = int(doc.documentMargin() * 2) + margins.top() + margins.bottom() + 4
+        wanted = int(doc.size().height()) + chrome
+        self.setFixedHeight(max(lo, min(hi, wanted)))
+        # Only scroll internally once we've hit the ceiling.
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded if wanted > hi
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._autosize()
 
     def insertFromMimeData(self, source: QMimeData):
         if source.hasImage():
@@ -95,10 +124,15 @@ class _InputEdit(QTextEdit):
         super().insertFromMimeData(source)
 
     def eventFilter(self, obj, event):
-        if obj is self and event.type() == QKeyEvent.Type.KeyRelease:
-            if event.key() == Qt.Key.Key_Return and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                self.submit_pressed.emit()
-                return True
+        # Filter KeyPress, not KeyRelease. On release the newline has already
+        # been inserted (visible flicker, then stripped again on submit), and
+        # releasing Shift before Enter in a Shift+Enter chord left the release
+        # event with no modifier set — which sent the half-written message.
+        if obj is self and event.type() == QKeyEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    self.submit_pressed.emit()
+                    return True
         return super().eventFilter(obj, event)
 
 
