@@ -293,6 +293,184 @@ class TestChatManager:
 
 
 # ---------------------------------------------------------------------------
+# split storage layout
+# ---------------------------------------------------------------------------
+# Chats live one per file in <config>/chats/<id>.json. index.json caches the
+# sidebar summary but is never authoritative -- these check it always converges
+# back to what the chat files say, and that the legacy chats.json is read but
+# never written.
+
+class TestSplitStorage:
+    def _mk(self, cm, title, msgs=None):
+        chat = cm.create_chat()
+        chat["title"] = title
+        chat["messages"] = msgs or []
+        cm.save_chat(chat)
+        return chat
+
+    def test_chats_are_separate_files(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        a = self._mk(cm, "A")
+        b = self._mk(cm, "B")
+        assert (tmp_cfg_dir / "chats" / f"{a['id']}.json").exists()
+        assert (tmp_cfg_dir / "chats" / f"{b['id']}.json").exists()
+
+    def test_save_chat_touches_only_that_chat(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        a = self._mk(cm, "A")
+        b = self._mk(cm, "B")
+        b_file = tmp_cfg_dir / "chats" / f"{b['id']}.json"
+        before = b_file.stat().st_mtime_ns, b_file.read_bytes()
+        a["messages"].append({"role": "user", "content": "hi"})
+        cm.save_chat(a)
+        assert (b_file.stat().st_mtime_ns, b_file.read_bytes()) == before
+
+    def test_index_carries_count_and_preview(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        self._mk(cm, "A", [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "answer"},
+        ])
+        entry = cm.load_index()[0]
+        assert entry["msg_count"] == 2
+        assert entry["preview"] == "first question"
+
+    def test_preview_handles_multipart_content(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        self._mk(cm, "A", [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:..."}},
+            {"type": "text", "text": "describe this"},
+        ]}])
+        assert cm.load_index()[0]["preview"] == "describe this"
+
+    def test_index_newest_first(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        a = self._mk(cm, "older")
+        b = self._mk(cm, "newer")
+        a["created_at"] = "2020-01-01T00:00:00"
+        b["created_at"] = "2030-01-01T00:00:00"
+        cm.save_chat(a)
+        cm.save_chat(b)
+        assert [e["title"] for e in cm.load_index()] == ["newer", "older"]
+
+    # ── index is a cache, never the source of truth ──────────────────
+
+    def test_missing_index_is_rebuilt(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        self._mk(cm, "A")
+        self._mk(cm, "B")
+        (tmp_cfg_dir / "chats" / "index.json").unlink()
+        assert sorted(e["title"] for e in cm.load_index()) == ["A", "B"]
+
+    def test_corrupt_index_is_rebuilt_and_kept_aside(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        self._mk(cm, "A")
+        (tmp_cfg_dir / "chats" / "index.json").write_text("{ not json")
+        assert [e["title"] for e in cm.load_index()] == ["A"]
+        assert list((tmp_cfg_dir / "chats").glob("index.json.corrupt-*"))
+
+    def test_index_rebuilt_when_file_added_behind_its_back(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        self._mk(cm, "A")
+        (tmp_cfg_dir / "chats" / "ghost.json").write_text(json.dumps({
+            "id": "ghost", "title": "GHOST", "messages": [],
+            "created_at": "2020-01-01T00:00:00",
+        }))
+        assert "GHOST" in [e["title"] for e in cm.load_index()]
+
+    def test_index_rebuilt_when_file_removed_behind_its_back(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        a = self._mk(cm, "A")
+        self._mk(cm, "B")
+        (tmp_cfg_dir / "chats" / f"{a['id']}.json").unlink()
+        assert [e["title"] for e in cm.load_index()] == ["B"]
+
+    def test_delete_removes_the_file(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        a = self._mk(cm, "A")
+        cm.delete_chat(a["id"])
+        assert not (tmp_cfg_dir / "chats" / f"{a['id']}.json").exists()
+        assert cm.load_index() == []
+        assert cm.get_chat(a["id"]) is None
+
+    # ── legacy chats.json: read, never written ──────────────────────
+
+    def test_migrates_legacy_chats(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        (tmp_cfg_dir / "chats.json").write_text(json.dumps([
+            {"id": "old-1", "title": "OLD", "messages": [{"role": "user", "content": "q"}],
+             "created_at": "2020-01-01T00:00:00"},
+        ]))
+        assert [e["title"] for e in cm.load_index()] == ["OLD"]
+        assert cm.get_chat("old-1")["messages"][0]["content"] == "q"
+        assert (tmp_cfg_dir / "chats" / "old-1.json").exists()
+
+    def test_legacy_file_is_never_modified(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        legacy = tmp_cfg_dir / "chats.json"
+        legacy.write_text(json.dumps([
+            {"id": "old-1", "title": "OLD", "messages": [], "created_at": "2020-01-01T00:00:00"},
+        ]))
+        before = legacy.read_bytes()
+        cm.load_index()
+        c = cm.get_chat("old-1")
+        c["title"] = "RENAMED"
+        cm.save_chat(c)
+        cm.delete_chat("old-1")
+        cm.load_chats()
+        assert legacy.read_bytes() == before
+
+    def test_rewritten_legacy_is_reimported(self, tmp_cfg_dir):
+        # Another edition (Rust/C++) wrote chats.json on the same machine.
+        from pengy.core import chat_manager as cm
+        self._mk(cm, "MINE")
+        (tmp_cfg_dir / "chats.json").write_text(json.dumps([
+            {"id": "other-1", "title": "FROM-OTHER-EDITION", "messages": [],
+             "created_at": "2020-01-01T00:00:00"},
+        ]))
+        titles = [e["title"] for e in cm.load_index()]
+        assert "FROM-OTHER-EDITION" in titles
+        assert "MINE" in titles
+
+    def test_per_chat_file_wins_over_legacy(self, tmp_cfg_dir):
+        from pengy.core import chat_manager as cm
+        (tmp_cfg_dir / "chats.json").write_text(json.dumps([
+            {"id": "x", "title": "LEGACY", "messages": [], "created_at": "2020-01-01T00:00:00"},
+        ]))
+        cm.load_index()
+        c = cm.get_chat("x")
+        c["title"] = "CURRENT"
+        cm.save_chat(c)
+        # Legacy rewritten with a stale copy — the per-chat file must still win.
+        (tmp_cfg_dir / "chats.json").write_text(json.dumps([
+            {"id": "x", "title": "LEGACY-STALE", "messages": [], "created_at": "2020-01-01T00:00:00"},
+        ]))
+        cm.load_index()
+        assert cm.get_chat("x")["title"] == "CURRENT"
+
+    def test_save_chats_is_additive(self, tmp_cfg_dir):
+        # It writes and updates but never deletes -- "save this list" must not
+        # also mean "remove everything not in it".
+        from pengy.core import chat_manager as cm
+        a = self._mk(cm, "KEEP")
+        b = self._mk(cm, "ALSO-KEEP")
+        b["title"] = "UPDATED"
+        cm.save_chats([b])
+        titles = sorted(e["title"] for e in cm.load_index())
+        assert titles == ["KEEP", "UPDATED"]
+        assert cm.get_chat(a["id"]) is not None
+
+    def test_get_chat_returns_an_independent_copy(self, tmp_cfg_dir):
+        # The old single-file cache handed out the cached dict by reference, so
+        # an abandoned worker's edits leaked into later reads.
+        from pengy.core import chat_manager as cm
+        a = self._mk(cm, "A")
+        got = cm.get_chat(a["id"])
+        got["messages"].append({"role": "user", "content": "never saved"})
+        assert cm.get_chat(a["id"])["messages"] == []
+
+
+# ---------------------------------------------------------------------------
 # task_manager tests
 # ---------------------------------------------------------------------------
 

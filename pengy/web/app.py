@@ -19,7 +19,7 @@ from pygments.formatters import HtmlFormatter
 from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
-    create_chat, delete_chat, get_chat, load_chats, save_chat,
+    create_chat, delete_chat, get_chat, load_index, save_chat,
     clean_dangling_tool_calls, elide_old_tool_results,
 )
 from pengy.core.image_utils import preprocess as preprocess_image
@@ -385,7 +385,7 @@ class WebWorker:
 
 @app.route("/")
 def index():
-    chats = load_chats()
+    chats = load_index()
     if chats:
         return redirect(url_for("chat_view", chat_id=chats[0]["id"]))
     chat = create_chat()
@@ -394,8 +394,8 @@ def index():
 
 @app.route("/chat/new", methods=["POST"])
 def new_chat():
-    chats = load_chats()
-    if chats and chats[0]["title"] == "New Chat" and not chats[0].get("messages"):
+    chats = load_index()
+    if chats and chats[0]["title"] == "New Chat" and not chats[0]["msg_count"]:
         return redirect(url_for("chat_view", chat_id=chats[0]["id"]))
     chat = create_chat()
     return redirect(url_for("chat_view", chat_id=chat["id"]))
@@ -406,7 +406,8 @@ def chat_view(chat_id: str):
     chat = get_chat(chat_id)
     if not chat:
         return redirect(url_for("index"))
-    chats = load_chats()
+    # Sidebar summaries only — no message bodies needed to render the list.
+    chats = load_index()
     config = load_config()
     turns = _group_messages(chat.get("messages", []))
     with _workers_lock:
@@ -916,7 +917,7 @@ def settings_view():
             pass
         save_config(config)
         saved = True
-    chats = load_chats()
+    chats = load_index()
     return render_template(
         "settings.html", config=config, saved=saved, chats=chats,
         theme_mode=_theme_mode(config),

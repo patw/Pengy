@@ -331,3 +331,88 @@ class TestConfirmLabels:
         widget.update_quick_settings("gpt-4o", "none")
         assert widget.confirm_label.text() != "Tool Confirm: None"
         widget.deleteLater()
+
+
+# ────────────────────────────────────────────────────────────────────
+# ChatView render cache
+# ────────────────────────────────────────────────────────────────────
+# _build_html() used to re-run markdown + pygments over the whole history on
+# every append, making a conversation O(n^2) to type into. Output is now
+# memoised per message, so these guard that every path which changes a
+# message's rendering also invalidates its cache entry.
+
+class TestChatViewRenderCache:
+    @pytest.fixture
+    def view(self, qapp):
+        from pengy.ui.chat_view import ChatView
+        v = ChatView()
+        yield v
+        v.deleteLater()
+
+    def _uncached(self, view) -> str:
+        """Rendering with a cold cache — the reference output."""
+        view._invalidate_all()
+        return view._build_html()
+
+    def test_cache_tracks_appends(self, view):
+        view.append_message("user", "hi", render=False)
+        view.append_message("assistant", "there", render=False)
+        assert len(view._html_cache) == len(view._messages) == 2
+
+    def test_cached_matches_uncached(self, view):
+        view.append_message("user", "hello **world**", render=False)
+        view.append_message("assistant", "```python\nprint(1)\n```",
+                            reasoning_content="why\nbecause", render=False)
+        cached = view._build_html()
+        assert cached == self._uncached(view)
+
+    def test_tool_result_invalidates_running_header(self, view):
+        view.append_message("tool_request",
+                            {"tool_call_id": "t1", "name": "read_file",
+                             "args": {"path": "/x"}}, render=False)
+        assert "running" in view._build_html()
+        view.append_message("tool_result",
+                            {"tool_call_id": "t1", "content": "DATA",
+                             "declined": False}, render=False)
+        html = view._build_html()
+        assert "running" not in html
+        assert html == self._uncached(view)
+
+    def test_tool_expand_invalidates(self, view):
+        view.append_message("tool_request",
+                            {"tool_call_id": "t1", "name": "read_file",
+                             "args": {}}, render=False)
+        view.append_message("tool_result",
+                            {"tool_call_id": "t1", "content": "SECRET-PAYLOAD",
+                             "declined": False}, render=False)
+        view._build_html()  # warm the cache while collapsed
+        view._expanded_tools.add("t1")
+        view._invalidate(view._tool_block_index("t1"))
+        assert "SECRET-PAYLOAD" in view._build_html()
+
+    def test_reasoning_expand_invalidates(self, view):
+        view.append_message("assistant", "answer",
+                            reasoning_content="head\nTAIL-LINE", render=False)
+        view._build_html()  # warm the cache while collapsed
+        view._expanded_reasoning.add(0)
+        view._invalidate(0)
+        assert "TAIL-LINE" in view._build_html()
+
+    def test_theme_change_invalidates_all(self, view):
+        # A theme swap rebuilds the pygments formatter, so cached code blocks
+        # are stale even though the message content never changed.
+        from pengy.ui.theme import get_theme
+        view.append_message("assistant", "```python\nprint(1)\n```", render=False)
+        view._build_html()  # warm under the old theme
+        view.apply_theme(get_theme())
+        assert view._build_html() == self._uncached(view)
+
+    def test_clear_resets_cache(self, view):
+        view.append_message("user", "hi", render=False)
+        view.clear()
+        assert view._html_cache == [] and view._messages == []
+
+    def test_cache_realigns_if_messages_mutated_directly(self, view):
+        view._messages.append({"role": "user", "content": "direct"})
+        assert "direct" in view._build_html()
+        assert len(view._html_cache) == len(view._messages)

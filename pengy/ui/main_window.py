@@ -11,7 +11,7 @@ from PySide6.QtGui import QTextOption
 
 from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.chat_manager import (
-    load_chats, create_chat, save_chat, get_chat,
+    load_index, create_chat, save_chat, get_chat,
     clean_dangling_tool_calls, elide_old_tool_results,
 )
 from pengy.core.llm_client import LLMClient
@@ -53,7 +53,7 @@ class MainWindow(QMainWindow):
         self.chat_history.tasks_requested.connect(self.open_tasks)
 
         # Create initial chat if none exist
-        chats = load_chats()
+        chats = load_index()
         if not chats:
             self.create_new_chat()
         else:
@@ -149,19 +149,20 @@ class MainWindow(QMainWindow):
 
     def load_chat_list(self):
         """Load and display chat history."""
-        chats = load_chats()
+        # Summaries only — the sidebar needs id and title, not message bodies.
+        chats = load_index()
         self.chat_history.load_chats(chats)
 
     def create_new_chat(self):
         """Create a new chat session."""
-        chats = load_chats()
-        if chats and chats[0]["title"] == "New Chat" and not chats[0].get("messages"):
+        chats = load_index()
+        if chats and chats[0]["title"] == "New Chat" and not chats[0]["msg_count"]:
             self.current_chat = chats[0]
             self.chat_history.select_chat_by_id(chats[0]["id"])
             self.chat_view.clear()
             return
         self.current_chat = create_chat()
-        self.chat_history.load_chats(load_chats())
+        self.chat_history.load_chats(load_index())
         self.chat_history.select_chat_by_id(self.current_chat["id"])
         self.chat_view.clear()
 

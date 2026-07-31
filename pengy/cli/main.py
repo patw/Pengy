@@ -19,7 +19,7 @@ from pathlib import Path
 from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
-    load_chats, create_chat, save_chat, delete_chat,
+    load_index, get_chat, create_chat, save_chat, delete_chat,
     clean_dangling_tool_calls, elide_old_tool_results,
 )
 from pengy.core.image_utils import preprocess as preprocess_image
@@ -231,10 +231,12 @@ class PengyCLI:
             )
         )
 
-        # Load the most recent chat or create a new one.
-        chats = load_chats()
-        if chats:
-            self.current_chat = chats[0]
+        # Load the most recent chat or create a new one. get_chat() can return
+        # None if the index outlived its chat file (e.g. killed mid-write), in
+        # which case we fall through and start fresh rather than crashing.
+        chats = load_index()
+        self.current_chat = get_chat(chats[0]["id"]) if chats else None
+        if self.current_chat:
             msgs = self.current_chat.get("messages", [])
             msg_count = len(msgs)
             # Find the last user message for context
@@ -730,7 +732,7 @@ class PengyCLI:
             self.console.print(f"[red]Error fetching models:[/red] {e}")
 
     def _cmd_list(self):
-        chats = load_chats()
+        chats = load_index()
         if not chats:
             self.console.print("[dim]No saved chats.[/dim]")
             return
@@ -747,18 +749,11 @@ class PengyCLI:
                 and chat["id"] == self.current_chat["id"]
             )
             prefix = "→ " if is_current else ""
-            msg_count = len(chat.get("messages", []))
-            # Get first user message as preview
-            preview = ""
-            for m in chat.get("messages", []):
-                if m.get("role") == "user":
-                    preview = _truncate(str(m.get("content", "")), 50)
-                    break
             table.add_row(
                 str(i),
                 f"{prefix}{chat.get('title', 'Untitled')}",
-                str(msg_count),
-                preview,
+                str(chat["msg_count"]),
+                _truncate(chat["preview"], 50),
             )
 
         self.console.print(table)
@@ -773,7 +768,7 @@ class PengyCLI:
             self.console.print("[red]Invalid index. Use /list to see available chats.[/red]")
             return
 
-        chats = load_chats()
+        chats = load_index()
         if idx < 0 or idx >= len(chats):
             self.console.print("[red]Index out of range.[/red]")
             return
@@ -782,7 +777,11 @@ class PengyCLI:
         if self.current_chat:
             save_chat(self.current_chat)
 
-        self.current_chat = chats[idx]
+        loaded = get_chat(chats[idx]["id"])
+        if not loaded:
+            self.console.print("[red]Chat could not be loaded.[/red]")
+            return
+        self.current_chat = loaded
         msgs = self.current_chat.get("messages", [])
         msg_count = len(msgs)
         self.console.print(
@@ -802,7 +801,7 @@ class PengyCLI:
             self.console.print("[red]Invalid index.[/red]")
             return
 
-        chats = load_chats()
+        chats = load_index()
         if idx < 0 or idx >= len(chats):
             self.console.print("[red]Index out of range.[/red]")
             return
@@ -826,9 +825,9 @@ class PengyCLI:
 
         # If we just deleted the current chat, load the newest one
         if self.current_chat is None:
-            remaining = load_chats()
+            remaining = load_index()
             if remaining:
-                self.current_chat = remaining[0]
+                self.current_chat = get_chat(remaining[0]["id"])
                 self.console.print(
                     f"[dim]Loaded:[/dim] [bold]{self.current_chat['title']}[/bold]"
                 )

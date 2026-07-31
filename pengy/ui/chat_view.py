@@ -71,6 +71,12 @@ class ChatView(QTextBrowser):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._messages = []
+        # Rendered HTML per message, parallel to _messages (None = needs render).
+        # _build_html() re-ran markdown + pygments over the *entire* history on
+        # every append, making a conversation O(n^2) to type into. Markdown and
+        # pygments are ~96% of render cost (Qt's setHtml layout is the other 4%),
+        # so memoising per message removes almost all of it.
+        self._html_cache: list[str | None] = []
         self._theme = get_theme()
         self._expanded_tools = set()
         self._expanded_reasoning: set[int] = set()
@@ -109,6 +115,9 @@ class ChatView(QTextBrowser):
         self.setStyleSheet(
             f"QTextBrowser {{ background-color: {theme['bg']}; color: {theme['fg']}; border: none; padding: 0; }}"
         )
+        # A new theme means a new pygments formatter, so every cached code
+        # block is stale — not just the CSS in the <head>.
+        self._invalidate_all()
         if self._messages:
             self._render()
 
@@ -206,6 +215,7 @@ class ChatView(QTextBrowser):
                     self._expanded_tools.discard(tool_id)
                 else:
                     self._expanded_tools.add(tool_id)
+                self._invalidate(self._tool_block_index(tool_id))
                 self._render()
                 return
             if anchor.startswith("reasoning://"):
@@ -214,6 +224,7 @@ class ChatView(QTextBrowser):
                     self._expanded_reasoning.discard(idx)
                 else:
                     self._expanded_reasoning.add(idx)
+                self._invalidate(idx)
                 self._render()
                 return
             if anchor.startswith(("http://", "https://")):
@@ -224,12 +235,14 @@ class ChatView(QTextBrowser):
     def append_message(self, role: str, content, *, reasoning_content: str = None, render: bool = True):
         if role == "user":
             self._messages.append({"role": "user", "content": content})
+            self._html_cache.append(None)
         elif role == "assistant":
             if content:
                 msg = {"role": "assistant", "content": content}
                 if reasoning_content:
                     msg["reasoning_content"] = reasoning_content
                 self._messages.append(msg)
+                self._html_cache.append(None)
         elif role == "tool_request":
             tool_call_id = content.get("tool_call_id", f"tc-{len(self._messages)}")
             self._messages.append({
@@ -240,13 +253,16 @@ class ChatView(QTextBrowser):
                 "result": None,
                 "declined": None,
             })
+            self._html_cache.append(None)
         elif role == "tool_result":
             tool_call_id = content.get("tool_call_id")
-            for msg in reversed(self._messages):
-                if msg.get("role") == "tool_block" and msg.get("tool_call_id") == tool_call_id:
-                    msg["result"] = content.get("content", "")
-                    msg["declined"] = content.get("declined", False)
-                    break
+            idx = self._tool_block_index(tool_call_id)
+            if idx >= 0:
+                msg = self._messages[idx]
+                msg["result"] = content.get("content", "")
+                msg["declined"] = content.get("declined", False)
+                # Mutated in place: its "(running…)" header is now stale.
+                self._invalidate(idx)
         if render:
             self._render()
 
@@ -256,6 +272,7 @@ class ChatView(QTextBrowser):
 
     def clear(self):
         self._messages = []
+        self._html_cache = []
         self._expanded_tools = set()
         self._expanded_reasoning = set()
         super().clear()
@@ -270,10 +287,43 @@ class ChatView(QTextBrowser):
         else:
             self.verticalScrollBar().setValue(prev_pos)
 
+    # ── render cache ──────────────────────────────────────────────────
+    # Anything that changes a message's *rendered output* must invalidate it:
+    # content mutation (a tool result arriving), expand/collapse toggles, and
+    # theme changes (which alter the pygments formatter, not just the CSS).
+
+    def _invalidate(self, idx: int):
+        """Mark one message as needing a re-render."""
+        if 0 <= idx < len(self._html_cache):
+            self._html_cache[idx] = None
+
+    def _invalidate_all(self):
+        """Mark every message as needing a re-render."""
+        self._html_cache = [None] * len(self._messages)
+
+    def _tool_block_index(self, tool_call_id: str) -> int:
+        """Index of the tool_block with *tool_call_id*, or -1."""
+        for i in range(len(self._messages) - 1, -1, -1):
+            msg = self._messages[i]
+            if (msg.get("role") == "tool_block"
+                    and msg.get("tool_call_id") == tool_call_id):
+                return i
+        return -1
+
     def _build_html(self) -> str:
+        # Keep the cache aligned with _messages even if a caller appended
+        # directly (tests do this), so a stale short cache can't misindex.
+        if len(self._html_cache) != len(self._messages):
+            self._html_cache += [None] * (len(self._messages) - len(self._html_cache))
+            del self._html_cache[len(self._messages):]
+
         parts = [f"<html><head><meta charset='utf-8'><style>{_build_css(self._theme)}</style></head><body>"]
         for idx, msg in enumerate(self._messages):
-            parts.append(self._render_msg(msg, idx))
+            cached = self._html_cache[idx]
+            if cached is None:
+                cached = self._render_msg(msg, idx)
+                self._html_cache[idx] = cached
+            parts.append(cached)
         parts.append("</body></html>")
         return "".join(parts)
 
