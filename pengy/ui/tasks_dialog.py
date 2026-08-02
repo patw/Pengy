@@ -23,6 +23,7 @@ class TasksDialog(QDialog):
 
     def __init__(self, theme: dict[str, str] | None = None, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._theme = theme or get_theme()
         self._tasks: list[dict] = []
         self.setWindowTitle("Tasks")
@@ -214,6 +215,7 @@ class TaskEditDialog(QDialog):
 
     def __init__(self, task: dict | None = None, theme: dict[str, str] | None = None, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._task = task or {}
         self._theme = theme or get_theme()
         self.setWindowTitle("Edit Task" if task else "New Task")
@@ -278,13 +280,14 @@ class PlaceholderDialog(QDialog):
 
     def __init__(self, placeholders: list[str], theme: dict[str, str] | None = None, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._placeholders = placeholders
         self._theme = theme or get_theme()
         self._inputs: dict[str, QLineEdit] = {}
         self.setWindowTitle("Task Inputs")
-        self.resize(460, max(160, min(520, 90 + len(placeholders) * 42)))
         self._setup_ui()
         self._apply_theme()
+        self.adjustSize()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)

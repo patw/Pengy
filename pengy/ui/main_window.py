@@ -476,6 +476,7 @@ class ToolConfirmDialog(QDialog):
 
     def __init__(self, tool_info: dict, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.confirmed = False
         self.yolo_turn = False
         self.setup_ui(tool_info)
