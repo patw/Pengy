@@ -5,4 +5,4 @@ try:
     __version__ = _metadata_version("pengy")
 except Exception:
     # Fallback when running from source / not installed
-    __version__ = "1.4.4"
+    __version__ = "1.4.5"
