@@ -432,4 +432,29 @@ def qt_app_stylesheet(theme: dict[str, str]) -> str:
     QMenu::item:selected {{
         background-color: {theme['selection']};
     }}
+    QTabWidget::pane {{
+        background-color: {theme['bg']};
+        border: none;
+    }}
+    QTabBar::tab {{
+        background-color: {theme['panel']};
+        color: {theme['fg']};
+        border: 1px solid {theme['border_soft']};
+        border-bottom: none;
+        border-top-left-radius: 6px;
+        border-top-right-radius: 6px;
+        padding: {pad_v}px {pad_h}px;
+        margin-right: 2px;
+    }}
+    QTabBar::tab:selected {{
+        background-color: {theme['bg']};
+        color: {theme['primary']};
+        border-bottom: 2px solid {theme['primary']};
+    }}
+    QTabBar::tab:hover {{
+        background-color: {theme['hover']};
+    }}
+    QTabBar::tab:!selected {{
+        color: {theme['muted']};
+    }}
     """
