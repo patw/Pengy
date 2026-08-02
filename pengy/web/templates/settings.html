@@ -101,6 +101,13 @@
                value="{{ config.tool_timeout }}" min="1" max="3600">
       </div>
 
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Max Tool Output (chars, 0=no limit)</label>
+        <input type="number" name="tool_output_max_chars" class="form-control"
+               value="{{ config.tool_output_max_chars }}" min="0" max="500000" step="1000">
+        <div class="form-text">Snipped (head+tail) when tool output exceeds this limit</div>
+      </div>
+
 
       <div class="mb-3">
         <label class="form-label fw-semibold">Reasoning Effort</label>

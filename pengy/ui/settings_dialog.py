@@ -197,6 +197,21 @@ class SettingsDialog(QDialog):
         timeout_row.addRow("Tool timeout:", self.timeout_spinbox)
         layout.addLayout(timeout_row)
 
+        # Tool output max chars
+        output_max_row = QFormLayout()
+        output_max_row.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.tool_output_max_spinbox = QSpinBox()
+        self.tool_output_max_spinbox.setRange(0, 500_000)
+        self.tool_output_max_spinbox.setSpecialValueText("No limit")
+        self.tool_output_max_spinbox.setSuffix(" chars")
+        self.tool_output_max_spinbox.setToolTip(
+            "Snipped (head+tail) when tool output exceeds this. "
+            "0 = no limit. Helps prevent context window blowout from large bash/python output."
+        )
+        self.tool_output_max_spinbox.setValue(config.get("tool_output_max_chars", 50000))
+        output_max_row.addRow("Max tool output:", self.tool_output_max_spinbox)
+        layout.addLayout(output_max_row)
+
         layout.addStretch()
 
         # Buttons
@@ -273,5 +288,6 @@ class SettingsDialog(QDialog):
         self.config["ui_scale"] = self.scale_combo.currentData()
         self.config["llm_timeout"] = self.llm_timeout_spinbox.value()
         self.config["tool_timeout"] = self.timeout_spinbox.value()
+        self.config["tool_output_max_chars"] = self.tool_output_max_spinbox.value()
         self.config["user_agent"] = self.user_agent_input.text() or "PengyAgent/1.0"
         return self.config

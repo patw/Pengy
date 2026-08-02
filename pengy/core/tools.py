@@ -37,6 +37,10 @@ _active_process_lock = threading.Lock()
 # Maximum download size for download_file (100 MB)
 _MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024
 
+# Maximum chars for tool output before head+tail snipping kicks in.
+# Set via set_tool_output_max_chars().  0 means no limit.
+_MAX_TOOL_OUTPUT_CHARS = 50_000
+
 # Directories/files to skip in directory_tree and search_content
 _ALWAYS_SKIP_DIRS = {
     ".git", ".svn", ".hg", "__pycache__", ".DS_Store",
@@ -64,6 +68,34 @@ def set_tool_timeout(seconds: int):
     """Set the timeout for tool calls.  -1 means no timeout."""
     global _tool_timeout
     _tool_timeout = seconds
+
+
+def set_tool_output_max_chars(chars: int):
+    """Set the max chars for tool output before head+tail snipping.  0 = no limit."""
+    global _MAX_TOOL_OUTPUT_CHARS
+    _MAX_TOOL_OUTPUT_CHARS = chars
+
+
+def _snip_tool_output(text: str) -> str:
+    """If *text* exceeds the configured max, keep the head and tail and snip the middle."""
+    limit = _MAX_TOOL_OUTPUT_CHARS
+    if limit <= 0 or len(text) <= limit:
+        return text
+
+    # Head is first ~20%, tail is last ~80% of the budget
+    head_chars = max(limit // 5, 500)
+    tail_chars = limit - head_chars
+
+    head = text[:head_chars]
+    tail = text[-tail_chars:]
+
+    snipped = len(text) - head_chars - tail_chars
+    return (
+        head
+        + f"\n\n[... snipped {snipped:,} chars from middle — set tool_output_max_chars "
+        + f"to change this limit (current: {limit:,}) ...]\n\n"
+        + tail
+    )
 
 TOOLS = [
     {
@@ -347,7 +379,7 @@ def _read_file(path: str) -> str:
             return f"Error: File not found: {path}"
         if not p.is_file():
             return f"Error: Not a file: {path}"
-        return p.read_text(encoding="utf-8")
+        return _snip_tool_output(p.read_text(encoding="utf-8"))
     except Exception as e:
         return f"Error reading file: {e}"
 
@@ -486,7 +518,7 @@ def _run_bash(command: str) -> str:
             output += "\n" + stderr
         if proc.returncode != 0:
             output += f"\n[Exit code: {proc.returncode}]"
-        return output or "(No output)"
+        return _snip_tool_output(output) or "(No output)"
     except subprocess.TimeoutExpired:
         if proc is not None:
             try:
@@ -660,7 +692,7 @@ def _run_python(code: str) -> str:
             output += "\n" + stderr
         if proc.returncode != 0:
             output += f"\n[Exit code: {proc.returncode}]"
-        return output or "(No output)"
+        return _snip_tool_output(output) or "(No output)"
     except subprocess.TimeoutExpired:
         if proc is not None:
             try:

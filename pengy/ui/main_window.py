@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
         )
         tools.set_user_agent(self.config.get("user_agent", "PengyAgent/1.0"))
         tools.set_tool_timeout(self.config.get("tool_timeout", 60))
+        tools.set_tool_output_max_chars(self.config.get("tool_output_max_chars", 50000))
 
     def load_chat_list(self):
         """Load and display chat history."""
