@@ -1370,7 +1370,12 @@ class PengyCLI:
 
         Returns a dict to send into the generator, or None.
         """
-        if self.config.get("tool_confirmation") == "all" or self._yolo_this_turn:
+        # Must mirror llm_client.chat()'s skip_confirm logic exactly. When the
+        # core auto-approves it ignores the value we send back, so prompting
+        # here would be cosmetic — declining would not stop the tool running.
+        tc = self.config.get("tool_confirmation")
+        if (tc == "all" or self._yolo_this_turn
+                or (tc == "safe" and tools.is_readonly_tool(response.get("name", "")))):
             return {"confirmed": True, "tool_call_id": response["tool_call_id"]}
 
         while True:
@@ -1414,6 +1419,7 @@ class PengyCLI:
 def main():
     parser = argparse.ArgumentParser(
         description="Pengy CLI — Chat with LLMs from the command line",
+        epilog="Use -- to treat all remaining arguments as prompt text.",
     )
     parser.add_argument(
         "prompt",

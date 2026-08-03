@@ -31,6 +31,94 @@ app = Flask(__name__)
 _workers: dict[str, "WebWorker"] = {}
 _workers_lock = threading.Lock()
 
+# ─── Request origin guard ─────────────────────────────────────────────────────
+#
+# Pengy Web has no authentication: anything that can reach it can run tools as
+# the current user. Two browser-driven attacks defeat a loopback bind, since
+# both are issued by the user's own browser:
+#
+#   CSRF          — a page on any origin auto-submits a form to 127.0.0.1 and
+#                   rewrites settings (base_url, system_message, YOLO mode).
+#   DNS rebinding — an attacker domain re-resolves to 127.0.0.1, so the browser
+#                   treats it as same-origin and can *read* replies too.
+#
+# Two cheap checks close both. Neither uses tokens or sessions, so there is
+# nothing to thread through templates.
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+# Set by pengy.web.main from --host. When the operator explicitly binds a
+# non-loopback address they are fronting this with a VM boundary, an nginx
+# proxy, or their own auth, and Host will legitimately be an arbitrary domain,
+# so the Host allowlist is skipped in that case.
+_bound_host = "127.0.0.1"
+
+# Extra hostnames accepted in Host *and* Origin, from --trusted-host. Required
+# when running behind a reverse proxy on a loopback bind: nginx either forwards
+# the public domain as Host (proxy_set_header Host $host) or forwards its own
+# upstream address and leaves the browser's public Origin unmatched (nginx's
+# default, Host $proxy_host). Naming the public hostname covers both.
+_trusted_hosts: set[str] = set()
+
+
+def set_bound_host(host: str) -> None:
+    """Record the interface the server was told to bind (see _bound_host)."""
+    global _bound_host
+    _bound_host = host
+
+
+def set_trusted_hosts(hosts) -> None:
+    """Record hostnames this server may legitimately be reached as."""
+    global _trusted_hosts
+    _trusted_hosts = {_host_only(h) for h in hosts if h.strip()}
+
+
+def _is_allowed_host(host: str) -> bool:
+    return host in _LOOPBACK_HOSTS or host in _trusted_hosts
+
+
+def _host_only(value: str) -> str:
+    """Strip any :port from a Host/Origin authority, keeping [::1] intact."""
+    value = value.strip()
+    if value.startswith("["):                      # bracketed IPv6 literal
+        end = value.find("]")
+        if end != -1:
+            return value[: end + 1].lower()
+    # Only strip a trailing :port when it is unambiguous. A bare IPv6 literal
+    # such as "::1" (from --host ::1) has many colons and no port.
+    if value.count(":") == 1:
+        value = value.split(":", 1)[0]
+    return value.lower()
+
+
+@app.before_request
+def _guard_request_origin():
+    """Reject cross-origin and rebound-DNS requests before any handler runs."""
+    host = _host_only(request.host)
+
+    # 1. DNS rebinding: when bound to loopback, the browser should only ever
+    #    address us as localhost (or a --trusted-host name, for a proxy). An
+    #    attacker-controlled name resolving to 127.0.0.1 arrives with that name
+    #    in Host, so it fails here.
+    if _host_only(_bound_host) in _LOOPBACK_HOSTS:
+        if not _is_allowed_host(host):
+            return jsonify({"error": "Invalid Host header"}), 403
+
+    # 2. CSRF: accept an Origin matching the Host the request was actually sent
+    #    to, or any --trusted-host (a proxy may forward its own upstream Host
+    #    while the browser reports the public origin). An attacker page's
+    #    Origin is its own, and never either of those. Origin is absent on
+    #    non-browser clients (curl) and on same-origin GETs, so only enforce
+    #    it when present.
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("Origin")
+        if origin:
+            origin_host = _host_only(urllib.parse.urlsplit(origin).netloc)
+            if origin_host != host and origin_host not in _trusted_hosts:
+                return jsonify({"error": "Cross-origin request blocked"}), 403
+
+    return None
+
 # Allowed directories for serving local files via /files route.
 # Only files under these directories (after symlink resolution) are served.
 _ALLOWED_FILE_ROOTS = [

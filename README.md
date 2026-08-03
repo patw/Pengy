@@ -94,9 +94,32 @@ pengy-web --host 0.0.0.0
 
 # Custom port
 pengy-web --host 0.0.0.0 --port 8080
+
+# Behind a reverse proxy, when Pengy stays on loopback
+pengy-web --trusted-host pengy.example
 ```
 
 The web UI is designed for single-user personal use. For remote access, put it behind nginx with SSL and HTTP basic auth — Pengy itself has no authentication.
+
+#### Reverse proxies and `--trusted-host`
+
+Pengy Web rejects requests whose `Origin` doesn't match the host they were sent to, which blocks CSRF, and — when bound to loopback — rejects unexpected `Host` headers, which blocks DNS rebinding. Both attacks come from your own browser, so a loopback bind alone does not stop them.
+
+That last check needs help in one specific case: **a reverse proxy in front of a loopback bind.** nginx presents Pengy with either the public domain or its own upstream address, and neither matches what the check expects. Name the public hostname and both forms are accepted:
+
+```bash
+pengy-web --trusted-host pengy.example              # repeatable
+```
+
+You need it if **all** of these are true:
+
+- Pengy is bound to loopback (the default — no `--host`)
+- something proxies to it (nginx, Caddy, Traefik, `ssh -L`)
+- you reach it under a hostname other than `localhost`
+
+You do **not** need it when Pengy binds the network itself (`--host 0.0.0.0`, or a LAN IP) — including a Docker container with a published port, or a media server browsed from phones and laptops on your LAN. Those already work unmodified.
+
+Symptom of a missing flag: every request 403s, or GETs work while every POST 403s. Both mean `--trusted-host`.
 
 ---
 

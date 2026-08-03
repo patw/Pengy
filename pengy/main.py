@@ -41,7 +41,12 @@ def main():
     # Check for --config-dir
     config_dir = None
     for i, arg in enumerate(sys.argv[1:], 1):
-        if arg == "--config-dir" and i < len(sys.argv):
+        if arg == "--config-dir":
+            # The value is the *next* argv entry, so it must exist.
+            if i + 1 >= len(sys.argv):
+                print("error: option '--config-dir' requires a value",
+                      file=sys.stderr)
+                sys.exit(2)
             config_dir = sys.argv[i + 1]
             # Remove the flag and its value from sys.argv so QApplication doesn't choke
             sys.argv.remove("--config-dir")

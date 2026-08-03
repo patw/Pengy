@@ -829,6 +829,146 @@ class TestSSEStream:
         assert "text/event-stream" in resp.content_type
 
 
+class TestRequestOriginGuard:
+    """Pengy Web has no auth, so it must reject cross-origin and rebound-DNS
+    requests. A loopback bind does not help: both attacks are issued by the
+    user's own browser, which can reach 127.0.0.1 fine."""
+
+    @pytest.fixture
+    def loopback(self):
+        """Default posture: bound to 127.0.0.1."""
+        from pengy.web import app as app_mod
+
+        original = app_mod._bound_host
+        app_mod.set_bound_host("127.0.0.1")
+        yield
+        app_mod.set_bound_host(original)
+
+    @pytest.fixture
+    def exposed(self):
+        """Operator explicitly bound all interfaces, e.g. behind nginx."""
+        from pengy.web import app as app_mod
+
+        original = app_mod._bound_host
+        app_mod.set_bound_host("0.0.0.0")
+        yield
+        app_mod.set_bound_host(original)
+
+    # ── DNS rebinding ────────────────────────────────────────────────
+
+    def test_rebound_host_rejected(self, client, loopback):
+        resp = client.get("/", headers={"Host": "evil.example"})
+        assert resp.status_code == 403
+
+    @pytest.mark.parametrize("host", ["localhost", "127.0.0.1:5000", "[::1]:5000"])
+    def test_loopback_hosts_allowed(self, client, loopback, host):
+        assert client.get("/", headers={"Host": host}).status_code != 403
+
+    def test_host_check_skipped_when_explicitly_exposed(self, client, exposed):
+        """Behind a proxy, Host is an arbitrary domain and must not 403."""
+        assert client.get("/", headers={"Host": "pengy.example"}).status_code != 403
+
+    # ── CSRF ─────────────────────────────────────────────────────────
+
+    def test_cross_origin_post_rejected(self, client, loopback):
+        resp = client.post(
+            "/settings",
+            data={"model": "x"},
+            headers={"Origin": "http://evil.example"},
+        )
+        assert resp.status_code == 403
+
+    def test_same_origin_post_allowed(self, client, loopback):
+        resp = client.post(
+            "/settings",
+            data={"model": "x"},
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code != 403
+
+    def test_post_without_origin_allowed(self, client, loopback):
+        """Non-browser clients (curl) send no Origin and stay usable."""
+        assert client.post("/settings", data={"model": "x"}).status_code != 403
+
+    def test_cross_origin_post_rejected_behind_proxy(self, client, exposed):
+        """Origin is compared to Host, so CSRF is still blocked via a proxy."""
+        resp = client.post(
+            "/settings",
+            data={"model": "x"},
+            headers={"Host": "pengy.example", "Origin": "http://evil.example"},
+        )
+        assert resp.status_code == 403
+
+    def test_same_origin_post_allowed_behind_proxy(self, client, exposed):
+        resp = client.post(
+            "/settings",
+            data={"model": "x"},
+            headers={"Host": "pengy.example", "Origin": "https://pengy.example"},
+        )
+        assert resp.status_code != 403
+
+    # ── Reverse proxy on a loopback bind (--trusted-host) ────────────
+
+    @pytest.fixture
+    def proxied(self):
+        """VM + nginx + letsencrypt: pengy on loopback, proxy in front."""
+        from pengy.web import app as app_mod
+
+        host, trusted = app_mod._bound_host, app_mod._trusted_hosts
+        app_mod.set_bound_host("127.0.0.1")
+        app_mod.set_trusted_hosts(["pengy.example"])
+        yield
+        app_mod.set_bound_host(host)
+        app_mod._trusted_hosts = trusted
+
+    def test_proxy_forwarding_public_host(self, client, proxied):
+        """nginx with 'proxy_set_header Host $host'."""
+        assert client.get("/", headers={"Host": "pengy.example"}).status_code != 403
+        resp = client.post(
+            "/settings",
+            data={"model": "x"},
+            headers={"Host": "pengy.example", "Origin": "https://pengy.example"},
+        )
+        assert resp.status_code != 403
+
+    def test_proxy_forwarding_upstream_host(self, client, proxied):
+        """nginx default, where Host is $proxy_host and only Origin is public."""
+        resp = client.post(
+            "/settings",
+            data={"model": "x"},
+            headers={"Host": "127.0.0.1:5000", "Origin": "https://pengy.example"},
+        )
+        assert resp.status_code != 403
+
+    def test_untrusted_host_still_rejected_when_proxied(self, client, proxied):
+        assert client.get("/", headers={"Host": "evil.example"}).status_code == 403
+
+    def test_untrusted_origin_still_rejected_when_proxied(self, client, proxied):
+        resp = client.post(
+            "/settings",
+            data={"model": "x"},
+            headers={"Host": "pengy.example", "Origin": "http://evil.example"},
+        )
+        assert resp.status_code == 403
+
+    # ── Authority parsing ────────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("localhost:5000", "localhost"),
+            ("127.0.0.1", "127.0.0.1"),
+            ("[::1]:5000", "[::1]"),
+            ("::1", "::1"),          # bare IPv6: no port to strip
+            ("EVIL.example", "evil.example"),
+        ],
+    )
+    def test_host_only(self, value, expected):
+        from pengy.web.app import _host_only
+
+        assert _host_only(value) == expected
+
+
 # ────────────────────────────────────────────────────────────────────
 # pytest marker
 # ────────────────────────────────────────────────────────────────────

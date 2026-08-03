@@ -526,8 +526,23 @@ class MainWindow(QMainWindow):
             session.thinking = True
             session.tool_running = True
             self._update_tab_title(session)
+            # Refresh the status dot *before* the singleShot below unblocks the
+            # worker — set_tool_running() forces an immediate repaint so the
+            # orange state is actually visible for auto-approved tools.
+            if session is self._tab_for_chat(self.active_chat_id):
+                self._update_quick_settings_for(session)
             session.chat_view.append_message("tool_request", response)
-            if self.config.get("tool_confirmation") == "all" or session.yolo_this_turn:
+            # Must mirror llm_client.chat()'s skip_confirm logic exactly. When
+            # the core auto-approves it ignores the value we send back, so a
+            # dialog shown here would be cosmetic — declining would not stop
+            # the tool from running.
+            tc = self.config.get("tool_confirmation")
+            skip_confirm = (
+                tc == "all"
+                or session.yolo_this_turn
+                or (tc == "safe" and tools.is_readonly_tool(response.get("name", "")))
+            )
+            if skip_confirm:
                 tool_call_id = response["tool_call_id"]
                 QTimer.singleShot(0, lambda cid=tool_call_id, s=session: (
                     s.worker.send_confirmation({"confirmed": True, "tool_call_id": cid})
@@ -542,6 +557,8 @@ class MainWindow(QMainWindow):
             session.tool_running = False
             session.thinking = True  # still thinking after tool result
             self._update_tab_title(session)
+            if session is self._tab_for_chat(self.active_chat_id):
+                self._update_quick_settings_for(session)
             session.chat["messages"].append({
                 "role": "tool",
                 "tool_call_id": response["tool_call_id"],
