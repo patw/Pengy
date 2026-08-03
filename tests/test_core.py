@@ -799,6 +799,62 @@ class TestTools:
         result = execute_tool("nonexistent_tool", {})
         assert "Unknown" in result
 
+    def test_todowrite_schema_items_are_objects_not_strings(self):
+        """todowrite todos items must be {content, status} objects — not strings."""
+        from pengy.core.tools import TOOLS
+        todowrite = next(t for t in TOOLS if t["function"]["name"] == "todowrite")
+        todos = todowrite["function"]["parameters"]["properties"]["todos"]
+        assert todos["type"] == "array"
+        items = todos["items"]
+        assert items["type"] == "object"
+        assert set(items["required"]) == {"content", "status"}
+        props = items["properties"]
+        assert props["content"]["type"] == "string"
+        assert props["status"]["type"] == "string"
+        assert set(props["status"]["enum"]) == {"pending", "in_progress", "completed"}
+
+    def test_apply_changes_schema_has_full_operation_properties(self):
+        """apply_changes must describe kind/old/new/anchor/text/expected_matches."""
+        from pengy.core.tools import TOOLS
+        ac = next(t for t in TOOLS if t["function"]["name"] == "apply_changes")
+        params = ac["function"]["parameters"]["properties"]
+
+        # changes array
+        changes = params["changes"]
+        assert changes["type"] == "array"
+        change_items = changes["items"]
+        assert change_items["type"] == "object"
+        assert set(change_items["required"]) == {"path", "operations"}
+
+        # operations within each change
+        operations = change_items["properties"]["operations"]
+        assert operations["type"] == "array"
+        op_items = operations["items"]
+        assert op_items["type"] == "object"
+        assert "kind" in op_items["required"]
+        op_props = op_items["properties"]
+        assert op_props["kind"]["enum"] == ["replace", "insert_after", "delete"]
+        assert op_props["old"]["type"] == "string"
+        assert op_props["new"]["type"] == "string"
+        assert op_props["anchor"]["type"] == "string"
+        assert op_props["text"]["type"] == "string"
+        assert op_props["expected_matches"]["type"] == "integer"
+
+        # dry_run
+        assert params["dry_run"]["type"] == "boolean"
+        assert len(params["dry_run"].get("description", "")) > 0
+
+        # postconditions
+        post = params["postconditions"]
+        assert post["type"] == "array"
+        post_items = post["items"]
+        assert post_items["type"] == "object"
+        post_props = post_items["properties"]
+        assert "contains" in post_props
+        assert "does_not_contain" in post_props
+        assert post_props["contains"]["type"] == "string"
+        assert post_props["does_not_contain"]["type"] == "string"
+
 
 class TestGlob:
     """Tests for the glob tool."""
