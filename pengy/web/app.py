@@ -358,7 +358,7 @@ class WebWorker:
             tools.set_sudo_password_provider(self._get_sudo_password)
             tools.set_user_agent(config.get("user_agent", "PengyAgent/1.0"))
             tools.set_tool_timeout(config.get("tool_timeout", 60))
-            tools.set_tool_output_max_chars(config.get("tool_output_max_chars", 50000))
+            tools.set_tool_output_max_chars(config.get("tool_output_max_chars", 250000))
 
             llm = LLMClient(
                 base_url=config.get("base_url", "https://api.openai.com/v1"),
@@ -1032,7 +1032,7 @@ def settings_view():
         except ValueError:
             pass
         try:
-            config["tool_output_max_chars"] = max(0, int(request.form.get("tool_output_max_chars", 50000)))
+            config["tool_output_max_chars"] = max(0, int(request.form.get("tool_output_max_chars", 250000)))
         except ValueError:
             pass
         try:

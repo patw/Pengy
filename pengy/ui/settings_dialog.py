@@ -190,7 +190,7 @@ class SettingsDialog(QDialog):
         self.tool_output_max_spinbox.setSpecialValueText("No limit")
         self.tool_output_max_spinbox.setSuffix(" chars")
         self.tool_output_max_spinbox.setToolTip("Tool output longer than this is snipped (head+tail) to avoid blowing up the context window. 0 = no limit.")
-        self.tool_output_max_spinbox.setValue(config.get("tool_output_max_chars", 50000))
+        self.tool_output_max_spinbox.setValue(config.get("tool_output_max_chars", 250000))
         tools_layout.addRow(_label("Max tool output:", "Tool output longer than this is snipped (head+tail) to avoid blowing up the context window. 0 = no limit."), self.tool_output_max_spinbox)
 
         self.user_agent_input = QLineEdit(config.get("user_agent", "PengyAgent/1.0"))

@@ -83,7 +83,7 @@ _MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024
 
 # Maximum chars for tool output before head+tail snipping kicks in.
 # Set via set_tool_output_max_chars().  0 means no limit.
-_MAX_TOOL_OUTPUT_CHARS = 50_000
+_MAX_TOOL_OUTPUT_CHARS = 250_000
 
 # Directories/files to skip in directory_tree and search_content
 _ALWAYS_SKIP_DIRS = {
@@ -952,7 +952,7 @@ def _directory_tree(path: str, max_depth: int = 3, show_hidden: bool = False) ->
 # ---------------------------------------------------------------------------
 
 _MAX_FILES = 20
-_MAX_PER_FILE = 50_000
+_MAX_PER_FILE = 250_000
 _MAX_TOTAL = 120_000
 
 
