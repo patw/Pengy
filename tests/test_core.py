@@ -678,6 +678,51 @@ class TestTools:
         assert "Unknown" in result
 
 
+class TestToolContext:
+    """Per-run tool isolation so concurrent tabs don't share sudo/procs."""
+
+    def test_sudo_provider_is_per_context(self):
+        from pengy.core.tools import ToolContext
+        ctx_a = ToolContext(sudo_provider=lambda: "pw-a")
+        ctx_b = ToolContext(sudo_provider=lambda: "pw-b")
+        assert ctx_a.sudo_provider() == "pw-a"
+        assert ctx_b.sudo_provider() == "pw-b"
+
+    def test_cached_sudo_password_not_shared(self):
+        from pengy.core.tools import ToolContext
+        ctx_a = ToolContext()
+        ctx_b = ToolContext()
+        ctx_a.cached_sudo_password = "secret"
+        assert ctx_b.cached_sudo_password is None
+        ctx_a.clear_sudo()
+        assert ctx_a.cached_sudo_password is None
+
+    def test_run_bash_routes_sudo_through_context(self):
+        # A context with no provider must refuse sudo regardless of any global.
+        from pengy.core.tools import execute_tool, ToolContext
+        ctx = ToolContext(sudo_provider=None)
+        result = execute_tool("run_bash", {"command": "sudo true"}, ctx)
+        assert "no password provider" in result
+
+    def test_kill_all_only_affects_own_context(self):
+        """kill_all() on one context must not touch another's subprocess."""
+        import subprocess
+        from pengy.core.tools import ToolContext
+        ctx_a = ToolContext()
+        ctx_b = ToolContext()
+        # A long-lived sleep registered only in ctx_b.
+        proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            ctx_b.register_process(proc)
+            ctx_a.kill_all()            # must NOT kill ctx_b's process
+            assert proc.poll() is None
+            ctx_b.kill_all()            # now it should die
+            assert proc.wait(timeout=5) is not None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+
 # ---------------------------------------------------------------------------
 # search_content unit tests
 # ---------------------------------------------------------------------------

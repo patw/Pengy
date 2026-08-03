@@ -704,11 +704,38 @@ class MainWindow(QMainWindow):
     # ── Clean shutdown ────────────────────────────────────────────
 
     def closeEvent(self, event):
-        """Save all open tabs before closing."""
+        """Save all open tabs and stop running workers before closing.
+
+        QThreads that are still running when the window is destroyed abort the
+        process ("QThread: Destroyed while thread is still running"), so cancel
+        every live worker and wait briefly for its thread to exit first.
+        """
         self._save_open_tabs()
         for session in self.open_tabs.values():
             if session.chat:
                 save_chat(session.chat)
+
+        # Cancel all live workers (open tabs + already-abandoned ones), then
+        # wait for their threads to finish so none is destroyed mid-run.
+        threads: list[QThread] = []
+        for session in self.open_tabs.values():
+            if session.worker is not None:
+                session.worker.cancel()
+            if session.worker_thread is not None:
+                threads.append(session.worker_thread)
+        for thread, worker in self._abandoned_workers:
+            if worker is not None:
+                worker.cancel()
+            if thread is not None:
+                threads.append(thread)
+
+        for thread in threads:
+            if thread is not None and thread.isRunning():
+                thread.quit()
+        for thread in threads:
+            if thread is not None and thread.isRunning():
+                thread.wait(3000)
+
         super().closeEvent(event)
 
 

@@ -123,20 +123,23 @@ def _serialize_assistant_message(message, preserve_reasoning: bool = False) -> d
     return serialized
 
 
-def _run_tool(name: str, args: dict) -> str:
+def _run_tool(name: str, args: dict, context=None) -> str:
     """Run a tool in a daemon thread with an outer safety-net timeout.
 
     Subprocess-based tools (_run_bash, _run_python) have their own timeout
     at the process level.  The outer join timeout here catches tools that lack
     an internal deadline (e.g. read_file on a hung NFS mount, fetch_url
     trickle) without requiring every tool to implement its own guard.
+
+    *context* is the per-run :class:`ToolContext` (sudo/subprocess scoping);
+    ``None`` uses the module-level default context.
     """
     result: list = [None]
     exc: list = [None]
 
     def _target():
         try:
-            result[0] = _tools_mod.execute_tool(name, args)
+            result[0] = _tools_mod.execute_tool(name, args, context)
         except Exception as e:
             exc[0] = e
 
@@ -180,7 +183,8 @@ class LLMClient:
 
     def chat(self, messages: list[dict], tool_confirmation: str = "none",
              reasoning_effort: str = "", preserve_reasoning: bool = False,
-             cancel_fn: Callable[[], bool] | None = None):
+             cancel_fn: Callable[[], bool] | None = None,
+             tool_context=None):
         """
         Send a chat request and handle tool calls.
         Yields intermediate tool call info for UI updates.
@@ -270,7 +274,7 @@ class LLMClient:
                     if skip_confirm:
                         yield {"type": "tool_request", "name": tool_name,
                                "args": tool_args, "tool_call_id": tool_call.id}
-                        result = _run_tool(tool_name, tool_args)
+                        result = _run_tool(tool_name, tool_args, tool_context)
                         current_messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
@@ -283,7 +287,7 @@ class LLMClient:
                         confirm = yield {"type": "tool_request", "name": tool_name,
                                          "args": tool_args, "tool_call_id": tool_call.id}
                         if confirm and confirm.get("confirmed"):
-                            result = _run_tool(tool_name, tool_args)
+                            result = _run_tool(tool_name, tool_args, tool_context)
                             current_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,

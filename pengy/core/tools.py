@@ -15,11 +15,6 @@ from pathlib import Path
 
 from ddgs import DDGS
 
-# Set by the UI layer so _run_bash can request a sudo password interactively.
-_sudo_password_provider = None
-# Cache the sudo password after first prompt so we don't ask repeatedly.
-_cached_sudo_password = None
-
 _user_agent = "PengyAgent/1.0"
 
 _tool_timeout = 60  # seconds; -1 means no timeout
@@ -30,9 +25,57 @@ READONLY_TOOLS = frozenset({
     "search_content", "web_search", "fetch_url",
 })
 
-# Active subprocess handle so the UI layer can kill runaway tools
-_active_process = None
-_active_process_lock = threading.Lock()
+def _kill_proc_group(proc):
+    """SIGKILL a subprocess's whole process group and reap it."""
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+class ToolContext:
+    """Per-run tool state: sudo provider, cached sudo password, and the set of
+    active subprocesses.
+
+    Each concurrent run (e.g. one per GUI tab) gets its own context so that a
+    sudo prompt is routed to the right run and pressing Stop on one run kills
+    only that run's subprocesses — never another tab's.  Callers that don't
+    supply a context (CLI, Web) use the module-level ``_default_context``.
+    """
+
+    def __init__(self, sudo_provider=None):
+        self.sudo_provider = sudo_provider
+        self.cached_sudo_password = None
+        self._procs: set = set()
+        self._lock = threading.Lock()
+
+    def register_process(self, proc):
+        with self._lock:
+            self._procs.add(proc)
+
+    def unregister_process(self, proc):
+        with self._lock:
+            self._procs.discard(proc)
+
+    def kill_all(self):
+        """Kill every subprocess registered in this context."""
+        with self._lock:
+            procs = list(self._procs)
+            self._procs.clear()
+        for proc in procs:
+            _kill_proc_group(proc)
+
+    def clear_sudo(self):
+        self.cached_sudo_password = None
+
+
+# Context used by callers that don't pass their own (CLI, Web, direct calls).
+_default_context = ToolContext()
 
 # Maximum download size for download_file (100 MB)
 _MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024
@@ -52,11 +95,15 @@ _ALWAYS_SKIP_FILES = {".DS_Store", "Thumbs.db"}
 
 
 def set_sudo_password_provider(fn):
-    global _sudo_password_provider, _cached_sudo_password
-    _sudo_password_provider = fn
+    """Set the sudo password provider on the default context (CLI/Web).
+
+    The tabbed GUI instead creates a per-run :class:`ToolContext` so concurrent
+    tabs don't clobber one another's provider.
+    """
+    _default_context.sudo_provider = fn
     if fn is None:
         # Session ended — clear cached password for safety
-        _cached_sudo_password = None
+        _default_context.cached_sudo_password = None
 
 
 def set_user_agent(ua: str):
@@ -333,8 +380,13 @@ TOOLS = [
 ]
 
 
-def execute_tool(name: str, arguments: dict) -> str:
-    """Execute a tool and return the result."""
+def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = None) -> str:
+    """Execute a tool and return the result.
+
+    *context* scopes sudo/subprocess state to a single run; defaults to the
+    module-level context when not supplied (CLI/Web).
+    """
+    ctx = context or _default_context
     if name == "read_file":
         return _read_file(arguments["path"])
     elif name == "write_file":
@@ -342,7 +394,7 @@ def execute_tool(name: str, arguments: dict) -> str:
     elif name == "replace_in_file":
         return _replace_in_file(arguments["path"], arguments["old_str"], arguments["new_str"])
     elif name == "run_bash":
-        return _run_bash(arguments["command"])
+        return _run_bash(arguments["command"], ctx)
     elif name == "web_search":
         return _web_search(arguments["query"], arguments.get("max_results", 5))
     elif name == "download_file":
@@ -350,7 +402,7 @@ def execute_tool(name: str, arguments: dict) -> str:
     elif name == "fetch_url":
         return _fetch_url(arguments["url"])
     elif name == "run_python":
-        return _run_python(arguments["code"])
+        return _run_python(arguments["code"], ctx)
     elif name == "directory_tree":
         return _directory_tree(
             arguments["path"],
@@ -473,22 +525,21 @@ def _replace_in_file(path: str, old_str: str, new_str: str) -> str:
         return f"Error replacing text in file: {e}"
 
 
-def _run_bash(command: str) -> str:
+def _run_bash(command: str, ctx: "ToolContext" = None) -> str:
     """Run a bash command."""
-    global _active_process
+    ctx = ctx or _default_context
     proc = None
     try:
         stdin_input = None
         if re.search(r'\bsudo\b', command):
-            if _sudo_password_provider is None:
+            if ctx.sudo_provider is None:
                 return "Error: sudo detected but no password provider is configured."
-            global _cached_sudo_password
-            password = _cached_sudo_password
+            password = ctx.cached_sudo_password
             if password is None:
-                password = _sudo_password_provider()
+                password = ctx.sudo_provider()
                 if password is None:
                     return "Cancelled: sudo password not provided."
-                _cached_sudo_password = password
+                ctx.cached_sudo_password = password
             command = re.sub(r'\bsudo\b(?!\s+-S)', 'sudo -S', command, count=1)
             stdin_input = password + "\n"
 
@@ -502,14 +553,11 @@ def _run_bash(command: str) -> str:
             text=True,
             start_new_session=True,
         )
-        with _active_process_lock:
-            _active_process = proc
+        ctx.register_process(proc)
         try:
             stdout, stderr = proc.communicate(input=stdin_input, timeout=timeout)
         finally:
-            with _active_process_lock:
-                if _active_process is proc:
-                    _active_process = None
+            ctx.unregister_process(proc)
 
         output = stdout or ""
         if stdin_input:
@@ -520,23 +568,11 @@ def _run_bash(command: str) -> str:
             output += f"\n[Exit code: {proc.returncode}]"
         return _snip_tool_output(output) or "(No output)"
     except subprocess.TimeoutExpired:
-        if proc is not None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
-        with _active_process_lock:
-            if _active_process is proc:
-                _active_process = None
+        _kill_proc_group(proc)
+        ctx.unregister_process(proc)
         return f"Error: Command timed out after {_tool_timeout} seconds"
     except Exception as e:
-        with _active_process_lock:
-            if _active_process is proc:
-                _active_process = None
+        ctx.unregister_process(proc)
         return f"Error running command: {e}"
 
 
@@ -660,9 +696,9 @@ def _fetch_url(url: str) -> str:
         return f"Error fetching URL: {e}"
 
 
-def _run_python(code: str) -> str:
+def _run_python(code: str, ctx: "ToolContext" = None) -> str:
     """Execute Python code."""
-    global _active_process
+    ctx = ctx or _default_context
     proc = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -678,14 +714,11 @@ def _run_python(code: str) -> str:
             text=True,
             start_new_session=True,
         )
-        with _active_process_lock:
-            _active_process = proc
+        ctx.register_process(proc)
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         finally:
-            with _active_process_lock:
-                if _active_process is proc:
-                    _active_process = None
+            ctx.unregister_process(proc)
 
         output = stdout or ""
         if stderr:
@@ -694,23 +727,11 @@ def _run_python(code: str) -> str:
             output += f"\n[Exit code: {proc.returncode}]"
         return _snip_tool_output(output) or "(No output)"
     except subprocess.TimeoutExpired:
-        if proc is not None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
-        with _active_process_lock:
-            if _active_process is proc:
-                _active_process = None
+        _kill_proc_group(proc)
+        ctx.unregister_process(proc)
         return f"Error: Python execution timed out after {_tool_timeout} seconds"
     except Exception as e:
-        with _active_process_lock:
-            if _active_process is proc:
-                _active_process = None
+        ctx.unregister_process(proc)
         return f"Error running Python: {e}"
 
 
@@ -1115,23 +1136,14 @@ def _group_regions(matched: set[int], context: int, total_lines: int
 # ---------------------------------------------------------------------------
 
 def kill_active_process():
-    """Kill the currently active tool subprocess, if any.
+    """Kill the default context's active tool subprocess(es), if any.
 
-    Called by the UI layer on Stop / cancel.  Uses SIGKILL on the entire
-    process group so that any child processes are also terminated.
+    Called by the CLI/Web on Stop / cancel.  The tabbed GUI instead calls
+    ``ToolContext.kill_all()`` on its own per-run context so it never kills
+    another tab's subprocess.  Uses SIGKILL on the entire process group so
+    that any child processes are also terminated.
     """
-    proc = None
-    with _active_process_lock:
-        proc = _active_process
-    if proc is not None and proc.poll() is None:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
+    _default_context.kill_all()
 
 
 def is_readonly_tool(name: str) -> bool:

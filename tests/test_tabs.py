@@ -264,3 +264,40 @@ class TestQuickSettings:
 
         assert "100" in window.chat_history.tokens_label.text()
         assert "50" in window.chat_history.tokens_label.text()
+
+
+class TestCloseEvent:
+    def test_close_cancels_running_workers(self, window, qapp):
+        """closeEvent must cancel live workers so no QThread is destroyed mid-run."""
+        from PySide6.QtGui import QCloseEvent
+
+        class _FakeWorker:
+            def __init__(self):
+                self.cancelled = False
+
+            def cancel(self):
+                self.cancelled = True
+
+        class _FakeThread:
+            def isRunning(self):
+                return False  # nothing to actually wait on
+
+            def quit(self):
+                pass
+
+            def wait(self, ms):
+                return True
+
+        session = _active_session(window)
+        worker = _FakeWorker()
+        session.worker = worker
+        session.worker_thread = _FakeThread()
+
+        # Also stage an abandoned worker to prove it is cancelled too.
+        abandoned = _FakeWorker()
+        window._abandoned_workers.append((_FakeThread(), abandoned))
+
+        window.closeEvent(QCloseEvent())
+
+        assert worker.cancelled
+        assert abandoned.cancelled

@@ -28,15 +28,19 @@ class ChatWorker(QObject):
         self._pending_confirmation = None
         self._sudo_event = threading.Event()
         self._pending_sudo_password = None
+        # Per-run tool state so concurrent tabs don't share a sudo provider
+        # or kill each other's subprocesses.
+        self._tool_context = tools.ToolContext(
+            sudo_provider=self._request_sudo_password)
 
     def cancel(self):
         """Signal the worker to stop at the next opportunity.
 
-        Kills any active tool subprocess and unblocks pending confirmation
-        or sudo-password waits so the worker loop exits promptly.
+        Kills this run's active tool subprocesses and unblocks pending
+        confirmation or sudo-password waits so the worker loop exits promptly.
         """
         self._cancelled.set()
-        tools.kill_active_process()
+        self._tool_context.kill_all()
         self._confirmation_event.set()
         self._sudo_event.set()
 
@@ -47,7 +51,6 @@ class ChatWorker(QObject):
             self.finished.emit()
             return
 
-        tools.set_sudo_password_provider(self._request_sudo_password)
         try:
             self.generator = self.llm_client.chat(
                 self.messages,
@@ -55,6 +58,7 @@ class ChatWorker(QObject):
                 reasoning_effort=self.reasoning_effort,
                 preserve_reasoning=self.preserve_reasoning,
                 cancel_fn=self._cancelled.is_set,
+                tool_context=self._tool_context,
             )
             send_value = None
             while True:
@@ -91,7 +95,7 @@ class ChatWorker(QObject):
                 self.error.emit(str(e))
         finally:
             self.generator = None
-            tools.set_sudo_password_provider(None)
+            self._tool_context.clear_sudo()
             if not self._cancelled.is_set():
                 self.finished.emit()
 
