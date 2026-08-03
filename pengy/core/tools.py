@@ -940,9 +940,7 @@ def _directory_tree(path: str, max_depth: int = 3, show_hidden: bool = False) ->
             lines.append("(empty directory)")
 
         result = "\n".join(lines)
-        if len(result) > 40_000:
-            result = result[:40_000] + "\n\n[... truncated at 40,000 characters ...]"
-        return result
+        return _snip_tool_output(result)
     except Exception as e:
         return f"Error building directory tree: {e}"
 
@@ -953,7 +951,7 @@ def _directory_tree(path: str, max_depth: int = 3, show_hidden: bool = False) ->
 
 _MAX_FILES = 20
 _MAX_PER_FILE = 250_000
-_MAX_TOTAL = 120_000
+_MAX_TOTAL = 1_250_000  # 5× the global tool output limit
 
 
 def _read_multiple_files(paths: list[str]) -> str:
