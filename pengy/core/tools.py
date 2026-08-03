@@ -1325,9 +1325,7 @@ def _glob(pattern: str, path: str | None = None) -> str:
         lines.append(f"... and {len(filtered) - max_results} more (truncated at {max_results})")
 
     result = "\n".join(lines)
-    if len(result) > 40_000:
-        result = result[:40_000] + "\n\n[... truncated at 40,000 characters ...]"
-    return result
+    return _snip_tool_output(result)
 
 
 # ---------------------------------------------------------------------------
