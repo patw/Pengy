@@ -60,6 +60,11 @@ h4, h5, h6 {{ font-size:1em; }}
 """
 
 
+# Within this many pixels of the bottom, treat the view as "pinned" so new
+# content auto-scrolls into view instead of pushing the user's reading spot.
+_BOTTOM_MARGIN = 30
+
+
 class ChatView(QTextBrowser):
     """Markdown-rendering chat view with collapsible tool call blocks."""
 
@@ -81,6 +86,14 @@ class ChatView(QTextBrowser):
         self._image_pending: set[str] = set()
         self._image_lock = threading.Lock()
         self._image_loaded.connect(self._render)
+        # Auto-scroll tracking. setHtml() replaces the whole document and
+        # resets the scrollbar to the top, so scrollbar.value() right after a
+        # render is 0 — *not* a reliable "the user scrolled here" signal. We
+        # keep an explicit _auto_scroll flag updated only by genuine user
+        # scrolling (see _on_scroll_changed), and guard the spurious reset.
+        self._auto_scroll = True
+        self._rendering = False
+        self.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
         self.md_extensions = ["fenced_code", "codehilite", "tables", "footnotes"]
         # One reusable parser; constructing a fresh Markdown() per message is
         # ~6x slower and this method is called for every message on every render.
@@ -272,17 +285,39 @@ class ChatView(QTextBrowser):
         self._html_cache = []
         self._expanded_tools = set()
         self._expanded_reasoning = set()
+        self._auto_scroll = True
         super().clear()
+
+    def _on_scroll_changed(self, value: int):
+        """Update the pinned-to-bottom flag from a *genuine* user scroll.
+
+        Suppressed while _rendering: setHtml() programmatically resets the bar
+        to 0, which is not a user action and must not clear our auto-scroll
+        intent (the bug that made the view snap back up to old history).
+        """
+        if self._rendering:
+            return
+        sb = self.verticalScrollBar()
+        self._auto_scroll = value >= sb.maximum() - _BOTTOM_MARGIN
 
     def _render(self):
         scrollbar = self.verticalScrollBar()
-        at_bottom = scrollbar.value() >= scrollbar.maximum() - 30
         prev_pos = scrollbar.value()
+        # setHtml() rebuilds the document and resets the scrollbar to the top.
+        # Guard valueChanged for the setHtml + position-restore so that spurious
+        # reset-to-0 isn't read as "the user scrolled up." The deferred
+        # scroll-to-bottom below runs *after* the guard lifts, so its
+        # valueChanged correctly re-arms _auto_scroll.
+        self._rendering = True
         self.setHtml(self._build_html())
-        if at_bottom:
-            QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()))
+        if self._auto_scroll:
+            self._rendering = False
+            # maximum() is stale until Qt lays out the new document, so defer.
+            QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(
+                self.verticalScrollBar().maximum()))
         else:
-            self.verticalScrollBar().setValue(prev_pos)
+            scrollbar.setValue(prev_pos)
+            self._rendering = False
 
     # ── render cache ──────────────────────────────────────────────────
     # Anything that changes a message's *rendered output* must invalidate it:

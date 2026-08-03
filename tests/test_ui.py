@@ -548,3 +548,72 @@ class TestChatViewRenderCache:
         view._messages.append({"role": "user", "content": "direct"})
         assert "direct" in view._build_html()
         assert len(view._html_cache) == len(view._messages)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Auto-scroll pin  (regression: "snaps back up to old history")
+# ────────────────────────────────────────────────────────────────────
+# setHtml() replaces the whole document and resets the scrollbar to 0. The old
+# _render() decided "am I at the bottom?" by reading scrollbar.value() *after*
+# that reset — so any render landing while a previous render's deferred
+# scroll-to-bottom was still pending read value()==0, concluded the user had
+# scrolled up, and pinned the view to the top of the history. These guard the
+# explicit _auto_scroll flag that replaced that brittle check.
+
+class TestAutoScrollPin:
+    @pytest.fixture
+    def view(self, qapp):
+        from pengy.ui.chat_view import ChatView
+        v = ChatView()
+        v.resize(400, 600)
+        v.show()
+        qapp.processEvents()
+        # Fill with enough content to make the document taller than the viewport.
+        for i in range(60):
+            v.append_message("assistant", ("line %d " % i) * 20, render=False)
+        yield v
+        v.deleteLater()
+        qapp.processEvents()
+
+    def test_pin_survives_a_render(self, view, qapp):
+        assert view._auto_scroll is True
+        view._render()
+        qapp.processEvents()
+        assert view._auto_scroll is True
+
+    def test_interleaved_render_keeps_the_pin(self, view, qapp):
+        # Two renders back-to-back before the event loop flushes the deferred
+        # scroll — the exact sequence (e.g. an image loaded mid-stream) that
+        # used to read value()==0 and snap the view to the top.
+        view._render()
+        view._render()
+        qapp.processEvents()
+        assert view._auto_scroll is True
+
+    def test_genuine_scroll_up_clears_the_pin(self, view, qapp):
+        view._render()
+        qapp.processEvents()
+        view.verticalScrollBar().setValue(0)
+        qapp.processEvents()
+        assert view._auto_scroll is False
+
+    def test_cleared_pin_does_not_yank_to_bottom(self, view, qapp):
+        view._render()
+        qapp.processEvents()
+        sb = view.verticalScrollBar()
+        sb.setValue(0)
+        qapp.processEvents()
+        assert view._auto_scroll is False
+        view._render()
+        qapp.processEvents()
+        # Stayed near the top (where the user was reading), not the bottom.
+        assert view.verticalScrollBar().value() < sb.maximum() // 2
+
+    def test_clear_resets_pin(self, view, qapp):
+        view._render()
+        qapp.processEvents()
+        view.verticalScrollBar().setValue(0)
+        qapp.processEvents()
+        assert view._auto_scroll is False
+        view.clear()
+        assert view._auto_scroll is True
