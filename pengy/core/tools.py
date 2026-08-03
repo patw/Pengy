@@ -23,6 +23,7 @@ _tool_timeout = 60  # seconds; -1 means no timeout
 READONLY_TOOLS = frozenset({
     "read_file", "read_multiple_files", "directory_tree",
     "search_content", "web_search", "fetch_url",
+    "glob", "todowrite",
 })
 
 def _kill_proc_group(proc):
@@ -377,6 +378,109 @@ TOOLS = [
             },
         },
     },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "glob",
+            "description": "Find files matching a glob pattern. Returns sorted file paths with sizes. Use ** for recursive search (e.g. 'src/**/*.py'). Respects .gitignore — skipped directories like node_modules are excluded. Prefer this over run_bash('find ...') or run_bash('ls ...').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "The glob pattern to match against file paths. Supports ** for recursive matching, * for any characters, ? for single character.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "The directory to search in (default: current working directory)",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todowrite",
+            "description": "Create and update a structured task list for tracking progress during complex multi-step operations. Send the COMPLETE list every time — do not send incremental updates. Exactly one task must be in_progress at any time. Mark tasks completed immediately after finishing them. Use imperative forms for content (e.g. 'Run tests', 'Add JWT middleware').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {
+                                    "type": "string",
+                                    "description": "Imperative task description, e.g. 'Run the tests'",
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "Current task status — exactly one task must be in_progress",
+                                },
+                            },
+                            "required": ["content", "status"],
+                        },
+                        "description": "The complete list of tasks with their current statuses",
+                    },
+                },
+                "required": ["todos"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user_question",
+            "description": "Ask the user one or more multiple-choice questions to clarify requirements, gather preferences, or resolve ambiguity. Use this when instructions are vague, multiple valid approaches exist, or you need a decision before proceeding. Each question includes a header, the question text, and a list of options with descriptions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "header": {
+                                    "type": "string",
+                                    "description": "Short category label for this question, e.g. 'Auth strategy'",
+                                },
+                                "question": {
+                                    "type": "string",
+                                    "description": "The question to ask the user",
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {
+                                                "type": "string",
+                                                "description": "Short answer label shown to the user, e.g. 'JWT'",
+                                            },
+                                            "description": {
+                                                "type": "string",
+                                                "description": "One-line explanation of what this option means",
+                                            },
+                                        },
+                                        "required": ["label", "description"],
+                                    },
+                                    "description": "List of mutually exclusive options for the user to choose from",
+                                },
+                            },
+                            "required": ["header", "question", "options"],
+                        },
+                        "description": "One or more questions to ask the user. Multi-question forms let the user navigate between questions before submitting all answers at once.",
+                    },
+                },
+                "required": ["questions"],
+            },
+        },
+    },
 ]
 
 
@@ -419,6 +523,15 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
             arguments.get("context_lines", 0),
             arguments.get("max_results", 50),
         )
+    elif name == "glob":
+        return _glob(
+            arguments["pattern"],
+            arguments.get("path"),
+        )
+    elif name == "todowrite":
+        return _todowrite(arguments["todos"])
+    elif name == "ask_user_question":
+        return "ask_user_question must be handled by the harness — it should never reach execute_tool directly."
     else:
         return f"Unknown tool: {name}"
 
@@ -1129,6 +1242,147 @@ def _group_regions(matched: set[int], context: int, total_lines: int
         else:
             regions.append((start, end))
     return regions
+
+
+# ---------------------------------------------------------------------------
+# process management helpers
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# glob — file pattern matching
+# ---------------------------------------------------------------------------
+
+# Directories that are always skipped (mirrors _ALWAYS_SKIP_DIRS)
+_GLOB_SKIP_DIRS = _ALWAYS_SKIP_DIRS
+
+# Files that should never appear in glob results
+_GLOB_SKIP_FILES = _ALWAYS_SKIP_FILES
+
+# Directories whose contents are also excluded (noise you never want to glob into)
+_GLOB_SKIP_CONTENTS = {
+    ".git", ".svn", ".hg", "__pycache__", "node_modules",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".eggs",
+    ".venv", "venv", ".env", "build", "dist", "target",
+}
+
+
+
+def _glob(pattern: str, path: str | None = None) -> str:
+    """Find files matching a glob pattern.
+
+    Uses Python's pathlib which supports ** for recursive matching.
+    Skips noise directories like .git, node_modules, __pycache__.
+    Returns up to 200 matching paths sorted by name, with file sizes.
+    """
+    try:
+        root = Path(path).expanduser().resolve() if path else Path.cwd()
+    except Exception as e:
+        return f"Error resolving path: {e}"
+
+    if not root.exists():
+        return f"Error: Directory not found: {root}"
+
+    search_dir = root if root.is_dir() else root.parent
+
+    try:
+        matches = list(search_dir.glob(pattern))
+    except Exception as e:
+        return f"Error with glob pattern '{pattern}': {e}"
+
+    # Filter out noise directories and their contents
+    filtered = []
+    for m in matches:
+        # Check if any parent directory is in the skip set
+        parts = m.relative_to(search_dir).parts
+        if any(p in _GLOB_SKIP_CONTENTS for p in parts):
+            continue
+        if m.name in _GLOB_SKIP_DIRS or m.name in _GLOB_SKIP_FILES:
+            continue
+        if m.name.startswith(".") and not pattern.startswith("."):
+            continue  # skip hidden unless explicitly requested
+        filtered.append(m)
+
+    if not filtered:
+        return f"No files matching '{pattern}' in {search_dir}"
+
+    # Sort: directories first, then by name
+    filtered.sort(key=lambda p: (not p.is_dir(), p.name.lower()))
+
+    max_results = 200
+    lines = []
+    for i, p in enumerate(filtered[:max_results]):
+        suffix = "/" if p.is_dir() else ""
+        try:
+            size = f"  ({_format_size(p.stat().st_size)})" if not p.is_dir() else ""
+        except OSError:
+            size = ""
+        try:
+            rel = str(p.relative_to(root)) if path else str(p.relative_to(search_dir))
+        except ValueError:
+            rel = str(p)
+        lines.append(f"{rel}{suffix}{size}")
+
+    if len(filtered) > max_results:
+        lines.append(f"... and {len(filtered) - max_results} more (truncated at {max_results})")
+
+    result = "\n".join(lines)
+    if len(result) > 40_000:
+        result = result[:40_000] + "\n\n[... truncated at 40,000 characters ...]"
+    return result
+
+
+# ---------------------------------------------------------------------------
+# todowrite — task list management
+# ---------------------------------------------------------------------------
+
+def _todowrite(todos: list[dict]) -> str:
+    """Validate and echo back a structured task list.
+
+    Rules enforced:
+    - Exactly one task in_progress (unless all are pending)
+    - Valid statuses only
+    - Non-empty content
+    """
+    if not todos:
+        return "Error: todos list is empty. Provide at least one task."
+
+    valid_statuses = {"pending", "in_progress", "completed"}
+    in_progress_count = 0
+    errors = []
+
+    for i, t in enumerate(todos):
+        if not isinstance(t, dict):
+            errors.append(f"Item {i}: not an object")
+            continue
+        content_text = t.get("content", "")
+        status = t.get("status", "")
+        if not content_text:
+            errors.append(f"Item {i}: content is empty")
+        if status not in valid_statuses:
+            errors.append(f"Item {i}: invalid status '{status}' — must be pending, in_progress, or completed")
+        if status == "in_progress":
+            in_progress_count += 1
+
+    if errors:
+        return "Error validating todos:\n" + "\n".join(f"  - {e}" for e in errors)
+
+    if in_progress_count > 1:
+        return (
+            f"Error: {in_progress_count} tasks marked in_progress. "
+            f"Exactly one task must be in_progress at a time."
+        )
+
+    # Format and echo back
+    icons = {"pending": "[ ]", "in_progress": "[→]", "completed": "[✓]"}
+    lines = []
+    for t in todos:
+        icon = icons.get(t["status"], "[?]")
+        lines.append(f"{icon} {t['content']}")
+
+    return "\n".join(lines)
+
+
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from PySide6.QtWidgets import (
     QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout,
     QDialog, QPushButton, QDialogButtonBox, QLabel, QInputDialog, QLineEdit,
-    QApplication, QPlainTextEdit, QTabWidget, QToolButton,
+    QApplication, QPlainTextEdit, QTabWidget, QToolButton, QRadioButton,
+    QButtonGroup, QScrollArea, QGroupBox,
 )
 from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QTextOption
@@ -57,6 +58,10 @@ class MainWindow(QMainWindow):
         self._worker_to_chat: dict[int, str] = {}
         # workers that have been abandoned but threads are still running
         self._abandoned_workers: list[tuple[QThread, ChatWorker]] = []
+
+        # question dialog queuing (Option B: one-at-a-time across tabs)
+        self._pending_questions: list[tuple[str, dict]] = []  # (chat_id, question_data)
+        self._question_dialog_open = False
 
         self.setup_ui()
         self.apply_theme()
@@ -490,6 +495,7 @@ class MainWindow(QMainWindow):
         worker.error.connect(self._on_worker_error)
         worker.finished.connect(self._on_worker_finished)
         worker.sudo_password_requested.connect(self._on_sudo_password_requested)
+        worker.question_requested.connect(self._on_worker_question)
 
         thread.started.connect(worker.run)
         thread.start()
@@ -594,6 +600,8 @@ class MainWindow(QMainWindow):
                 session.worker.finished.disconnect(self._on_worker_finished)
                 session.worker.sudo_password_requested.disconnect(
                     self._on_sudo_password_requested)
+                session.worker.question_requested.disconnect(
+                    self._on_worker_question)
             except (TypeError, RuntimeError):
                 pass
 
@@ -646,6 +654,61 @@ class MainWindow(QMainWindow):
             })
         else:
             session.worker.send_confirmation(None)
+
+    # ── Question dialog ────────────────────────────────────────
+
+    def _on_worker_question(self, question_data: dict):
+        """Handle a question_request from a worker (queued one-at-a-time)."""
+        chat_id = self._sender_chat_id()
+        if not chat_id:
+            return
+        session = self._tab_for_chat(chat_id)
+        if not session or not session.worker:
+            return
+
+        if self._question_dialog_open:
+            # Queue it — show it when the current one closes
+            self._pending_questions.append((chat_id, question_data))
+            # Flash the tab title to indicate it's waiting
+            session.thinking = True
+            self._update_tab_title(session)
+            return
+
+        self._show_question_dialog(chat_id, session, question_data)
+
+    def _show_question_dialog(self, chat_id: str, session: _TabSession, question_data: dict):
+        """Show the QuestionDialog and send the response back to the worker."""
+        self._question_dialog_open = True
+
+        tab_title = session.chat.get("title", "New Chat")[:30]
+        questions = question_data.get("questions", [])
+        dialog = QuestionDialog(tab_title, questions, self._theme, self)
+        result = dialog.exec()
+
+        if result == QDialog.DialogCode.Accepted and dialog.answers:
+            session.worker.send_question_response({
+                "answered": True,
+                "tool_call_id": question_data["tool_call_id"],
+                "answers": dialog.answers,
+            })
+        else:
+            session.worker.send_question_response(None)
+
+        # Clean up thinking flag if we flashed it for queued state
+        session.thinking = bool(session.worker and session.worker_thread and session.worker_thread.isRunning())
+        self._update_tab_title(session)
+
+        self._question_dialog_open = False
+
+        # Show next queued question if any
+        if self._pending_questions:
+            next_chat_id, next_data = self._pending_questions.pop(0)
+            next_session = self._tab_for_chat(next_chat_id)
+            if next_session and next_session.worker:
+                # Clear the queued flashing indicator
+                next_session.thinking = bool(next_session.worker and next_session.worker_thread and next_session.worker_thread.isRunning())
+                self._update_tab_title(next_session)
+                self._show_question_dialog(next_chat_id, next_session, next_data)
 
     def _on_sudo_password_requested(self):
         """Show a password dialog when a sudo command needs a password."""
@@ -736,7 +799,164 @@ class MainWindow(QMainWindow):
             if thread is not None and thread.isRunning():
                 thread.wait(3000)
 
+        # Cancel any pending queued questions so their workers don't hang
+        for chat_id, qdata in self._pending_questions:
+            session = self._tab_for_chat(chat_id)
+            if session and session.worker:
+                session.worker.send_question_response(None)
+        self._pending_questions.clear()
+
         super().closeEvent(event)
+
+
+class QuestionDialog(QDialog):
+    """Modal dialog for answering LLM questions — one at a time, tab-aware."""
+
+    def __init__(self, tab_title: str, questions: list[dict], theme: dict, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.answers: list[str] = []
+        self._button_groups: list[QButtonGroup] = []
+        self.setup_ui(tab_title, questions, theme)
+
+    def setup_ui(self, tab_title: str, questions: list[dict], theme: dict):
+        """Build the question dialog with radio buttons for each question."""
+        self.setWindowTitle(f"Pengy — Tab: {tab_title}")
+        self.setModal(True)
+        self.setMinimumWidth(480)
+        self.setMaximumWidth(680)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        header = QLabel(f"<b>Questions from tab:</b> {tab_title}")
+        header.setStyleSheet(f"color: {theme['fg']}; padding: 4px;")
+        layout.addWidget(header)
+
+        pending_count = 0
+        parent_window = self.parent()
+        if parent_window and hasattr(parent_window, '_pending_questions'):
+            pending_count = len(parent_window._pending_questions)
+        if pending_count:
+            note = QLabel(f"[{pending_count} pending question(s) in other tabs]")
+            note.setStyleSheet(f"color: {theme['muted']}; font-size: 10pt; padding: 0 4px;")
+            layout.addWidget(note)
+
+        # Scroll area for multiple questions
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(f"QScrollArea {{ border: none; background: {theme['bg']}; }}")
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(16)
+
+        for qi, q in enumerate(questions):
+            group_box = QGroupBox()
+            group_box.setStyleSheet(f"""
+                QGroupBox {{
+                    color: {theme['primary']};
+                    font-weight: bold;
+                    border: 1px solid {theme['border_soft']};
+                    border-radius: 6px;
+                    margin-top: 8px;
+                    padding: 12px 8px 8px 8px;
+                }}
+                QGroupBox::title {{
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 4px;
+                }}
+            """)
+            group_box.setTitle(q.get("header", f"Question {qi + 1}"))
+
+            group_layout = QVBoxLayout(group_box)
+
+            question_label = QLabel(q.get("question", ""))
+            question_label.setWordWrap(True)
+            question_label.setStyleSheet(f"color: {theme['fg']}; font-weight: normal; padding: 4px 0;")
+            group_layout.addWidget(question_label)
+
+            btn_group = QButtonGroup(self)
+            self._button_groups.append(btn_group)
+
+            options = q.get("options", [])
+            for oi, opt in enumerate(options):
+                radio = QRadioButton()
+                label_text = opt.get("label", "")
+                desc = opt.get("description", "")
+                radio.setText(f"{label_text}  —  {desc}" if desc else label_text)
+                radio.setStyleSheet(f"""
+                    QRadioButton {{
+                        color: {theme['fg']};
+                        padding: 3px 0;
+                        spacing: 8px;
+                    }}
+                    QRadioButton::indicator {{
+                        width: 14px;
+                        height: 14px;
+                    }}
+                """)
+                btn_group.addButton(radio, oi)
+                group_layout.addWidget(radio)
+
+                # Select first option by default
+                if oi == 0:
+                    radio.setChecked(True)
+
+            scroll_layout.addWidget(group_box)
+
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll, stretch=1)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+
+        submit_btn = QPushButton("Submit Answers")
+        submit_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {theme['primary']};
+                color: {theme['primary_fg']};
+                border: none;
+                border-radius: 6px;
+                padding: 8px 24px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {theme['primary_hover']}; }}
+        """)
+        submit_btn.clicked.connect(self._on_submit)
+        btn_layout.addWidget(submit_btn)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {theme['danger']};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 24px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {theme['danger_hover']}; }}
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        layout.addLayout(btn_layout)
+
+    def _on_submit(self):
+        """Collect answers from all button groups."""
+        self.answers = []
+        for bg in self._button_groups:
+            checked = bg.checkedButton()
+            if checked:
+                # Extract just the label from the button text ("label  —  description")
+                full_text = checked.text()
+                label = full_text.split("  —  ")[0] if "  —  " in full_text else full_text
+                self.answers.append(label)
+            else:
+                self.answers.append("")
+        self.accept()
 
 
 class ToolConfirmDialog(QDialog):

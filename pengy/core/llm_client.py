@@ -155,6 +155,23 @@ def _run_tool(name: str, args: dict, context=None) -> str:
     return result[0]
 
 
+
+def _format_question_answers(questions: list[dict], answers: list[str]) -> str:
+    """Format question answers for the tool result message."""
+    lines = []
+    for i, q in enumerate(questions):
+        header = q.get("header", f"Q{i + 1}")
+        answer = answers[i] if i < len(answers) else "(no answer)"
+        # Find the matching option description
+        detail = ""
+        for opt in q.get("options", []):
+            if opt.get("label") == answer:
+                detail = f" — {opt.get('description', '')}"
+                break
+        lines.append(f"**{header}**: {answer}{detail}")
+    return "\n".join(lines)
+
+
 class LLMClient:
     """Client for interacting with OpenAI-compatible LLM APIs."""
 
@@ -264,6 +281,47 @@ class LLMClient:
                         tool_args = json.loads(tool_call.function.arguments)
                     except json.JSONDecodeError:
                         tool_args = {}
+
+                    # ask_user_question is a special harness-level tool — it always
+                    # pauses for user input regardless of tool_confirmation mode.
+                    if tool_name == "ask_user_question":
+                        questions = tool_args.get("questions", [])
+                        response = yield {
+                            "type": "question_request",
+                            "name": tool_name,
+                            "args": tool_args,
+                            "tool_call_id": tool_call.id,
+                            "questions": questions,
+                        }
+                        if response and response.get("answered"):
+                            answers = response.get("answers", [])
+                            result_text = _format_question_answers(questions, answers)
+                            current_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": result_text,
+                            })
+                            yield {
+                                "type": "question_result",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_name,
+                                "content": result_text,
+                            }
+                        else:
+                            current_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": "User cancelled the question.",
+                            })
+                            yield {
+                                "type": "tool_result",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_name,
+                                "args": tool_args,
+                                "content": "User cancelled the question.",
+                                "declined": True,
+                            }
+                        continue
 
                     # Auto-approve based on tool_confirmation mode
                     skip_confirm = (

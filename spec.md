@@ -69,7 +69,7 @@ Pure Python — no Qt or terminal dependencies. Shared by both GUI and CLI.
 | `config.py` | Load/save `~/.config/pengy/settings.json` with default merging; `render_system_message()` fills `{date}`, `{username}`, `{hostname}`, `{osinfo}` placeholders at call time |
 | `chat_manager.py` | CRUD for `~/.config/pengy/chats.json`; chats are plain dicts with `id` (UUID), `title`, `messages[]`, `created_at` |
 | `llm_client.py` | `LLMClient.chat()` — a Python generator that yields `tool_request`, `assistant_tool_calls`, `tool_result`, or `final_response` dicts. Callers `.send()` confirmation dicts back into the generator to resume after tool calls |
-| `tools.py` | 11 OpenAI function-calling tool schemas (`TOOLS`) and `execute_tool(name, arguments)`. Also manages `_sudo_password_provider` (callback set by UI or CLI) and `_tool_timeout` |
+| `tools.py` | 14 OpenAI function-calling tool schemas (`TOOLS`) and `execute_tool(name, arguments)`. Also manages `_sudo_password_provider` (callback set by UI or CLI) and `_tool_timeout` |
 
 ### Desktop UI Package (`pengy/ui/`)
 
@@ -420,7 +420,26 @@ Shows a visual tree of the directory structure. Skips common noise directories (
 ### `search_content(pattern, path, file_glob=None, context_lines=0, max_results=50)`
 Searches for a regex pattern in files under a directory. If the regex is invalid, it's re-attempted as a literal search. Returns matching lines with file path, line number, context lines, and a `▸` marker on matched lines. Results are grouped into contiguous regions to avoid duplicate context. Skips binary files and common noise directories.
 
+### `glob(pattern, path=None)`
+Finds files matching a glob pattern. Supports `**` for recursive search (e.g. `src/**/*.py`). Respects `.gitignore`-style skip directories (`node_modules`, `__pycache__`, `.git`, `venv`, `build`, `dist`, `target`, etc.). Returns up to 200 matching paths sorted by name with file sizes. Prefer this over `run_bash('find ...')` or `run_bash('ls ...')` — it's faster, safer, and respects project boundaries.
+
+### `todowrite(todos)`
+Creates and updates a structured task list for tracking progress during complex multi-step operations. The LLM must send the **complete** list every time — not incremental updates. Exactly one task must be `in_progress` at any time; tasks may be `pending`, `in_progress`, or `completed`. The tool validates these rules and echoes back the formatted list with status icons (`[ ]`, `[→]`, `[✓]`). This gives the LLM a persistent scratchpad that survives context window limits and tool-call round-trips.
+
+### `ask_user_question(questions)`
+Asks the user one or more multiple-choice questions to clarify requirements, gather preferences, or resolve ambiguity. Each question includes a short header, the question text, and a list of options with descriptions. This tool should be used when instructions are vague, multiple valid approaches exist, or the LLM needs a decision before proceeding. The harness handles rendering the form and returning the user's choices — this tool should never reach `execute_tool` directly.
+
 ---
+
+#### Why These Three Tools?
+
+The original 11 tools cover filesystem operations, code execution, web access, and codebase exploration — the mechanical layer of an agent. `glob`, `todowrite`, and `ask_user_question` address the **cognitive** and **interaction** gaps:
+
+- **`glob`** replaces the common anti-pattern of the LLM calling `run_bash('find . -name "*.py"')` or `run_bash('ls -R')`, which is slow, noisy, and often misses `.gitignore`-style exclusions. `glob` is fast, structured, and respects project boundaries — the agent gets exactly what it needs in one call.
+- **`todowrite`** gives the LLM a persistent scratchpad that survives context-window truncation and tool-call round-trips. Without it, the LLM either repeats work after context elision or drifts from its plan across multiple turns. The structured format (exactly one in-progress, send the full list) was deliberately chosen over free-form notes because it forces the model to maintain a single source of truth.
+- **`ask_user_question`** closes the loop on ambiguous requests. Before this tool, the LLM had to either guess or produce a long-winded "I need more information" response that the user then had to manually address in a follow-up message. Now the agent can pause, ask a structured question, and resume with the answer — turning vague prompts into precise results without breaking the conversation flow.
+
+
 
 ## Tool Execution Flow
 

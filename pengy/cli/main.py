@@ -1178,6 +1178,18 @@ class PengyCLI:
                         if confirm.get("yolo_turn"):
                             self._yolo_this_turn = True
 
+                elif rtype == "question_request":
+                    expecting_api_call = False
+                    answers = self._handle_question(response)
+                    if answers is not None:
+                        send_value = {"answered": True, "tool_call_id": response["tool_call_id"], "answers": answers}
+                    else:
+                        send_value = None
+
+                elif rtype == "question_result":
+                    expecting_api_call = True
+                    self._render_tool_result({"content": response.get("content", ""), "declined": False})
+
                 elif rtype == "tool_result":
                     expecting_api_call = True
                     self._render_tool_result(response)
@@ -1211,6 +1223,56 @@ class PengyCLI:
     # ------------------------------------------------------------------
     # rendering helpers
     # ------------------------------------------------------------------
+
+    def _handle_question(self, response: dict) -> list[str] | None:
+        """Present questions to the user and collect answers."""
+        questions = response.get("questions", [])
+        if not questions:
+            return []
+
+        self.console.print()
+        self.console.print(
+            Panel(
+                "[bold]The assistant needs your input:[/bold]",
+                border_style="blue",
+            )
+        )
+
+        answers = []
+        for qi, q in enumerate(questions):
+            header = q.get("header", f"Question {qi + 1}")
+            question_text = q.get("question", "")
+            options = q.get("options", [])
+
+            self.console.print(f"\n[bold cyan]{header}[/bold cyan]")
+            self.console.print(f"[dim]{question_text}[/dim]")
+            self.console.print()
+
+            for oi, opt in enumerate(options, 1):
+                label = opt.get("label", "?")
+                desc = opt.get("description", "")
+                self.console.print(f"  [{oi}] {label}  [dim]— {desc}[/dim]")
+
+            while True:
+                try:
+                    choice = Prompt.ask(
+                        f"  Choose [1-{len(options)}]",
+                        default="1",
+                    ).strip()
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(options):
+                        answers.append(options[idx]["label"])
+                        break
+                    self.console.print(f"[red]Please enter a number between 1 and {len(options)}.[/red]")
+                except ValueError:
+                    self.console.print(f"[red]Please enter a number.[/red]")
+                except (KeyboardInterrupt, EOFError):
+                    self.console.print("\n[red]Cancelled.[/red]")
+                    return None
+
+        self.console.print("[green]\u2713 Answers recorded.[/green]")
+        return answers
+
 
     def _render_final(self, response: dict, chat: dict):
         """Render the final assistant response and show token usage."""

@@ -12,6 +12,7 @@ class ChatWorker(QObject):
     error = Signal(str)
     finished = Signal()
     sudo_password_requested = Signal()
+    question_requested = Signal(dict)
 
     def __init__(self, llm_client, messages: list[dict],
                  tool_confirmation: str = "none", reasoning_effort: str = "",
@@ -43,6 +44,7 @@ class ChatWorker(QObject):
         self._tool_context.kill_all()
         self._confirmation_event.set()
         self._sudo_event.set()
+        self._question_event.set()
 
     def run(self):
         """Execute the chat request in the background thread."""
@@ -88,6 +90,15 @@ class ChatWorker(QObject):
                     if self._cancelled.is_set():
                         return
                     send_value = self._pending_confirmation
+                elif response["type"] == "question_request":
+                    self._pending_question_response = None
+                    self._question_event.clear()
+                    # Emit question_requested AFTER clearing so the handler sees a fresh state
+                    self.question_requested.emit(response)
+                    self._question_event.wait()
+                    if self._cancelled.is_set():
+                        return
+                    send_value = self._pending_question_response
         except StopIteration:
             pass
         except Exception as e:
@@ -120,3 +131,10 @@ class ChatWorker(QObject):
             return
         self._pending_confirmation = confirmation
         self._confirmation_event.set()
+
+    def send_question_response(self, response: dict | None):
+        """Called from the main thread with the user's answers (or None to cancel)."""
+        if not self.generator:
+            return
+        self._pending_question_response = response
+        self._question_event.set()

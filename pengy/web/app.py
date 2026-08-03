@@ -344,6 +344,37 @@ class WebWorker:
                             send_value = result
                             self._confirm_result = None
 
+                elif rtype == "question_request":
+                    questions = response.get("questions", [])
+                    tool_call_id = response.get("tool_call_id", "")
+                    self._queue.put({
+                        "type": "question_request",
+                        "questions": questions,
+                        "tool_call_id": tool_call_id,
+                        "safe_id": _safe_id(tool_call_id),
+                    })
+                    self._confirm_event.clear()
+                    self._confirm_event.wait(timeout=300.0)
+                    if self._cancelled:
+                        break
+                    result = self._confirm_result
+                    if result and result.get("answered"):
+                        send_value = {"answered": True, "tool_call_id": tool_call_id, "answers": result["answers"]}
+                    else:
+                        send_value = None
+                    self._confirm_result = None
+
+                elif rtype == "question_result":
+                    content = response.get("content", "")
+                    self._queue.put({
+                        "type": "tool_result",
+                        "tool_call_id": response["tool_call_id"],
+                        "safe_id": _safe_id(response["tool_call_id"]),
+                        "name": response.get("name", ""),
+                        "content": content,
+                        "declined": False,
+                    })
+
                 elif rtype == "tool_result":
                     content = response.get("content", "")
                     declined = response.get("declined", False)

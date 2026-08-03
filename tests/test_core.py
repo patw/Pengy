@@ -678,6 +678,141 @@ class TestTools:
         assert "Unknown" in result
 
 
+class TestGlob:
+    """Tests for the glob tool."""
+
+    def test_glob_finds_py_files(self, tmp_path):
+        from pengy.core.tools import execute_tool
+        (tmp_path / "a.py").write_text("x")
+        (tmp_path / "b.rs").write_text("y")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "c.py").write_text("z")
+        result = execute_tool("glob", {"pattern": "**/*.py", "path": str(tmp_path)})
+        assert "a.py" in result
+        assert "sub/c.py" in result
+        assert "b.rs" not in result
+
+    def test_glob_no_matches(self, tmp_path):
+        from pengy.core.tools import execute_tool
+        result = execute_tool("glob", {"pattern": "*.xyz", "path": str(tmp_path)})
+        assert "No files matching" in result
+
+    def test_glob_skips_hidden_by_default(self, tmp_path):
+        from pengy.core.tools import execute_tool
+        (tmp_path / ".hidden.py").write_text("x")
+        (tmp_path / "visible.py").write_text("y")
+        result = execute_tool("glob", {"pattern": "*.py", "path": str(tmp_path)})
+        assert "visible.py" in result
+        assert ".hidden.py" not in result
+
+    def test_glob_skips_node_modules(self, tmp_path):
+        from pengy.core.tools import execute_tool
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "foo.js").write_text("x")
+        (tmp_path / "src.js").write_text("y")
+        result = execute_tool("glob", {"pattern": "**/*.js", "path": str(tmp_path)})
+        assert "src.js" in result
+        assert "node_modules" not in result
+
+    def test_glob_defaults_to_cwd(self):
+        from pengy.core.tools import execute_tool
+        result = execute_tool("glob", {"pattern": "*.py"})
+        # Should find at least the test files
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_glob_directories_show_slash(self, tmp_path):
+        from pengy.core.tools import execute_tool
+        (tmp_path / "mydir").mkdir()
+        result = execute_tool("glob", {"pattern": "*", "path": str(tmp_path)})
+        assert "mydir/" in result
+
+
+class TestTodowrite:
+    """Tests for the todowrite tool."""
+
+    def test_echoes_back_valid_todos(self):
+        from pengy.core.tools import execute_tool
+        todos = [
+            {"content": "Find auth code", "status": "in_progress"},
+            {"content": "Add JWT", "status": "pending"},
+            {"content": "Write tests", "status": "pending"},
+        ]
+        result = execute_tool("todowrite", {"todos": todos})
+        assert "[\u2192] Find auth code" in result
+        assert "[ ] Add JWT" in result
+        assert "[ ] Write tests" in result
+
+    def test_rejects_multiple_in_progress(self):
+        from pengy.core.tools import execute_tool
+        todos = [
+            {"content": "Task A", "status": "in_progress"},
+            {"content": "Task B", "status": "in_progress"},
+        ]
+        result = execute_tool("todowrite", {"todos": todos})
+        assert "Error" in result
+        assert "2 tasks marked in_progress" in result
+
+    def test_rejects_invalid_status(self):
+        from pengy.core.tools import execute_tool
+        todos = [
+            {"content": "Task A", "status": "done"},
+        ]
+        result = execute_tool("todowrite", {"todos": todos})
+        assert "invalid status" in result
+
+    def test_rejects_empty_content(self):
+        from pengy.core.tools import execute_tool
+        todos = [
+            {"content": "", "status": "pending"},
+        ]
+        result = execute_tool("todowrite", {"todos": todos})
+        assert "content is empty" in result
+
+    def test_rejects_empty_list(self):
+        from pengy.core.tools import execute_tool
+        result = execute_tool("todowrite", {"todos": []})
+        assert "empty" in result
+
+    def test_all_pending_is_valid(self):
+        from pengy.core.tools import execute_tool
+        todos = [
+            {"content": "Task A", "status": "pending"},
+            {"content": "Task B", "status": "pending"},
+        ]
+        result = execute_tool("todowrite", {"todos": todos})
+        assert "Error" not in result
+
+    def test_allows_all_completed(self):
+        from pengy.core.tools import execute_tool
+        todos = [
+            {"content": "Task A", "status": "completed"},
+            {"content": "Task B", "status": "completed"},
+        ]
+        result = execute_tool("todowrite", {"todos": todos})
+        assert "[\u2713]" in result
+
+
+class TestAskUserQuestion:
+    """Tests for the ask_user_question tool."""
+
+    def test_tool_definition_exists(self):
+        from pengy.core.tools import TOOLS
+        names = [t["function"]["name"] for t in TOOLS]
+        assert "ask_user_question" in names
+
+    def test_execute_returns_harness_message(self):
+        from pengy.core.tools import execute_tool
+        result = execute_tool("ask_user_question", {
+            "questions": [{"header": "Test", "question": "Q?", "options": [{"label": "A", "description": "desc"}]}],
+        })
+        assert "harness" in result.lower()
+
+    def test_is_not_readonly(self):
+        from pengy.core.tools import is_readonly_tool
+        assert not is_readonly_tool("ask_user_question")
+
+
 class TestToolContext:
     """Per-run tool isolation so concurrent tabs don't share sudo/procs."""
 

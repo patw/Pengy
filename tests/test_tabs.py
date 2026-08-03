@@ -301,3 +301,54 @@ class TestCloseEvent:
 
         assert worker.cancelled
         assert abandoned.cancelled
+
+class TestQuestionDialog:
+    def test_dialog_creation(self, window, qapp):
+        """QuestionDialog can be created and shows questions."""
+        from pengy.ui.main_window import QuestionDialog
+        questions = [
+            {
+                "header": "Auth",
+                "question": "Which auth method?",
+                "options": [
+                    {"label": "JWT", "description": "Stateless tokens"},
+                    {"label": "Session", "description": "Cookie-based"},
+                ],
+            },
+        ]
+        dlg = QuestionDialog("Test Tab", questions, window._theme, window)
+        assert dlg.answers == []
+        assert dlg._button_groups
+        assert len(dlg._button_groups) == 1
+
+    def test_dialog_multi_question(self, window, qapp):
+        """QuestionDialog with multiple questions creates multiple button groups."""
+        from pengy.ui.main_window import QuestionDialog
+        questions = [
+            {"header": "Q1", "question": "First?", "options": [{"label": "A", "description": "a"}]},
+            {"header": "Q2", "question": "Second?", "options": [{"label": "B", "description": "b"}]},
+        ]
+        dlg = QuestionDialog("Test", questions, window._theme, window)
+        assert len(dlg._button_groups) == 2
+
+    def test_dialog_first_option_checked_by_default(self, window, qapp):
+        """First radio button in each group should be checked by default."""
+        from pengy.ui.main_window import QuestionDialog
+        questions = [
+            {"header": "Q", "question": "?", "options": [
+                {"label": "First", "description": "f"},
+                {"label": "Second", "description": "s"},
+            ]},
+        ]
+        dlg = QuestionDialog("Test", questions, window._theme, window)
+        # First option auto-checked
+        assert dlg._button_groups[0].checkedButton() is not None
+        assert "First" in dlg._button_groups[0].checkedButton().text()
+
+    def test_question_queuing_state(self, window):
+        """MainWindow has question queuing state initialized."""
+        assert hasattr(window, '_pending_questions')
+        assert hasattr(window, '_question_dialog_open')
+        assert window._pending_questions == []
+        assert window._question_dialog_open is False
+
