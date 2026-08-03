@@ -621,6 +621,128 @@ class TestTools:
         finally:
             os.unlink(path)
 
+    def test_apply_changes_definition_and_side_effect_classification(self):
+        from pengy.core.tools import TOOLS, is_readonly_tool
+
+        names = [tool["function"]["name"] for tool in TOOLS]
+        assert "apply_changes" in names
+        assert is_readonly_tool("apply_changes") is False
+
+    def test_apply_changes_replaces_and_inserts_transactionally(self, tmp_path):
+        from pengy.core.tools import execute_tool
+
+        first = tmp_path / "first.txt"
+        second = tmp_path / "second.txt"
+        first.write_text("alpha\nbeta\n")
+        second.write_text("one\ntwo\n")
+        result = execute_tool("apply_changes", {
+            "changes": [
+                {"path": str(first), "operations": [
+                    {"kind": "replace", "old": "beta", "new": "BETA"},
+                    {"kind": "insert_after", "anchor": "alpha", "text": "\ninserted"},
+                ]},
+                {"path": str(second), "operations": [
+                    {"kind": "delete", "old": "two"},
+                ]},
+            ],
+            "postconditions": [
+                {"path": str(first), "contains": "inserted"},
+                {"path": str(second), "does_not_contain": "two"},
+            ],
+        })
+        assert "Applied changes to 2 file(s)" in result
+        assert "@@" in result
+        assert first.read_text() == "alpha\ninserted\nBETA\n"
+        assert second.read_text() == "one\n\n"
+
+    def test_apply_changes_dry_run_does_not_write(self, tmp_path):
+        from pengy.core.tools import execute_tool
+
+        path = tmp_path / "sample.txt"
+        path.write_text("before\n")
+        result = execute_tool("apply_changes", {
+            "changes": [{"path": str(path), "operations": [
+                {"kind": "replace", "old": "before", "new": "after"},
+            ]}],
+            "dry_run": True,
+        })
+        assert "Dry run: no changes applied" in result
+        assert "before" in result and "after" in result
+        assert path.read_text() == "before\n"
+
+    def test_apply_changes_rejects_ambiguous_match_without_writing_any_file(self, tmp_path):
+        from pengy.core.tools import execute_tool
+
+        first = tmp_path / "first.txt"
+        second = tmp_path / "second.txt"
+        first.write_text("duplicate\nduplicate\n")
+        second.write_text("unchanged\n")
+        result = execute_tool("apply_changes", {
+            "changes": [
+                {"path": str(first), "operations": [
+                    {"kind": "replace", "old": "duplicate", "new": "changed"},
+                ]},
+                {"path": str(second), "operations": [
+                    {"kind": "replace", "old": "unchanged", "new": "changed"},
+                ]},
+            ],
+        })
+        assert "no changes applied" in result
+        assert "matches 2 locations" in result
+        assert first.read_text() == "duplicate\nduplicate\n"
+        assert second.read_text() == "unchanged\n"
+
+    def test_apply_changes_expected_matches_can_replace_repeated_text(self, tmp_path):
+        from pengy.core.tools import execute_tool
+
+        path = tmp_path / "sample.txt"
+        path.write_text("x x x")
+        result = execute_tool("apply_changes", {
+            "changes": [{"path": str(path), "operations": [
+                {"kind": "replace", "old": "x", "new": "y", "expected_matches": 3},
+            ]}],
+        })
+        assert "Applied changes" in result
+        assert path.read_text() == "y y y"
+
+    def test_apply_changes_postcondition_failure_is_atomic(self, tmp_path):
+        from pengy.core.tools import execute_tool
+
+        path = tmp_path / "sample.txt"
+        path.write_text("before\n")
+        result = execute_tool("apply_changes", {
+            "changes": [{"path": str(path), "operations": [
+                {"kind": "replace", "old": "before", "new": "after"},
+            ]}],
+            "postconditions": [{"path": str(path), "contains": "required marker"}],
+        })
+        assert "no changes applied" in result
+        assert "does not contain expected text" in result
+        assert path.read_text() == "before\n"
+
+    def test_apply_changes_rejects_binary_and_unknown_operations(self, tmp_path):
+        from pengy.core.tools import execute_tool
+
+        binary = tmp_path / "data.bin"
+        binary.write_bytes(b"\x00\xff")
+        result = execute_tool("apply_changes", {
+            "changes": [{"path": str(binary), "operations": [
+                {"kind": "replace", "old": "x", "new": "y"},
+            ]}],
+        })
+        assert "binary or non-UTF-8" in result
+        assert binary.read_bytes() == b"\x00\xff"
+
+        text = tmp_path / "text.txt"
+        text.write_text("hello")
+        result = execute_tool("apply_changes", {
+            "changes": [{"path": str(text), "operations": [
+                {"kind": "patch", "old": "hello", "new": "goodbye"},
+            ]}],
+        })
+        assert "unknown kind" in result
+        assert text.read_text() == "hello"
+
     def test_directory_tree(self):
         from pengy.core.tools import execute_tool
         with tempfile.TemporaryDirectory() as td:

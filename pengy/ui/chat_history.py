@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QAction
 
-from pengy.ui.theme import get_theme
+from pengy.ui.theme import get_theme, scaled_size
+from pengy.ui.icons import apply_button_icon
 
 
 class ChatHistoryWidget(QWidget):
@@ -32,19 +33,19 @@ class ChatHistoryWidget(QWidget):
         layout.setSpacing(4)
 
         # New Chat button
-        self.new_chat_btn = QPushButton("+ New Chat")
+        self.new_chat_btn = QPushButton("New Chat")
         self.new_chat_btn.setFixedHeight(36)
         self.new_chat_btn.clicked.connect(lambda: self.new_chat_requested.emit())
         layout.addWidget(self.new_chat_btn)
 
         # Settings button
-        self.settings_btn = QPushButton("⚙ Settings")
+        self.settings_btn = QPushButton("Settings")
         self.settings_btn.setFixedHeight(36)
         self.settings_btn.clicked.connect(lambda: self.settings_requested.emit())
         layout.addWidget(self.settings_btn)
 
         # Tasks button
-        self.tasks_btn = QPushButton("📋 Tasks")
+        self.tasks_btn = QPushButton("Tasks")
         self.tasks_btn.setFixedHeight(36)
         self.tasks_btn.clicked.connect(lambda: self.tasks_requested.emit())
         layout.addWidget(self.tasks_btn)
@@ -126,7 +127,16 @@ class ChatHistoryWidget(QWidget):
             ChatHistoryWidget {{ background-color: {theme['panel']}; color: {theme['fg']}; }}
             QFrame {{ border-color: {theme['border']}; }}
         """)
+        control_h = scaled_size(36, theme)
+        for button in (self.new_chat_btn, self.settings_btn, self.tasks_btn):
+            button.setFixedHeight(control_h)
         self.status_label.setStyleSheet(f"font-weight: bold; color: {theme['fg']};")
+        apply_button_icon(self.new_chat_btn, "new-chat", theme,
+                          size=scaled_size(16, theme))
+        apply_button_icon(self.settings_btn, "settings", theme,
+                          size=scaled_size(16, theme))
+        apply_button_icon(self.tasks_btn, "tasks", theme,
+                          size=scaled_size(16, theme))
         for label in (self.model_label, self.confirm_label, self.tokens_label):
             label.setStyleSheet(f"color: {theme['fg']};")
         self.load_chats([]) if False else None  # keep method import-safe; rows are restyled on reload
@@ -155,16 +165,24 @@ class ChatHistoryWidget(QWidget):
             QPushButton:hover {{ background-color: {self._theme['hover']}; }}
         """
 
-        save_btn = QPushButton("💾")
-        save_btn.setFixedSize(24, 24)
+        action_size = scaled_size(24, self._theme)
+        save_btn = QPushButton()
+        save_btn.setFixedSize(action_size, action_size)
         save_btn.setToolTip("Save chat as markdown")
+        save_btn.setAccessibleName("Save chat as markdown")
+        apply_button_icon(save_btn, "save", self._theme,
+                          size=scaled_size(14, self._theme))
         save_btn.setStyleSheet(btn_style)
         save_btn.clicked.connect(lambda: self._save_chat_markdown(chat_id))
         row_layout.addWidget(save_btn)
 
-        del_btn = QPushButton("🗑")
-        del_btn.setFixedSize(24, 24)
+        del_btn = QPushButton()
+        del_btn.setFixedSize(action_size, action_size)
         del_btn.setToolTip("Delete chat")
+        del_btn.setAccessibleName("Delete chat")
+        apply_button_icon(del_btn, "delete", self._theme,
+                          size=scaled_size(14, self._theme),
+                          active_role="danger")
         del_btn.setStyleSheet(btn_style)
         del_btn.clicked.connect(lambda: self._delete_by_id(chat_id))
         row_layout.addWidget(del_btn)

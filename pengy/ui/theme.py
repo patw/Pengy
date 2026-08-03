@@ -1,7 +1,7 @@
 """Theme helpers for the Pengy Qt UI."""
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PySide6.QtWidgets import QApplication
 
 
@@ -281,30 +281,11 @@ def resolve_theme_mode(mode: str | None) -> str:
     return "dark" if _is_dark_color(window_color) else "light"
 
 
-def _dpi_scale_already_applied() -> float:
-    """Return the QT_SCALE_FACTOR baked in at process launch (1.0 if unset).
-
-    main.py sets this env var from ui_scale before QApplication is created,
-    which makes Qt natively scale every logical pixel (fonts and widget
-    geometry alike) for the whole app. ui_scale_factor() must divide that
-    back out, or a value already covered by QT_SCALE_FACTOR gets multiplied
-    again here. Before a restart QT_SCALE_FACTOR still reflects the old
-    setting, so this correctly yields a live-preview delta; after a restart
-    it collapses to a no-op once the two agree.
-    """
-    import os
-    try:
-        v = float(os.environ.get("QT_SCALE_FACTOR", "1.0"))
-    except (TypeError, ValueError):
-        v = 1.0
-    return v if v > 0 else 1.0
-
-
 def ui_scale_factor(config_or_theme: dict | None = None) -> float:
-    """Return the configured UI scale as a multiplier.
+    """Return Pengy's UI preference as a platform-independent multiplier.
 
-    Qt's global scale factor handles native widget sizing after restart, but
-    rich-text HTML and explicit fixed-font widgets need to opt in directly.
+    OS display scaling is Qt's responsibility. In particular, an externally
+    supplied QT_SCALE_FACTOR is intentionally neither read nor cancelled here.
     """
     raw_scale = (config_or_theme or {}).get("ui_scale", 100)
     try:
@@ -314,12 +295,45 @@ def ui_scale_factor(config_or_theme: dict | None = None) -> float:
     # Keep manually-entered config values sane while preserving the Settings
     # dialog's normal 75–200% range.
     scale = max(50.0, min(scale, 300.0))
-    return (scale / 100.0) / _dpi_scale_already_applied()
+    return scale / 100.0
+
+
+def _valid_point_size(font: QFont, fallback: float = 10.0) -> float:
+    """Return a usable platform font point size."""
+    point_size = font.pointSizeF()
+    return point_size if point_size > 0 else fallback
 
 
 def scaled_font_size(base_pt: float, config_or_theme: dict | None = None) -> float:
-    """Scale a point-size font value by the configured UI scale."""
+    """Scale an explicit point size by Pengy's UI preference."""
     return max(1.0, base_pt * ui_scale_factor(config_or_theme))
+
+
+def ui_font(config_or_theme: dict | None = None) -> QFont:
+    """Return the platform general font scaled by Pengy's preference."""
+    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
+    font.setPointSizeF(_valid_point_size(font) * ui_scale_factor(config_or_theme))
+    return font
+
+
+def chat_font(config_or_theme: dict | None = None) -> QFont:
+    """Return the platform fixed font scaled by Pengy's preference."""
+    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    font.setPointSizeF(_valid_point_size(font) * ui_scale_factor(config_or_theme))
+    return font
+
+
+def small_ui_font(config_or_theme: dict | None = None) -> QFont:
+    font = ui_font(config_or_theme)
+    font.setPointSizeF(max(1.0, font.pointSizeF() * 0.9))
+    return font
+
+
+def heading_font(config_or_theme: dict | None = None) -> QFont:
+    font = ui_font(config_or_theme)
+    font.setPointSizeF(max(1.0, font.pointSizeF() * 1.4))
+    font.setBold(True)
+    return font
 
 
 def scaled_size(base_px: int, config_or_theme: dict | None = None) -> int:
@@ -352,13 +366,23 @@ def get_theme(config_or_mode: dict | str | None = None, accent: str | None = Non
 
 
 def qt_app_stylesheet(theme: dict[str, str]) -> str:
-    """Application/window-level Qt stylesheet for common widgets."""
+    """Application/window-level Qt stylesheet for common widgets.
+
+    The explicit point size is intentional: macOS's native Qt style does not
+    consistently propagate QApplication.setFont() into every styled control.
+    QSS makes the application typography role deterministic while Qt still
+    handles physical DPI and text rasterization.
+    """
     pad_v = scaled_size(5, theme)
     pad_h = scaled_size(10, theme)
+    app_font = ui_font(theme)
+    app_pt = f"{app_font.pointSizeF():.2f}".rstrip("0").rstrip(".")
     return f"""
     QMainWindow, QWidget {{
         background-color: {theme['bg']};
         color: {theme['fg']};
+        font-family: "{app_font.family()}";
+        font-size: {app_pt}pt;
     }}
     QSplitter::handle {{
         background-color: {theme['border_soft']};
@@ -435,6 +459,9 @@ def qt_app_stylesheet(theme: dict[str, str]) -> str:
     QTabWidget::pane {{
         background-color: {theme['bg']};
         border: none;
+    }}
+    QTabWidget::tab-bar {{
+        alignment: left;
     }}
     QTabBar::tab {{
         background-color: {theme['panel']};

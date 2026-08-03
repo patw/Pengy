@@ -71,31 +71,28 @@ def main():
         )
         sys.exit(1)
 
-    import os
     from pathlib import Path
     from PySide6.QtWidgets import QApplication
-    from PySide6.QtGui import QFont, QFontDatabase, QIcon
+    from PySide6.QtGui import QIcon
 
     from pengy.core.config import load_config
     from pengy.ui.main_window import MainWindow
-    from pengy.ui.theme import get_theme, qt_app_stylesheet
+    from pengy.ui.theme import get_theme, qt_app_stylesheet, ui_font
 
     _ICON_PATH = Path(__file__).parent / "assets" / "icon.png"
 
     config = load_config()
-    scale = config.get("ui_scale", 100)
-    if scale != 100:
-        os.environ["QT_SCALE_FACTOR"] = str(scale / 100)
 
+    # Qt/OS own physical display and per-monitor DPI scaling. Pengy's UI scale
+    # is an independent preference applied explicitly to fonts and custom
+    # metrics, rather than injected into Qt's platform scaling pipeline.
     app = QApplication(sys.argv)
     app.setApplicationName("Pengy")
     app.setOrganizationName("Pengy")
     if _ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(_ICON_PATH)))
 
-    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
-    font.setPointSize(10)
-    app.setFont(font)
+    app.setFont(ui_font(config))
     app.setStyleSheet(qt_app_stylesheet(get_theme(config)))
 
     window = MainWindow()

@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 
-from pengy.ui.theme import ACCENT_NAMES, THEME_MODES
+from pengy.ui.theme import ACCENT_NAMES, THEME_MODES, get_theme, scaled_size
+from pengy.ui.icons import apply_button_icon
 
 
 def _label(text: str, tooltip: str) -> QLabel:
@@ -28,10 +29,10 @@ class SettingsDialog(QDialog):
 
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._models_fetched.connect(self._on_models_fetched)
         self._models_fetch_failed.connect(self._on_models_fetch_failed)
         self.config = config
+        self._theme = get_theme(config)
         self.setWindowTitle("Settings")
         self.setModal(True)
 
@@ -53,7 +54,11 @@ class SettingsDialog(QDialog):
         idx = self._scale_values.index(current_scale) if current_scale in self._scale_values else 1
         self.scale_combo.setCurrentIndex(idx)
         self.scale_combo.setToolTip("Scales the entire UI. A restart is needed for the change to take full effect.")
-        ui_layout.addRow(_label("UI Scale:", "Scales the entire UI. A restart is needed for the change to take full effect."), self.scale_combo)
+        ui_layout.addRow(_label("UI Scale:", "Scales the entire UI. Restart Pengy to apply a change."), self.scale_combo)
+        scale_note = QLabel("UI scale changes take effect after restarting Pengy.")
+        scale_note.setWordWrap(True)
+        scale_note.setStyleSheet(f"color: {self._theme['muted']};")
+        ui_layout.addRow("", scale_note)
 
         self.theme_mode_combo = QComboBox()
         theme_mode_labels = {"system": "System", "light": "Light", "dark": "Dark"}
@@ -104,7 +109,8 @@ class SettingsDialog(QDialog):
         self.model_combo.setToolTip("Model name sent in chat completion requests. Use Fetch to list available models from the endpoint.")
         model_row.addWidget(self.model_combo, 1)
 
-        self.fetch_models_btn = QPushButton("↻ Fetch")
+        self.fetch_models_btn = QPushButton("Fetch")
+        apply_button_icon(self.fetch_models_btn, "refresh", self._theme, size=15)
         self.fetch_models_btn.setToolTip("Fetch available models from the /models endpoint")
         self.fetch_models_btn.setFixedWidth(80)
         self.fetch_models_btn.clicked.connect(self._fetch_models)
@@ -113,7 +119,7 @@ class SettingsDialog(QDialog):
         llm_layout.addRow(_label("Model:", "Model name sent in chat completion requests. Use Fetch to list available models from the endpoint."), model_row)
 
         self.system_message_input = QTextEdit(config.get("system_message", "You are a helpful assistant."))
-        self.system_message_input.setMaximumHeight(100)
+        self.system_message_input.setMaximumHeight(scaled_size(100, self._theme))
         self.system_message_input.setToolTip("The system prompt that sets the assistant's behavior, tone, and constraints.")
         llm_layout.addRow(_label("System Message:", "The system prompt that sets the assistant's behavior, tone, and constraints."), self.system_message_input)
 
@@ -247,7 +253,7 @@ class SettingsDialog(QDialog):
 
     def _on_models_fetched(self, model_ids: list):
         self.fetch_models_btn.setEnabled(True)
-        self.fetch_models_btn.setText("↻ Fetch")
+        self.fetch_models_btn.setText("Fetch")
         if not model_ids:
             QMessageBox.information(self, "No Models", "The endpoint returned an empty model list.")
             return
@@ -261,7 +267,7 @@ class SettingsDialog(QDialog):
 
     def _on_models_fetch_failed(self, error: str):
         self.fetch_models_btn.setEnabled(True)
-        self.fetch_models_btn.setText("↻ Fetch")
+        self.fetch_models_btn.setText("Fetch")
         QMessageBox.warning(self, "Fetch Failed", error)
 
     def get_config(self) -> dict:

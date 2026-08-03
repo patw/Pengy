@@ -6,30 +6,23 @@ import threading
 import urllib.request
 from PySide6.QtWidgets import QTextBrowser
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QImage, QMouseEvent, QTextDocument
+from PySide6.QtGui import QDesktopServices, QImage, QMouseEvent, QTextDocument
 
 import markdown
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name, TextLexer
 from pygments.formatters import HtmlFormatter
 
-from pengy.ui.theme import get_theme, scaled_font_size
-
-
-def _fmt_pt(value: float) -> str:
-    return f"{value:.2f}".rstrip("0").rstrip(".")
+from pengy.ui.theme import chat_font, get_theme
 
 
 def _build_css(theme: dict[str, str] | None = None) -> str:
     theme = theme or get_theme()
-    fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
-    body_pt = _fmt_pt(scaled_font_size(10, theme))
-    label_pt = _fmt_pt(scaled_font_size(9, theme))
-    reasoning_label_pt = _fmt_pt(scaled_font_size(8.5, theme))
+    fixed = chat_font(theme).family()
     return f"""
 body {{
     font-family: "{fixed}";
-    font-size: {body_pt}pt;
+    font-size: 1em;
     background-color: {theme['bg']};
     color: {theme['fg']};
     margin: 8px;
@@ -49,17 +42,21 @@ th {{
     font-weight: bold;
 }}
 img {{ max-width: 600px; }}
-.role-user {{ color:{theme['user_label']}; font-weight:bold; font-size:{label_pt}pt; margin:8px 0 2px 0; }}
-.role-assistant {{ color:{theme['assistant_label']}; font-weight:bold; font-size:{label_pt}pt; margin:8px 0 2px 0; }}
+.role-user {{ color:{theme['user_label']}; font-weight:bold; font-size:0.9em; margin:8px 0 2px 0; }}
+.role-assistant {{ color:{theme['assistant_label']}; font-weight:bold; font-size:0.9em; margin:8px 0 2px 0; }}
 .tool-card {{ border:1px solid {theme['border_soft']}; padding:4px 8px; margin:6px 0; background-color:{theme['tool_bg']}; }}
 .tool-link {{ color:{theme['link']}; text-decoration:none; font-weight:bold; }}
-.tool-pre {{ background-color:{theme['tool_arg_bg']}; color:{theme['code_fg']}; padding:4px; margin:2px 0; font-size:{label_pt}pt; }}
+.tool-pre {{ background-color:{theme['tool_arg_bg']}; color:{theme['code_fg']}; padding:4px; margin:2px 0; font-size:0.9em; }}
 .code-pre {{ background-color:{theme['code_bg']}; color:{theme['code_fg']}; padding:10px; margin:6px 0; }}
 .muted {{ color:{theme['muted']}; }}
 .declined {{ color:{theme['danger']}; }}
 .reasoning-card {{ border:1px solid {theme['reasoning_border']}; padding:6px 10px; margin:6px 0; background-color:{theme['reasoning_bg']}; }}
 .reasoning-link {{ color:{theme['reasoning_fg']}; text-decoration:none; font-weight:bold; }}
-.reasoning-body {{ color:{theme['muted']}; font-size:{reasoning_label_pt}pt; white-space:pre-wrap; word-wrap:break-word; margin-top:4px; }}
+.reasoning-body {{ color:{theme['muted']}; font-size:0.85em; white-space:pre-wrap; word-wrap:break-word; margin-top:4px; }}
+h1 {{ font-size:1.4em; }}
+h2 {{ font-size:1.3em; }}
+h3 {{ font-size:1.1em; }}
+h4, h5, h6 {{ font-size:1em; }}
 """
 
 
@@ -98,9 +95,9 @@ class ChatView(QTextBrowser):
         self.setOpenLinks(False)
 
     def _apply_font(self, theme: dict[str, str]):
-        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        font.setPointSizeF(scaled_font_size(10, theme))
+        font = chat_font(theme)
         self.setFont(font)
+        self.document().setDefaultFont(font)
 
     def apply_theme(self, theme: dict[str, str]):
         """Apply a theme and re-render existing messages."""

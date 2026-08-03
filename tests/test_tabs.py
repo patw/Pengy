@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6", reason="PySide6 not installed")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QTabBar
 
 from pengy.ui.main_window import MainWindow, _TabSession
 
@@ -135,6 +135,32 @@ class TestTabLifecycle:
         assert window.active_chat_id is not None
 
 
+class TestTabAppearance:
+    def test_tabs_use_natural_width(self, window):
+        assert not window.tab_widget.tabBar().expanding()
+
+    def test_close_button_is_custom_and_right_aligned(self, window):
+        bar = window.tab_widget.tabBar()
+        right = bar.tabButton(0, QTabBar.ButtonPosition.RightSide)
+        left = bar.tabButton(0, QTabBar.ButtonPosition.LeftSide)
+        assert right is not None
+        assert right.property("pengyIcon") == "close"
+        assert left is None
+
+    def test_close_button_tracks_tab_after_reordering(self, window):
+        _dirty_chat(_active_session(window))
+        first_widget = window.tab_widget.widget(0)
+        window.create_new_chat()
+        bar = window.tab_widget.tabBar()
+        bar.moveTab(0, 1)
+        moved_index = window.tab_widget.indexOf(first_widget)
+        close_button = bar.tabButton(moved_index, QTabBar.ButtonPosition.RightSide)
+        before = window.tab_widget.count()
+        close_button.click()
+        assert window.tab_widget.count() == before - 1
+        assert window.tab_widget.indexOf(first_widget) == -1
+
+
 class TestTabIndependence:
     def test_tabs_have_separate_chat_views(self, window):
         _dirty_chat(_active_session(window))
@@ -227,6 +253,16 @@ class TestTabRestore:
             w2.tab_widget.removeTab(0)
         w2.close()
         qapp.processEvents()
+
+
+class TestRuntimeScale:
+    def test_saved_scale_waits_for_restart_but_theme_changes_live(self, window):
+        startup_scale = window._runtime_ui_scale
+        window.config["ui_scale"] = 200 if startup_scale != 200 else 75
+        window.config["theme_mode"] = "dark"
+        window.apply_theme()
+        assert float(window._theme["ui_scale"]) == float(startup_scale)
+        assert window._theme["mode"] == "dark"
 
 
 class TestStopButton:

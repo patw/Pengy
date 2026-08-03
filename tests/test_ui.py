@@ -21,7 +21,7 @@ pytest.importorskip("PySide6", reason="PySide6 not installed")
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from pengy.ui import chat_history as chat_history_mod
 from pengy.ui.chat_history import ChatHistoryWidget
@@ -76,6 +76,138 @@ def height_for(qapp, edit, text: str) -> int:
 
 def lines(count: int) -> str:
     return "\n".join(f"line {i}" for i in range(count))
+
+
+# ────────────────────────────────────────────────────────────────────
+# Unified desktop text scaling
+# ────────────────────────────────────────────────────────────────────
+
+class TestUnifiedTextScaling:
+    @pytest.mark.parametrize("scale,factor", [(75, 0.75), (100, 1.0), (150, 1.5), (200, 2.0)])
+    def test_scale_factor_is_direct_pengy_multiplier(self, scale, factor):
+        from pengy.ui.theme import ui_scale_factor
+
+        assert ui_scale_factor({"ui_scale": scale}) == pytest.approx(factor)
+
+    def test_external_qt_scale_factor_is_not_folded_into_preference(self, monkeypatch):
+        from pengy.ui.theme import ui_scale_factor
+
+        monkeypatch.setenv("QT_SCALE_FACTOR", "2.5")
+        assert ui_scale_factor({"ui_scale": 150}) == pytest.approx(1.5)
+
+    @pytest.mark.parametrize("scale", [75, 100, 150, 200])
+    def test_ui_and_chat_font_roles_scale_proportionally(self, qapp, scale):
+        from pengy.ui.theme import chat_font, ui_font
+
+        ui_base = ui_font({"ui_scale": 100}).pointSizeF()
+        chat_base = chat_font({"ui_scale": 100}).pointSizeF()
+        factor = scale / 100
+        assert ui_font({"ui_scale": scale}).pointSizeF() == pytest.approx(ui_base * factor)
+        assert chat_font({"ui_scale": scale}).pointSizeF() == pytest.approx(chat_base * factor)
+
+    @pytest.mark.parametrize("scale", [75, 100, 150, 200])
+    def test_input_and_output_share_chat_font(self, qapp, scale):
+        from pengy.ui.chat_input import ChatInputWidget
+        from pengy.ui.chat_view import ChatView
+        from pengy.ui.theme import get_theme
+
+        theme = get_theme({"ui_scale": scale, "theme_mode": "light"})
+        input_widget = ChatInputWidget()
+        output_widget = ChatView()
+        input_widget.apply_theme(theme)
+        output_widget.apply_theme(theme)
+        assert input_widget._edit.font().pointSizeF() == pytest.approx(output_widget.font().pointSizeF())
+        assert input_widget._edit.document().defaultFont().pointSizeF() == pytest.approx(
+            output_widget.document().defaultFont().pointSizeF()
+        )
+        input_widget.deleteLater()
+        output_widget.deleteLater()
+
+    def test_global_stylesheet_carries_scaled_system_font(self, qapp):
+        from pengy.ui.theme import get_theme, qt_app_stylesheet, ui_font
+
+        theme = get_theme({"ui_scale": 175, "theme_mode": "light"})
+        css = qt_app_stylesheet(theme)
+        expected = f"{ui_font(theme).pointSizeF():.2f}".rstrip("0").rstrip(".")
+        assert f"font-size: {expected}pt" in css
+        assert f'font-family: "{ui_font(theme).family()}"' in css
+
+    def test_primary_sidebar_metrics_scale(self, qapp):
+        from pengy.ui.chat_history import ChatHistoryWidget
+        from pengy.ui.theme import get_theme, scaled_size
+
+        theme = get_theme({"ui_scale": 175, "theme_mode": "light"})
+        sidebar = ChatHistoryWidget()
+        sidebar.apply_theme(theme)
+        assert sidebar.settings_btn.height() == scaled_size(36, theme)
+        assert sidebar.settings_btn.iconSize().width() == scaled_size(16, theme)
+        sidebar.deleteLater()
+
+    def test_chat_document_css_uses_relative_sizes(self, qapp):
+        from pengy.ui.chat_view import _build_css
+        from pengy.ui.theme import get_theme
+
+        css = _build_css(get_theme({"ui_scale": 200, "theme_mode": "dark"}))
+        assert "font-size: 1em" in css
+        assert "font-size:0.9em" in css
+        assert "font-size:0.85em" in css
+        assert "font-size:1.4em" in css
+        assert not __import__("re").search(r"font-size\s*:\s*[0-9.]+pt", css)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Modal dialog lifetime
+# ────────────────────────────────────────────────────────────────────
+
+class TestDialogLifetime:
+    def test_settings_fields_survive_accepted_exec(self, qapp):
+        """Callers read fields after exec(); Qt must not delete them on close."""
+        from pengy.core.config import load_config
+        from pengy.ui.settings_dialog import SettingsDialog
+
+        config = load_config()
+        dialog = SettingsDialog(config)
+        dialog.accept()
+        qapp.processEvents()
+        assert dialog.result() == dialog.DialogCode.Accepted
+        result = dialog.get_config()
+        assert result["base_url"] == dialog.base_url_input.text()
+
+
+# ────────────────────────────────────────────────────────────────────
+# Portable SVG icons
+# ────────────────────────────────────────────────────────────────────
+
+class TestPortableIcons:
+    def test_all_bundled_icons_render(self, qapp):
+        from pengy.ui.icons import themed_icon
+
+        names = (
+            "settings", "delete", "save", "play", "edit", "refresh",
+            "close", "stop", "attach", "tasks", "new-chat", "file", "image",
+        )
+        for name in names:
+            pixmap = themed_icon(name, "#123456").pixmap(24, 24)
+            assert not pixmap.isNull(), name
+
+    def test_button_records_portable_icon_name(self, qapp):
+        from pengy.ui.icons import apply_button_icon
+        from pengy.ui.theme import get_theme
+
+        button = QPushButton()
+        apply_button_icon(button, "settings", get_theme())
+        assert button.property("pengyIcon") == "settings"
+        assert not button.icon().isNull()
+
+    def test_main_controls_no_longer_depend_on_emoji(self, chat_input, qapp):
+        sidebar = ChatHistoryWidget()
+        assert sidebar.settings_btn.text() == "Settings"
+        assert sidebar.tasks_btn.text() == "Tasks"
+        assert sidebar.settings_btn.property("pengyIcon") == "settings"
+        assert sidebar.tasks_btn.property("pengyIcon") == "tasks"
+        assert chat_input._attach_btn.text() == ""
+        assert chat_input._attach_btn.property("pengyIcon") == "attach"
+        sidebar.deleteLater()
 
 
 # ────────────────────────────────────────────────────────────────────

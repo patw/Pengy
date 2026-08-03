@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 
 from pengy.core import task_manager
 from pengy.ui.theme import get_theme
+from pengy.ui.icons import apply_button_icon
 
 
 class TasksDialog(QDialog):
@@ -23,7 +24,6 @@ class TasksDialog(QDialog):
 
     def __init__(self, theme: dict[str, str] | None = None, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._theme = theme or get_theme()
         self._tasks: list[dict] = []
         self.setWindowTitle("Tasks")
@@ -45,7 +45,7 @@ class TasksDialog(QDialog):
         header_layout.addWidget(title)
         header_layout.addStretch()
 
-        self._new_btn = QPushButton("+ New Template")
+        self._new_btn = QPushButton("New Template")
         self._new_btn.clicked.connect(self._new_task)
         header_layout.addWidget(self._new_btn)
         layout.addWidget(header)
@@ -74,6 +74,8 @@ class TasksDialog(QDialog):
                 border-radius: 6px;
             }}
         """)
+        apply_button_icon(self._new_btn, "new-chat", theme, size=16,
+                          color_role="primary_fg", active_role="primary_fg")
         self._new_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {theme['primary']}; color: {theme['primary_fg']};
@@ -143,23 +145,30 @@ class TasksDialog(QDialog):
             QPushButton:hover {{ background-color: {self._theme['hover']}; }}
         """
 
-        play_btn = QPushButton("▶")
+        play_btn = QPushButton()
         play_btn.setFixedSize(28, 28)
         play_btn.setToolTip("Play task")
+        play_btn.setAccessibleName("Play task")
+        apply_button_icon(play_btn, "play", self._theme, size=16)
         play_btn.setStyleSheet(btn_style)
         play_btn.clicked.connect(lambda: self._play_task(task))
         layout.addWidget(play_btn)
 
-        edit_btn = QPushButton("✏")
+        edit_btn = QPushButton()
         edit_btn.setFixedSize(28, 28)
         edit_btn.setToolTip("Edit task")
+        edit_btn.setAccessibleName("Edit task")
+        apply_button_icon(edit_btn, "edit", self._theme, size=16)
         edit_btn.setStyleSheet(btn_style)
         edit_btn.clicked.connect(lambda: self._edit_task(task))
         layout.addWidget(edit_btn)
 
-        del_btn = QPushButton("🗑")
+        del_btn = QPushButton()
         del_btn.setFixedSize(28, 28)
         del_btn.setToolTip("Delete task")
+        del_btn.setAccessibleName("Delete task")
+        apply_button_icon(del_btn, "delete", self._theme, size=16,
+                          active_role="danger")
         del_btn.setStyleSheet(btn_style)
         del_btn.clicked.connect(lambda: self._delete_task(task))
         layout.addWidget(del_btn)
@@ -215,7 +224,6 @@ class TaskEditDialog(QDialog):
 
     def __init__(self, task: dict | None = None, theme: dict[str, str] | None = None, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._task = task or {}
         self._theme = theme or get_theme()
         self.setWindowTitle("Edit Task" if task else "New Task")
@@ -280,7 +288,6 @@ class PlaceholderDialog(QDialog):
 
     def __init__(self, placeholders: list[str], theme: dict[str, str] | None = None, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._placeholders = placeholders
         self._theme = theme or get_theme()
         self._inputs: dict[str, QLineEdit] = {}

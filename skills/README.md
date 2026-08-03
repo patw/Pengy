@@ -69,6 +69,8 @@ it says without reading the script.
 | plot/ | matplotlib charts (line, bar, scatter, pie, hist) → PNGs |
 | tts/ | Text-to-speech on Ubuntu (spd-say, espeak-ng, piper, gtts-cli) |
 | weather/ | Fetch weather from tomorrow.io |
+| repo_mapping/ | Map repository boundaries, entry points, features, tests, and build systems |
+| test_orchestrator/ | Run focused/full checks, investigate failures, classify regressions, and summarize results |
 | user_profile/ | User profile — who you are, where you live, what you do |
 | pengy_bio/ | Pengy's own bio — who I am, where I'm installed, how I work |
 ```

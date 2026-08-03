@@ -1,5 +1,6 @@
 """Tool definitions and execution for Pengy."""
 import concurrent.futures
+import difflib
 import fnmatch
 import os
 import re
@@ -25,6 +26,13 @@ READONLY_TOOLS = frozenset({
     "search_content", "web_search", "fetch_url",
     "glob", "todowrite",
 })
+
+# apply_changes safety limits. The tool is deliberately transactional and
+# conservative: validate everything in memory before writing anything.
+_MAX_CHANGE_FILES = 20
+_MAX_CHANGE_OPERATIONS = 100
+_MAX_CHANGE_BYTES = 1_000_000
+_MAX_CHANGE_BLOCK = 256_000
 
 def _kill_proc_group(proc):
     """SIGKILL a subprocess's whole process group and reap it."""
@@ -206,6 +214,59 @@ TOOLS = [
                     },
                 },
                 "required": ["path", "old_str", "new_str"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_changes",
+            "description": "Apply a bounded, transactional set of exact-text edits across files. All operations are validated in memory first; if any operation fails, no files are changed. Use dry_run=true to preview the unified diff before writing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "changes": {
+                        "type": "array",
+                        "description": "Files and exact-text operations to apply.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "description": "File path to edit"},
+                                "operations": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "kind": {"type": "string", "enum": ["replace", "insert_after", "delete"]},
+                                            "old": {"type": "string", "description": "Exact text to match for replace/delete"},
+                                            "anchor": {"type": "string", "description": "Exact text after which to insert"},
+                                            "new": {"type": "string", "description": "Replacement text"},
+                                            "text": {"type": "string", "description": "Text to insert"},
+                                            "expected_matches": {"type": "integer", "description": "Expected exact match count; defaults to 1"},
+                                        },
+                                        "required": ["kind"],
+                                    },
+                                },
+                            },
+                            "required": ["path", "operations"],
+                        },
+                    },
+                    "dry_run": {"type": "boolean", "description": "Validate and return a diff without writing files (default: false)"},
+                    "postconditions": {
+                        "type": "array",
+                        "description": "Optional content checks evaluated before writing.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "contains": {"type": "string"},
+                                "does_not_contain": {"type": "string"},
+                            },
+                            "required": ["path"],
+                        },
+                    },
+                },
+                "required": ["changes"],
             },
         },
     },
@@ -497,6 +558,12 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
         return _write_file(arguments["path"], arguments["content"])
     elif name == "replace_in_file":
         return _replace_in_file(arguments["path"], arguments["old_str"], arguments["new_str"])
+    elif name == "apply_changes":
+        return _apply_changes(
+            arguments.get("changes", []),
+            arguments.get("dry_run", False),
+            arguments.get("postconditions", []),
+        )
     elif name == "run_bash":
         return _run_bash(arguments["command"], ctx)
     elif name == "web_search":
@@ -636,6 +703,158 @@ def _replace_in_file(path: str, old_str: str, new_str: str) -> str:
         return f"Error: {path} is a binary file (not UTF-8)."
     except Exception as e:
         return f"Error replacing text in file: {e}"
+
+
+def _apply_changes(changes: list[dict], dry_run: bool = False,
+                   postconditions: list[dict] | None = None) -> str:
+    """Apply exact-text changes transactionally and return a reviewable diff."""
+    postconditions = postconditions or []
+    if not isinstance(changes, list) or not changes:
+        return "Error: changes must be a non-empty list."
+    if len(changes) > _MAX_CHANGE_FILES:
+        return f"Error: too many files ({len(changes)}). Maximum is {_MAX_CHANGE_FILES}."
+    if not isinstance(postconditions, list) or len(postconditions) > _MAX_CHANGE_FILES:
+        return f"Error: too many postconditions. Maximum is {_MAX_CHANGE_FILES}."
+
+    prepared: dict[Path, tuple[str, str]] = {}
+    total_ops = 0
+    total_bytes = 0
+    errors: list[str] = []
+
+    def resolve(raw_path: str) -> Path:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError("path must be a non-empty string")
+        p = Path(raw_path).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        p = p.resolve()
+        return p
+
+    for file_index, change in enumerate(changes):
+        if not isinstance(change, dict):
+            errors.append(f"file {file_index}: must be an object")
+            continue
+        try:
+            path = resolve(change.get("path"))
+            if path in prepared:
+                raise ValueError("duplicate path; combine operations for the file")
+            if not path.exists():
+                raise ValueError("file not found")
+            if not path.is_file():
+                raise ValueError("not a file")
+            original = path.read_text(encoding="utf-8")
+            current = original
+            operations = change.get("operations")
+            if not isinstance(operations, list) or not operations:
+                raise ValueError("operations must be a non-empty list")
+            total_ops += len(operations)
+            if total_ops > _MAX_CHANGE_OPERATIONS:
+                raise ValueError(f"too many operations; maximum is {_MAX_CHANGE_OPERATIONS}")
+
+            for op_index, op in enumerate(operations):
+                if not isinstance(op, dict):
+                    raise ValueError(f"operation {op_index}: must be an object")
+                kind = op.get("kind")
+                expected = op.get("expected_matches", 1)
+                if not isinstance(expected, int) or expected < 1:
+                    raise ValueError(f"operation {op_index}: expected_matches must be a positive integer")
+                if kind == "replace":
+                    old, new = op.get("old"), op.get("new")
+                    if not isinstance(old, str) or not old:
+                        raise ValueError(f"operation {op_index}: old must be non-empty")
+                    if not isinstance(new, str):
+                        raise ValueError(f"operation {op_index}: new must be a string")
+                    if len(old) > _MAX_CHANGE_BLOCK or len(new) > _MAX_CHANGE_BLOCK:
+                        raise ValueError(f"operation {op_index}: text block exceeds {_MAX_CHANGE_BLOCK} bytes")
+                    count = current.count(old)
+                    if count != expected:
+                        raise ValueError(f"operation {op_index}: old matches {count} locations; expected {expected}")
+                    current = current.replace(old, new, expected)
+                elif kind == "delete":
+                    old = op.get("old")
+                    if not isinstance(old, str) or not old:
+                        raise ValueError(f"operation {op_index}: old must be non-empty")
+                    if len(old) > _MAX_CHANGE_BLOCK:
+                        raise ValueError(f"operation {op_index}: text block exceeds {_MAX_CHANGE_BLOCK} bytes")
+                    count = current.count(old)
+                    if count != expected:
+                        raise ValueError(f"operation {op_index}: old matches {count} locations; expected {expected}")
+                    current = current.replace(old, "", expected)
+                elif kind == "insert_after":
+                    anchor, text = op.get("anchor"), op.get("text")
+                    if not isinstance(anchor, str) or not anchor:
+                        raise ValueError(f"operation {op_index}: anchor must be non-empty")
+                    if not isinstance(text, str):
+                        raise ValueError(f"operation {op_index}: text must be a string")
+                    if len(anchor) > _MAX_CHANGE_BLOCK or len(text) > _MAX_CHANGE_BLOCK:
+                        raise ValueError(f"operation {op_index}: text block exceeds {_MAX_CHANGE_BLOCK} bytes")
+                    count = current.count(anchor)
+                    if count != expected:
+                        raise ValueError(f"operation {op_index}: anchor matches {count} locations; expected {expected}")
+                    current = current.replace(anchor, anchor + text, expected)
+                else:
+                    raise ValueError(f"operation {op_index}: unknown kind {kind!r}")
+
+            total_bytes += len(original.encode("utf-8")) + len(current.encode("utf-8"))
+            prepared[path] = (original, current)
+        except UnicodeDecodeError:
+            errors.append(f"{change.get('path', file_index)}: binary or non-UTF-8 file")
+        except (OSError, ValueError) as exc:
+            errors.append(f"{change.get('path', file_index)}: {exc}")
+
+    if total_bytes > _MAX_CHANGE_BYTES:
+        errors.append(f"result exceeds {_MAX_CHANGE_BYTES} bytes")
+
+    # Postconditions inspect proposed contents, not the files on disk.
+    proposed = {str(path): new for path, (_, new) in prepared.items()}
+    for index, condition in enumerate(postconditions):
+        if not isinstance(condition, dict):
+            errors.append(f"postcondition {index}: must be an object")
+            continue
+        try:
+            path = resolve(condition.get("path"))
+            content = proposed.get(str(path))
+            if content is None:
+                content = path.read_text(encoding="utf-8")
+            contains = condition.get("contains")
+            missing = condition.get("does_not_contain")
+            if contains is not None and (not isinstance(contains, str) or contains not in content):
+                errors.append(f"postcondition {index}: {condition.get('path')} does not contain expected text")
+            if missing is not None and (not isinstance(missing, str) or missing in content):
+                errors.append(f"postcondition {index}: {condition.get('path')} still contains forbidden text")
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            errors.append(f"postcondition {index}: {exc}")
+
+    if errors:
+        return "Error: no changes applied.\n" + "\n".join(f"- {error}" for error in errors)
+
+    diff_parts = []
+    for path, (original, current) in prepared.items():
+        if original != current:
+            diff_parts.extend(difflib.unified_diff(
+                original.splitlines(keepends=True), current.splitlines(keepends=True),
+                fromfile=str(path), tofile=str(path),
+            ))
+    diff = "".join(diff_parts)
+    if dry_run:
+        return f"Dry run: no changes applied.\nFiles: {len(prepared)}\n\n{diff}".rstrip()
+
+    try:
+        for path, (_, current) in prepared.items():
+            temp = path.with_name(f".{path.name}.pengy-tmp-{os.getpid()}-{threading.get_ident()}")
+            temp.write_text(current, encoding="utf-8")
+            os.replace(temp, path)
+    except OSError as exc:
+        # Best effort cleanup; validation still guarantees no writes before this point.
+        for path in prepared:
+            temp = path.with_name(f".{path.name}.pengy-tmp-{os.getpid()}-{threading.get_ident()}")
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+        return f"Error: write failed after validation; changes may be partially applied: {exc}"
+
+    return f"Applied changes to {len(prepared)} file(s).\n\n{diff}".rstrip()
 
 
 def _run_bash(command: str, ctx: "ToolContext" = None) -> str:

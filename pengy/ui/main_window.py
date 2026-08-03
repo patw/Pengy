@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout,
     QDialog, QPushButton, QDialogButtonBox, QLabel, QInputDialog, QLineEdit,
     QApplication, QPlainTextEdit, QTabWidget, QToolButton, QRadioButton,
-    QButtonGroup, QScrollArea, QGroupBox,
+    QButtonGroup, QScrollArea, QGroupBox, QTabBar,
 )
 from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QTextOption
@@ -26,6 +26,7 @@ from pengy.ui.chat_worker import ChatWorker
 from pengy.ui.settings_dialog import SettingsDialog
 from pengy.ui.tasks_dialog import TasksDialog
 from pengy.ui.theme import get_theme, qt_app_stylesheet, scaled_size
+from pengy.ui.icons import apply_button_icon
 
 
 @dataclass
@@ -49,6 +50,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = load_config()
         self.llm_client = None
+        # UI scale is fixed for this process. Theme/accent can change live, but
+        # changing typography and geometry piecemeal leaves QTextDocuments and
+        # existing size hints in inconsistent states across platforms.
+        self._runtime_ui_scale = self.config.get("ui_scale", 100)
         self._theme = get_theme(self.config)
 
         # tab state
@@ -112,9 +117,13 @@ class MainWindow(QMainWindow):
         right_splitter = QSplitter(Qt.Orientation.Vertical)
 
         self.tab_widget = QTabWidget()
-        self.tab_widget.setTabsClosable(True)
+        # Qt's platform styles disagree on alignment and close-button side.
+        # Use our own right-side close buttons for predictable placement and
+        # theme contrast on macOS, Linux, and Windows.
+        self.tab_widget.setTabsClosable(False)
         self.tab_widget.setMovable(True)
         self.tab_widget.setUsesScrollButtons(True)
+        self.tab_widget.tabBar().setExpanding(False)
         self.tab_widget.tabCloseRequested.connect(self._close_tab)
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
         right_splitter.addWidget(self.tab_widget)
@@ -128,7 +137,9 @@ class MainWindow(QMainWindow):
         self.chat_input.message_sent.connect(self.send_message)
         input_layout.addWidget(self.chat_input)
 
-        self._stop_btn = QPushButton("⏹ Stop")
+        self._stop_btn = QPushButton("Stop")
+        apply_button_icon(self._stop_btn, "stop", self._theme, size=16,
+                          color_role="primary_fg", active_role="primary_fg")
         self._stop_btn.setFixedHeight(scaled_size(32, self._theme))
         self._stop_btn.clicked.connect(self._stop_worker)
         self._stop_btn.hide()
@@ -165,6 +176,7 @@ class MainWindow(QMainWindow):
         self.open_tabs[chat["id"]] = session
         title = chat.get("title", "New Chat")[:30]
         idx = self.tab_widget.addTab(chat_view, title)
+        self._install_tab_close_button(idx)
 
         if switch_to:
             self.tab_widget.setCurrentIndex(idx)
@@ -172,8 +184,36 @@ class MainWindow(QMainWindow):
         self._save_open_tabs()
         return session
 
+    def _install_tab_close_button(self, index: int):
+        """Install a movable-tab-safe, themed close button on the right."""
+        button = QToolButton(self.tab_widget.tabBar())
+        button.setAutoRaise(True)
+        button.setCursor(Qt.CursorShape.ArrowCursor)
+        button.setToolTip("Close tab")
+        button.setAccessibleName("Close tab")
+        button.setFixedSize(scaled_size(22, self._theme), scaled_size(22, self._theme))
+        apply_button_icon(button, "close", self._theme,
+                          size=scaled_size(13, self._theme),
+                          color_role="muted", active_role="danger")
+        button.setStyleSheet(f"""
+            QToolButton {{ background: transparent; border: none; border-radius: 5px; padding: 3px; }}
+            QToolButton:hover {{ background: {self._theme['hover']}; }}
+            QToolButton:focus {{ border: 1px solid {self._theme['focus']}; }}
+        """)
+        # Look up the current index at click time: tabs are movable, so a
+        # captured numeric index becomes stale after the user reorders them.
+        button.clicked.connect(lambda _checked=False, b=button: self._close_tab(
+            next((i for i in range(self.tab_widget.count())
+                  if self.tab_widget.tabBar().tabButton(i, QTabBar.ButtonPosition.RightSide) is b), -1)
+        ))
+        self.tab_widget.tabBar().setTabButton(
+            index, QTabBar.ButtonPosition.RightSide, button
+        )
+
     def _close_tab(self, index: int):
         """Close a tab: save chat, clean worker, remove from state."""
+        if index < 0:
+            return
         chat_view = self.tab_widget.widget(index)
         # Find which session owns this chat_view
         chat_id = None
@@ -282,14 +322,18 @@ class MainWindow(QMainWindow):
     # ── Theme ─────────────────────────────────────────────────────
 
     def apply_theme(self):
-        """Apply the current appearance settings to the main window and child widgets."""
-        self._theme = get_theme(self.config)
+        """Apply live colors while retaining this process's startup UI scale."""
+        runtime_config = dict(self.config)
+        runtime_config["ui_scale"] = self._runtime_ui_scale
+        self._theme = get_theme(runtime_config)
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(qt_app_stylesheet(self._theme))
         self.chat_input.apply_theme(self._theme)
         self.chat_history.apply_theme(self._theme)
         self._stop_btn.setFixedHeight(scaled_size(32, self._theme))
+        apply_button_icon(self._stop_btn, "stop", self._theme, size=16,
+                          color_role="primary_fg", active_role="primary_fg")
         self._stop_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {self._theme['danger']};
@@ -302,9 +346,22 @@ class MainWindow(QMainWindow):
             }}
             QPushButton:hover {{ background-color: {self._theme['danger_hover']}; }}
         """)
-        # Re-theme all open chat views
+        # Re-theme all open chat views and their custom tab controls.
         for session in self.open_tabs.values():
             session.chat_view.apply_theme(self._theme)
+        bar = self.tab_widget.tabBar()
+        for i in range(self.tab_widget.count()):
+            button = bar.tabButton(i, QTabBar.ButtonPosition.RightSide)
+            if button:
+                button.setFixedSize(scaled_size(22, self._theme), scaled_size(22, self._theme))
+                apply_button_icon(button, "close", self._theme,
+                                  size=scaled_size(13, self._theme),
+                                  color_role="muted", active_role="danger")
+                button.setStyleSheet(f"""
+                    QToolButton {{ background: transparent; border: none; border-radius: 5px; padding: 3px; }}
+                    QToolButton:hover {{ background: {self._theme['hover']}; }}
+                    QToolButton:focus {{ border: 1px solid {self._theme['focus']}; }}
+                """)
 
     def update_llm_client(self):
         """Recreate the LLM client with current config."""
@@ -831,7 +888,6 @@ class QuestionDialog(QDialog):
 
     def __init__(self, tab_title: str, questions: list[dict], theme: dict, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.answers: list[str] = []
         self._button_groups: list[QButtonGroup] = []
         self.setup_ui(tab_title, questions, theme)
@@ -981,7 +1037,6 @@ class ToolConfirmDialog(QDialog):
 
     def __init__(self, tool_info: dict, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.confirmed = False
         self.yolo_turn = False
         self.setup_ui(tool_info)
