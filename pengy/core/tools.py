@@ -1485,13 +1485,44 @@ _GLOB_SKIP_CONTENTS = {
 
 
 
+def _extract_dir_from_glob_pattern(pattern: str) -> tuple[str, str] | None:
+    """When a pattern like ``~/src/*.rs`` is given without an explicit *path*,
+    walk up from the expanded pattern until we find an existing directory,
+    returning ``(dir_path, file_pattern)``."""
+    expanded = Path(pattern).expanduser()
+    current = expanded
+    while True:
+        parent = current.parent
+        if parent == current or str(parent) == ".":
+            break
+        if parent.exists() and parent.is_dir():
+            dir_str = str(parent)
+            file_part = expanded.name
+            # Preserve **/ prefix if the original had it
+            if "**/" in pattern:
+                file_part = "**/" + file_part
+            return dir_str, file_part
+        current = parent
+    return None
+
+
 def _glob(pattern: str, path: str | None = None) -> str:
     """Find files matching a glob pattern.
 
     Uses Python's pathlib which supports ** for recursive matching.
     Skips noise directories like .git, node_modules, __pycache__.
     Returns up to 200 matching paths sorted by name, with file sizes.
+
+    When no explicit *path* is given and *pattern* contains ``/``, the
+    longest existing directory prefix is extracted from the pattern so
+    that ``~/src/*.py`` works without a separate path argument.
     """
+    # Extract directory prefix from pattern when no explicit path given
+    if path is None and "/" in pattern:
+        extracted = _extract_dir_from_glob_pattern(pattern)
+        if extracted is not None:
+            path, pattern = extracted
+
     try:
         root = Path(path).expanduser().resolve() if path else Path.cwd()
     except Exception as e:

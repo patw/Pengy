@@ -905,6 +905,39 @@ class TestGlob:
         result = execute_tool("glob", {"pattern": "*", "path": str(tmp_path)})
         assert "mydir/" in result
 
+    def test_glob_dir_prefix_in_pattern(self, tmp_path):
+        """Pattern with directory prefix extracts it as search dir."""
+        from pengy.core.tools import execute_tool
+        (tmp_path / "a.py").write_text("x")
+        (tmp_path / "b.rs").write_text("y")
+        result = execute_tool("glob", {"pattern": f"{tmp_path}/*.py"})
+        assert "a.py" in result
+        assert "b.rs" not in result
+
+    def test_glob_exact_file_in_pattern(self, tmp_path):
+        """Pattern pointing to a specific file finds it."""
+        from pengy.core.tools import execute_tool
+        (tmp_path / "target.rs").write_text("content")
+        result = execute_tool("glob", {"pattern": f"{tmp_path}/target.rs"})
+        assert "target.rs" in result
+
+    def test_glob_dir_prefix_with_recursive(self, tmp_path):
+        """Pattern with ** and directory prefix preserves recursion."""
+        from pengy.core.tools import execute_tool
+        (tmp_path / "a.py").write_text("x")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "b.py").write_text("y")
+        result = execute_tool("glob", {"pattern": f"{tmp_path}/**/*.py"})
+        assert "a.py" in result
+        assert "sub/b.py" in result
+
+    def test_glob_explicit_path_takes_precedence(self, tmp_path):
+        """When path is explicitly provided, use it directly."""
+        from pengy.core.tools import execute_tool
+        (tmp_path / "a.py").write_text("x")
+        result = execute_tool("glob", {"pattern": "*.py", "path": str(tmp_path)})
+        assert "a.py" in result
+
 
 class TestTodowrite:
     """Tests for the todowrite tool."""

@@ -1017,6 +1017,13 @@ class QuestionDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
+        # Size to fit content, with reasonable limits
+        scroll_widget.adjustSize()
+        from PySide6.QtCore import QSize
+        ideal_w = min(scroll_widget.sizeHint().width() + 40, 680)
+        ideal_h = min(scroll_widget.sizeHint().height() + 140, 650)
+        self.resize(max(ideal_w, 480), max(ideal_h, 280))
+
     def _on_submit(self):
         """Collect answers from all button groups."""
         self.answers = []
