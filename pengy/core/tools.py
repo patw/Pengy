@@ -1391,7 +1391,7 @@ def _search_content(pattern: str, path: str, file_glob: str | None,
     )
     if truncated:
         summary += " (results truncated)"
-    return summary + "\n" + "─" * 60 + "\n" + out
+    return _snip_tool_output(summary + "\n" + "─" * 60 + "\n" + out)
 
 
 def _search_one_file(filepath: Path, compiled: "re.Pattern",
