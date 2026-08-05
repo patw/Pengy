@@ -317,8 +317,9 @@ class PengyCLI:
         while True:
             try:
                 title = self.current_chat.get("title", "?") if self.current_chat else "?"
-                prompt_label = f"[bold blue]{_truncate(title, 30)} › You[/bold blue]"
-                raw = Prompt.ask(f"\n{prompt_label}")
+                prompt_label = f"\n[bold blue]{_truncate(title, 30)} › You[/bold blue] "
+                self.console.print(prompt_label, end="")
+                raw = input()
             except (KeyboardInterrupt, EOFError):
                 raise
 
@@ -326,7 +327,8 @@ class PengyCLI:
             if not text:
                 continue
 
-            # Add to readline history
+            # Add to readline history — readline hooks input() so history
+            # may already be recorded, but we add explicitly for robustness.
             try:
                 import readline
                 readline.add_history(text)
@@ -1213,12 +1215,19 @@ class PengyCLI:
                 save_chat(chat)
 
     def _show_thinking(self):
-        """Print the 'Thinking…' indicator."""
-        self.console.print("[dim]⏳ Thinking…[/dim]", end="\r")
+        """Print the 'Thinking…' indicator using raw ANSI.
+
+        Uses \\r (carriage return) + \\033[K (clear-to-end-of-line)
+        so the indicator disappears cleanly on the next write, without
+        conflicting with readline's own terminal management.
+        """
+        sys.stdout.write("\r\033[K⏳ Thinking…")
+        sys.stdout.flush()
 
     def _clear_thinking(self):
         """Clear the 'Thinking…' line."""
-        self.console.print(" " * 40, end="\r")
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
 
     # ------------------------------------------------------------------
     # rendering helpers
