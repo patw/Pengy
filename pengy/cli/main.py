@@ -102,6 +102,12 @@ def _setup_readline() -> Path | None:
     return hist_file
 
 
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+BLUE = "\033[34m"
+
+
 # ---------------------------------------------------------------------------
 # friendly import guard for the CLI extra
 # ---------------------------------------------------------------------------
@@ -317,8 +323,9 @@ class PengyCLI:
         while True:
             try:
                 title = self.current_chat.get("title", "?") if self.current_chat else "?"
-                prompt_label = f"\n[bold blue]{_truncate(title, 30)} › You[/bold blue] "
-                self.console.print(prompt_label, end="")
+                prompt_str = f"\n{BLUE}{BOLD}{_truncate(title, 30)} › You{RESET} "
+                sys.stdout.write(prompt_str)
+                sys.stdout.flush()
                 raw = input()
             except (KeyboardInterrupt, EOFError):
                 raise
