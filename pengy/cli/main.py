@@ -142,13 +142,8 @@ from rich.text import Text
 
 def _print_version():
     """Print the Pengy version and exit."""
-    try:
-        from importlib.metadata import version as _v
-        ver = _v("pengy")
-    except Exception:
-        from pengy import __version__
-        ver = __version__
-    print(f"Pengy v{ver}")
+    from pengy import __version__
+    print(f"Pengy v{__version__}")
 
 
 
@@ -227,7 +222,7 @@ class PengyCLI:
 
     def run_interactive(self):
         """Start the interactive REPL."""
-        _setup_readline()  # enable ↑↓ history if readline is available
+        # Startup banner
         self.console.print()
         self.console.print(
             Panel.fit(
@@ -326,21 +321,16 @@ class PengyCLI:
                 prompt_str = f"\n{BLUE}{BOLD}{_truncate(title, 30)} › You{RESET} "
                 sys.stdout.write(prompt_str)
                 sys.stdout.flush()
-                raw = input()
+                raw = sys.stdin.readline()
+                if not raw:
+                    raise EOFError
+                raw = raw.rstrip("\n")
             except (KeyboardInterrupt, EOFError):
                 raise
 
             text = raw.strip()
             if not text:
                 continue
-
-            # Add to readline history — readline hooks input() so history
-            # may already be recorded, but we add explicitly for robustness.
-            try:
-                import readline
-                readline.add_history(text)
-            except ImportError:
-                pass
 
             if text.startswith("/"):
                 self._handle_slash(text)

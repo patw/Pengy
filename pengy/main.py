@@ -3,13 +3,9 @@ import sys
 
 
 def _get_version() -> str:
-    """Return the Pengy version string (actual build version)."""
-    try:
-        from importlib.metadata import version as _v
-        return _v("pengy")
-    except Exception:
-        from pengy import __version__
-        return __version__
+    """Return the Pengy version string."""
+    from pengy import __version__
+    return __version__
 
 
 def _show_help(exit_code: int = 0):
