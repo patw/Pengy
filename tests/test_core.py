@@ -1050,6 +1050,64 @@ class TestToolContext:
         result = execute_tool("run_bash", {"command": "sudo true"}, ctx)
         assert "no password provider" in result
 
+    def test_sudo_uses_askpass_not_stdin(self, tmp_path):
+        """sudo must authenticate via SUDO_ASKPASS so the shell's stdin stays free.
+
+        Covers the shapes that the old `sudo -S` + stdin-pipe approach broke:
+        a pipeline, a redirect, an earlier command that consumes stdin, and
+        more than one sudo in a single command.
+        """
+        from pengy.core.tools import execute_tool, ToolContext
+
+        # Stub sudo: only succeeds when invoked with -A and a working askpass.
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        (fake_bin / "sudo").write_text(
+            '#!/bin/bash\n'
+            'if [ "$1" != "-A" ]; then echo "sudo: no tty present" >&2; exit 1; fi\n'
+            'shift\n'
+            'pw="$("$SUDO_ASKPASS")"\n'
+            'echo "pw=$pw"\n'
+            'exec "$@"\n'
+        )
+        (fake_bin / "sudo").chmod(0o755)
+
+        ctx = ToolContext(sudo_provider=lambda: "s3cret")
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{fake_bin}:{old_path}"
+        try:
+            for command in (
+                "sudo echo hi",                              # simple
+                "echo a; cat > /dev/null; sudo echo hi",     # stdin eaten earlier
+                "sudo echo one; sudo echo two",              # two sudos
+                "sudo echo hi < /dev/null",                  # stdin redirected
+                "sudo -S echo hi",                           # -S normalised to -A
+            ):
+                result = execute_tool("run_bash", {"command": command}, ctx)
+                assert "pw=s3cret" in result, f"{command!r} -> {result!r}"
+                assert "no tty present" not in result, f"{command!r} -> {result!r}"
+        finally:
+            os.environ["PATH"] = old_path
+
+    def test_askpass_never_writes_password_to_disk(self, tmp_path):
+        """The askpass helper reads the password from the env, not from a file."""
+        from pengy.core.tools import _AskpassHelper
+        helper = _AskpassHelper()
+        try:
+            contents = Path(helper.path).read_text()
+            assert "PENGY_SUDO_PASSWORD" in contents
+            # 0700: readable only by the owner.
+            assert oct(os.stat(helper.path).st_mode & 0o777) == "0o700"
+        finally:
+            helper.cleanup()
+        assert not Path(helper.path).exists()
+
+    def test_bash_stdin_is_not_the_parents(self):
+        """Commands get /dev/null on stdin so they can't hang reading the terminal."""
+        from pengy.core.tools import execute_tool
+        result = execute_tool("run_bash", {"command": "cat; echo done"})
+        assert "done" in result
+
     def test_kill_all_only_affects_own_context(self):
         """kill_all() on one context must not touch another's subprocess."""
         import subprocess

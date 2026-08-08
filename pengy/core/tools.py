@@ -857,13 +857,55 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
     return f"Applied changes to {len(prepared)} file(s).\n\n{diff}".rstrip()
 
 
+_SUDO_ANY_RE = re.compile(r'\bsudo\b')
+# `sudo -S` reads the password from stdin, which we no longer feed; drop the
+# flag so the askpass rewrite below applies to it too.
+_SUDO_STDIN_RE = re.compile(r'\bsudo\s+-S\b')
+# Matches a `sudo` word that isn't already carrying an askpass flag.
+_SUDO_RE = re.compile(r'\bsudo\b(?!\s+-A\b)')
+
+_ASKPASS_SCRIPT = '#!/bin/sh\nprintf \'%s\\n\' "$PENGY_SUDO_PASSWORD"\n'
+
+
+class _AskpassHelper:
+    """Temporary ``SUDO_ASKPASS`` helper script.
+
+    The password itself is never written to disk — the script just echoes the
+    ``PENGY_SUDO_PASSWORD`` environment variable we hand to the child process.
+    Using askpass instead of ``sudo -S`` keeps the shell's stdin untouched, so
+    pipelines (``echo x | sudo tee f``), redirects (``sudo cmd < /dev/null``),
+    chains where an earlier command reads stdin, and multiple sudo invocations
+    in one command all authenticate correctly.
+    """
+
+    def __init__(self):
+        self._dir = tempfile.mkdtemp(prefix="pengy-askpass-")
+        os.chmod(self._dir, 0o700)
+        self.path = os.path.join(self._dir, "askpass.sh")
+        with open(self.path, "w") as fh:
+            fh.write(_ASKPASS_SCRIPT)
+        os.chmod(self.path, 0o700)
+
+    def cleanup(self):
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+        try:
+            os.rmdir(self._dir)
+        except OSError:
+            pass
+
+
 def _run_bash(command: str, ctx: "ToolContext" = None) -> str:
     """Run a bash command."""
     ctx = ctx or _default_context
     proc = None
+    askpass = None
+    env = None
+    used_sudo = False
     try:
-        stdin_input = None
-        if re.search(r'\bsudo\b', command):
+        if _SUDO_ANY_RE.search(command):
             if ctx.sudo_provider is None:
                 return "Error: sudo detected but no password provider is configured."
             password = ctx.cached_sudo_password
@@ -872,27 +914,34 @@ def _run_bash(command: str, ctx: "ToolContext" = None) -> str:
                 if password is None:
                     return "Cancelled: sudo password not provided."
                 ctx.cached_sudo_password = password
-            command = re.sub(r'\bsudo\b(?!\s+-S)', 'sudo -S', command, count=1)
-            stdin_input = password + "\n"
+            used_sudo = True
+            # Every sudo in the command gets -A, not just the first one.
+            command = _SUDO_STDIN_RE.sub('sudo', command)
+            command = _SUDO_RE.sub('sudo -A', command)
+            askpass = _AskpassHelper()
+            env = os.environ.copy()
+            env["SUDO_ASKPASS"] = askpass.path
+            env["PENGY_SUDO_PASSWORD"] = password
 
         timeout = None if _tool_timeout == -1 else _tool_timeout
         proc = subprocess.Popen(
             command,
             shell=True,
-            stdin=subprocess.PIPE if stdin_input else None,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=True,
+            env=env,
         )
         ctx.register_process(proc)
         try:
-            stdout, stderr = proc.communicate(input=stdin_input, timeout=timeout)
+            stdout, stderr = proc.communicate(timeout=timeout)
         finally:
             ctx.unregister_process(proc)
 
         output = stdout or ""
-        if stdin_input:
+        if used_sudo:
             stderr = re.sub(r'^\[sudo[^]]*\].*\n?', '', stderr or "", flags=re.MULTILINE).strip()
         if stderr:
             output += "\n" + stderr
@@ -906,6 +955,9 @@ def _run_bash(command: str, ctx: "ToolContext" = None) -> str:
     except Exception as e:
         ctx.unregister_process(proc)
         return f"Error running command: {e}"
+    finally:
+        if askpass is not None:
+            askpass.cleanup()
 
 
 def _web_search(query: str, max_results: int = 5) -> str:
