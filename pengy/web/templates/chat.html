@@ -210,6 +210,7 @@ const CHAT_ID = {{ chat.id | tojson }};
 const HAS_ACTIVE_WORKER = {{ has_active_worker | tojson }};
 let isProcessing = false;
 let eventSource = null;
+let sseCursor = sessionStorage.getItem('pengy_sse_cursor_' + CHAT_ID) || '';
 let pendingToolCallId = null;
 let thinkingEl = null;
 let confirmModal, sudoModal, renameModal;
@@ -242,7 +243,9 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && isProcessing) {
       acquireWakeLock();
-      if (!eventSource || eventSource.readyState !== EventSource.OPEN) {
+      // CONNECTING is EventSource's normal automatic-reconnect state; do
+      // not replace it and lose its built-in Last-Event-ID cursor.
+      if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
         openSSE();
       }
     }
@@ -253,7 +256,9 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('pageshow', (event) => {
     if (event.persisted && isProcessing) {
       acquireWakeLock();
-      if (!eventSource || eventSource.readyState !== EventSource.OPEN) {
+      // CONNECTING is EventSource's normal automatic-reconnect state; do
+      // not replace it and lose its built-in Last-Event-ID cursor.
+      if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
         openSSE();
       }
     }
@@ -490,6 +495,9 @@ function doSend() {
 
   input.value = '';
   input.style.height = 'auto';
+  // A new task has a new server-side event log and ID sequence.
+  sseCursor = '';
+  sessionStorage.removeItem('pengy_sse_cursor_' + CHAT_ID);
 
   const placeholder = document.querySelector('#messagesArea .text-center.text-muted');
   if (placeholder) placeholder.remove();
@@ -597,12 +605,40 @@ document.getElementById('messageInput').addEventListener('input', function() {
   this.style.height = Math.min(this.scrollHeight, 180) + 'px';
 });
 
+// Mobile Firefox (and some other browsers) can leave the input hidden behind
+// the on-screen keyboard when it first gains focus. Force it into view.
+document.getElementById('messageInput').addEventListener('focus', () => {
+  setTimeout(() => {
+    const input = document.getElementById('messageInput');
+    if (window.visualViewport) {
+      const bottom = input.getBoundingClientRect().bottom;
+      const viewportBottom = window.visualViewport.height + window.visualViewport.offsetTop;
+      if (bottom > viewportBottom) {
+        window.scrollBy({ top: bottom - viewportBottom + 16, behavior: 'auto' });
+      }
+    } else {
+      input.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+    }
+  }, 50);
+});
+
 // ── SSE ───────────────────────────────────────────────────────
 
 function openSSE() {
+  // Preserve a CONNECTING instance so its native Last-Event-ID reconnect
+  // continues uninterrupted. A replacement instance explicitly supplies our
+  // session cursor because EventSource cannot set custom request headers.
+  if (eventSource && eventSource.readyState !== EventSource.CLOSED) return;
   if (eventSource) { eventSource.close(); eventSource = null; }
-  eventSource = new EventSource(`/chat/${CHAT_ID}/stream`);
-  eventSource.onmessage = e => handleEvent(JSON.parse(e.data));
+  const url = `/chat/${CHAT_ID}/stream` + (sseCursor ? `?after=${encodeURIComponent(sseCursor)}` : '');
+  eventSource = new EventSource(url);
+  eventSource.onmessage = e => {
+    if (e.lastEventId) {
+      sseCursor = e.lastEventId;
+      sessionStorage.setItem('pengy_sse_cursor_' + CHAT_ID, sseCursor);
+    }
+    handleEvent(JSON.parse(e.data));
+  };
   eventSource.onerror = () => {
     // Don't close immediately — EventSource auto-reconnects when the
     // connection drops (e.g. phone slept, user switched apps). When the
@@ -654,6 +690,7 @@ function handleEvent(data) {
       hideThinking();
       appendAssistantMessage(data.html, data.usage);
       eventSource.close(); eventSource = null;
+      sessionStorage.removeItem('pengy_sse_cursor_' + CHAT_ID);
       setProcessing(false);
       break;
 

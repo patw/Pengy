@@ -46,20 +46,19 @@
     }
 
     /* ── Layout ──────────────────────────────────────────────── */
-    html, body { height: 100%; overflow: hidden; }
+    html, body { height: 100%; }
 
     .app-shell {
       display: flex;
       flex-direction: column;
       height: 100vh;      /* fallback for browsers without dvh */
       height: 100dvh;     /* tracks the visible viewport as mobile toolbars show/hide */
-      /* safe area for notched phones */
-      padding-bottom: env(safe-area-inset-bottom, 0px);
     }
 
     .app-body {
       display: flex;
       flex: 1;
+      min-height: 0; /* let the message pane shrink and own scrolling */
       overflow: hidden;
     }
 
@@ -167,6 +166,7 @@
     .messages-area {
       flex: 1;
       overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
       padding: 1rem 0.75rem;
     }
     @media (min-width: 576px) {
@@ -279,8 +279,8 @@
       padding: 0.6rem 0.75rem;
       border-top: 1px solid var(--bs-border-color);
       background: var(--bs-body-bg);
-      /* safe area for notched phones */
-      padding-bottom: calc(0.6rem + env(safe-area-inset-bottom, 0px));
+      /* safe area for notched phones; max() keeps at least the base padding */
+      padding-bottom: max(0.6rem, env(safe-area-inset-bottom, 0px));
     }
     @media (min-width: 576px) {
       .input-area { padding: 0.75rem 1rem; }

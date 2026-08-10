@@ -4,6 +4,7 @@ Run with:  python -m pytest tests/test_web.py -v
 """
 
 import json
+import threading
 import tempfile
 from pathlib import Path
 
@@ -486,6 +487,51 @@ class TestWebWorker:
         errors = [e for e in events if e.get("type") == "error"]
         assert len(errors) == 1
         assert "timeout" in errors[0]["message"].lower()
+    def test_iter_events_resumes_from_index(self, tmp_dirs):
+        """A reconnecting consumer can start from any past event index."""
+        chat = {"id": "test-id", "title": "test", "messages": []}
+        config = {"model": "gpt-4o", "tool_confirmation": "none"}
+        w = WebWorker(chat, config)
+        w._put_event({"type": "tool_request", "name": "a"})
+        w._put_event({"type": "tool_result", "name": "a"})
+        w._put_event({"type": "final_response", "html": "<p>hi</p>"})
+
+        # Start from index 1 — should skip the first tool_request.
+        events = list(w.iter_events(start_index=1, timeout=0.5))
+        assert [e["type"] for e in events] == ["tool_result", "final_response"]
+
+    def test_iter_events_terminal_event_for_done_worker(self, tmp_dirs):
+        """Fresh connection to a finished worker replays the terminal event."""
+        chat = {"id": "test-id", "title": "test", "messages": []}
+        config = {"model": "gpt-4o", "tool_confirmation": "none"}
+        w = WebWorker(chat, config)
+        w._put_event({"type": "final_response", "html": "<p>done</p>"})
+
+        # Simulate a fresh SSE connection with no Last-Event-ID:
+        # start_index defaults to event_count - 1, so only the final event
+        # is replayed (not the whole history).
+        start = max(0, w.event_count - 1)
+        events = list(w.iter_events(start_index=start, timeout=0.5))
+        assert len(events) == 1
+        assert events[0]["type"] == "final_response"
+        assert events[0]["html"] == "<p>done</p>"
+
+    def test_producer_can_append_while_consumer_is_suspended_at_yield(self, tmp_dirs):
+        """SSE backpressure must not retain the worker's event-log mutex."""
+        chat = {"id": "test-id", "title": "test", "messages": []}
+        w = WebWorker(chat, {"model": "gpt-4o", "tool_confirmation": "none"})
+        w._put_event({"type": "tool_request", "name": "a"})
+        stream = w.iter_events(timeout=1)
+        assert next(stream)["type"] == "tool_request"
+
+        appended = threading.Event()
+        thread = threading.Thread(
+            target=lambda: (w._put_event({"type": "final_response", "html": "ok"}), appended.set())
+        )
+        thread.start()
+        assert appended.wait(0.5), "producer blocked while consumer was yielded"
+        thread.join()
+        assert next(stream)["type"] == "final_response"
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -827,6 +873,48 @@ class TestSSEStream:
         chat = create_chat()
         resp = client.get(f"/chat/{chat['id']}/stream")
         assert "text/event-stream" in resp.content_type
+    def test_stream_events_have_ids_and_last_event_id_resumes(self, client, tmp_dirs):
+        """SSE events carry monotonic IDs; Last-Event-ID reconnects resume after them."""
+        from pengy.core.chat_manager import create_chat
+        from pengy.web.app import _workers_lock, _workers, WebWorker
+
+        chat = create_chat()
+        worker = WebWorker(chat, {"model": "gpt-4o", "tool_confirmation": "none"})
+        worker._put_event({"type": "tool_request", "name": "read_file"})
+        worker._put_event({"type": "tool_result", "name": "read_file", "content": "ok"})
+        worker._put_event({"type": "final_response", "html": "<p>hi</p>"})
+        with _workers_lock:
+            _workers[chat["id"]] = worker
+
+        try:
+            # First connection with no Last-Event-ID to a done worker only
+            # replays the terminal event, so the chat page doesn't duplicate
+            # the already-rendered history.
+            resp = client.get(f"/chat/{chat['id']}/stream")
+            body = resp.data.decode()
+            ids = [int(line.split(": ")[1]) for line in body.splitlines() if line.startswith("id: ")]
+            assert ids == [2]
+            data_lines = [line for line in body.splitlines() if line.startswith("data: ")]
+            assert len(data_lines) == 1
+
+            # Worker is done, so the first stream's finally removed it.
+            # Put it back with the same log to test Last-Event-ID resume.
+            with _workers_lock:
+                _workers[chat["id"]] = worker
+
+            # Reconnect as if the browser had only received the first event.
+            resp2 = client.get(
+                f"/chat/{chat['id']}/stream",
+                headers={"Last-Event-ID": "0"},
+            )
+            body2 = resp2.data.decode()
+            resumed_ids = [int(line.split(": ")[1]) for line in body2.splitlines() if line.startswith("id: ")]
+            assert resumed_ids == [1, 2]
+            resumed_data = [line for line in body2.splitlines() if line.startswith("data: ")]
+            assert len(resumed_data) == 2
+        finally:
+            with _workers_lock:
+                _workers.pop(chat["id"], None)
 
 
 class TestRequestOriginGuard:

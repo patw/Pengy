@@ -3,7 +3,6 @@
 import json
 import mimetypes
 import os
-import queue
 import re
 import threading
 import time
@@ -30,6 +29,11 @@ app = Flask(__name__)
 
 _workers: dict[str, "WebWorker"] = {}
 _workers_lock = threading.Lock()
+
+# Completed streams remain available briefly so a reconnecting browser can
+# consume the terminal event.  Persisted chat history is authoritative after
+# this grace period.
+_EVENT_LOG_GRACE_SECONDS = 10 * 60
 
 # ─── Request origin guard ─────────────────────────────────────────────────────
 #
@@ -292,7 +296,12 @@ class WebWorker:
         self._chat = {**chat, "messages": list(chat.get("messages", []))}
         self._config = config
         self._messages_override = messages_override  # pre-built API messages
-        self._queue: queue.Queue = queue.Queue()
+        # Append-only event log so reconnecting SSE clients can resume from
+        # where they left off.  A single queue would drop events if a dead
+        # connection happened to consume them during an auto-reconnect.
+        self._events: list[dict] = []
+        self._events_lock = threading.Lock()
+        self._new_event = threading.Condition(self._events_lock)
         self._confirm_event = threading.Event()
         self._confirm_result: dict | None = None
         self._sudo_event = threading.Event()
@@ -322,30 +331,55 @@ class WebWorker:
         self._sudo_result = password
         self._sudo_event.set()
 
-    def iter_events(self, timeout: float = 3600.0):
+    @property
+    def event_count(self) -> int:
+        """Number of events currently in the append-only log."""
+        with self._events_lock:
+            return len(self._events)
+
+    def _put_event(self, event: dict) -> None:
+        """Append an event to the log and wake any waiting SSE consumers."""
+        with self._events_lock:
+            self._events.append(event)
+            if event.get("type") in ("final_response", "error"):
+                self._done = True
+            self._new_event.notify_all()
+
+    def iter_events(self, start_index: int = 0, timeout: float = 3600.0):
+        """Yield events from *start_index* onward, with keepalives.
+
+        Never yield while holding ``_events_lock``: an SSE consumer can be
+        suspended by a slow client at ``yield``, while the worker must still be
+        able to append progress events.
+        """
         deadline = time.monotonic() + timeout
+        index = start_index
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                yield {"type": "error", "message": "Stream timeout"}
-                break
-            # When the worker is done, poll quickly (0.1 s) so a reconnecting
-            # client doesn't sit through a full 25 s keepalive wait just to
-            # learn the stream is over.
-            poll_timeout = 0.1 if self._done else min(remaining, 25.0)
-            try:
-                event = self._queue.get(timeout=poll_timeout)
+            event = None
+            with self._events_lock:
+                if index < len(self._events):
+                    event = self._events[index]
+                    index += 1
+                elif self._done:
+                    return
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        event = {"type": "error", "message": "Stream timeout"}
+                    else:
+                        notified = self._new_event.wait(timeout=min(remaining, 25.0))
+                        if not notified:
+                            event = {"type": "keepalive"}
+
+            # Deliberately outside the mutex; see docstring above.
+            if event is not None:
                 yield event
                 if event.get("type") in ("final_response", "error"):
-                    break
-            except queue.Empty:
-                if self._done:
-                    break
-                yield {"type": "keepalive"}
+                    return
 
     def _get_sudo_password(self) -> str | None:
         self._sudo_event.clear()
-        self._queue.put({"type": "sudo_request"})
+        self._put_event({"type": "sudo_request"})
         self._sudo_event.wait(timeout=120.0)
         if self._cancelled:
             return None
@@ -391,7 +425,7 @@ class WebWorker:
                 if rtype == "retrying":
                     # Backoff sleep handled inside the generator; push event
                     # through so the SSE stream shows "Overloaded, retrying…"
-                    self._queue.put(response)
+                    self._put_event(response)
                     continue
 
                 if rtype == "assistant_tool_calls":
@@ -409,7 +443,7 @@ class WebWorker:
                     )
                     auto_approved = skip_confirm or self._yolo_this_turn
 
-                    self._queue.put({
+                    self._put_event({
                         "type": "tool_request",
                         "name": name,
                         "args": args,
@@ -435,7 +469,7 @@ class WebWorker:
                 elif rtype == "question_request":
                     questions = response.get("questions", [])
                     tool_call_id = response.get("tool_call_id", "")
-                    self._queue.put({
+                    self._put_event({
                         "type": "question_request",
                         "questions": questions,
                         "tool_call_id": tool_call_id,
@@ -454,7 +488,7 @@ class WebWorker:
 
                 elif rtype == "question_result":
                     content = response.get("content", "")
-                    self._queue.put({
+                    self._put_event({
                         "type": "tool_result",
                         "tool_call_id": response["tool_call_id"],
                         "safe_id": _safe_id(response["tool_call_id"]),
@@ -472,7 +506,7 @@ class WebWorker:
                         "content": content,
                     })
                     display = content if len(content) <= 3000 else content[:3000] + "\n… [truncated]"
-                    self._queue.put({
+                    self._put_event({
                         "type": "tool_result",
                         "tool_call_id": response["tool_call_id"],
                         "safe_id": _safe_id(response["tool_call_id"]),
@@ -485,7 +519,7 @@ class WebWorker:
                     content = response.get("content") or ""
                     chat["messages"].append(response.get("message") or {"role": "assistant", "content": content})
                     save_chat(chat)
-                    self._queue.put({
+                    self._put_event({
                         "type": "final_response",
                         "html": _render_md(content),
                         "usage": response.get("usage", {}),
@@ -494,10 +528,20 @@ class WebWorker:
 
         except Exception as e:
             app.logger.error("Worker error for chat %s: %s", self._chat["id"], e)
-            self._queue.put({"type": "error", "message": str(e)})
+            self._put_event({"type": "error", "message": str(e)})
         finally:
             self._done = True
             tools.set_sudo_password_provider(None)
+            # Do not depend on a client reconnecting to free completed
+            # workers.  Keep the replay log for a bounded reconnect grace
+            # period, then let persisted chat history take over.
+            def cleanup() -> None:
+                with _workers_lock:
+                    if _workers.get(self._chat["id"]) is self:
+                        del _workers[self._chat["id"]]
+            timer = threading.Timer(_EVENT_LOG_GRACE_SECONDS, cleanup)
+            timer.daemon = True
+            timer.start()
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -674,6 +718,19 @@ def chat_send(chat_id: str):
 
 @app.route("/chat/<chat_id>/stream")
 def chat_stream(chat_id: str):
+    # Browser sends Last-Event-ID when EventSource auto-reconnects after a
+    # drop.  Capture it here, inside the request context, before we hand the
+    # generator off to Response.
+    # Explicit `after` is used only when script code constructs a replacement
+    # EventSource; normal EventSource reconnects retain Last-Event-ID.
+    last_id = request.args.get("after", request.headers.get("Last-Event-ID"))
+    try:
+        resume_index = int(last_id) + 1 if last_id is not None else None
+    except ValueError:
+        resume_index = None
+    if resume_index is not None and resume_index < 0:
+        resume_index = 0
+
     def generate():
         worker = None
         for _ in range(30):
@@ -692,22 +749,29 @@ def chat_stream(chat_id: str):
         # switch feel snappier.
         yield "retry: 1000\n\n"
 
+        # Resume right after Last-Event-ID so no messages are replayed twice.
+        start_index = resume_index if resume_index is not None else 0
+
+        # Fresh connection (no Last-Event-ID) to a worker that's already done:
+        # the chat page already rendered the history server-side, so only
+        # replay the terminal event instead of the whole task.
+        if resume_index is None and worker._done:
+            start_index = max(0, worker.event_count - 1)
+
         try:
-            for event in worker.iter_events():
+            event_index = start_index
+            for event in worker.iter_events(start_index=start_index):
                 if event.get("type") == "keepalive":
                     yield ": keepalive\n\n"
                 else:
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield f"id: {event_index}\ndata: {json.dumps(event)}\n\n"
+                    event_index += 1
         finally:
             with _workers_lock:
-                # Only remove the worker if it's actually done.  If the client
-                # disconnected mid-task (e.g. phone slept, tab backgrounded),
-                # keep the worker alive so a reconnecting SSE client can pick
-                # up remaining events.  The worker will be cleaned up when it
-                # finishes and a subsequent connection drains it, or when a
-                # new task starts for this chat, or when the chat is deleted.
-                if worker._done and _workers.get(chat_id) is worker:
-                    del _workers[chat_id]
+                # A disconnected stream never owns worker lifetime. Completed
+                # logs are removed by the bounded grace-period cleanup started
+                # by the worker, while an active worker survives reconnects.
+                pass
 
     return Response(
         generate(),
