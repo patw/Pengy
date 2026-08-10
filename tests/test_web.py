@@ -18,6 +18,7 @@ from pengy.web.app import (
     _group_messages,
     app,
     WebWorker,
+    _tool_summary,
 )
 
 
@@ -168,8 +169,29 @@ class TestBuildMessages:
         assert "cancelled" in result[2]["content"].lower()
 
 
+class TestToolSummary:
+    @pytest.mark.parametrize("name,args,expected", [
+        ("read_file", {"path": "/tmp/example.py"}, "/tmp/example.py"),
+        ("fetch_url", {"url": "https://example.com/api"}, "https://example.com/api"),
+        ("run_bash", {"command": "git status --short"}, "git status --short"),
+        ("search_content", {"pattern": "EventSource", "path": "~/dev/Pengy"}, "EventSource in ~/dev/Pengy"),
+        ("apply_changes", {"changes": [{}, {}]}, "2 files"),
+        ("ask_user_question", {"questions": [{}, {}, {}]}, "3 questions"),
+    ])
+    def test_known_tool_summaries(self, name, args, expected):
+        assert _tool_summary(name, args) == expected
+
+    def test_summary_redacts_secret_values(self):
+        assert _tool_summary("custom", {"api_key": "do-not-show"}) == ""
+        assert _tool_summary("custom", {"password": "do-not-show", "path": "/tmp/x"}) == "/tmp/x"
+
+    def test_summary_is_bounded_and_flattens_newlines(self):
+        summary = _tool_summary("run_bash", {"command": "line one\n" + "x" * 200})
+        assert "\n" not in summary
+        assert len(summary) <= 100
+
 class TestGroupMessages:
-    """The _group_messages function converts raw message lists to
+    """The _group_messages function converts raw messages list to
     display-ready turn groups for the templates."""
 
     def test_empty(self):

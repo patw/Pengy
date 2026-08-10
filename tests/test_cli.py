@@ -17,6 +17,7 @@ import pytest
 
 from pengy.cli import main as cli_main
 from pengy.cli.main import PengyCLI, SLASH_COMMANDS, _complete_slash, _setup_readline
+from pengy.cli.main import _last_message_lines
 
 readline = pytest.importorskip("readline", reason="readline is Unix-only")
 
@@ -178,7 +179,55 @@ class TestSlashCommandRegistry:
 # Tool-confirmation labels
 # ────────────────────────────────────────────────────────────────────
 
+class TestLastMessagePreview:
+    def test_wraps_long_url_or_line_across_multiple_lines(self):
+        lines = _last_message_lines("Check out " + "https://example.com/" + "x" * 180)
+        assert len(lines) == 3
+        assert all(len(line) <= 101 for line in lines)
+        assert "https://example.com/" in lines[0]
+
+    def test_accepts_terminal_specific_width(self):
+        lines = _last_message_lines("abcdefghijklmnopqrstuvwxyz " * 4, width=20)
+        assert all(len(line) <= 20 for line in lines)
+        assert len(lines) == 6
+        assert not lines[-1].endswith("…")
+
+    def test_preserves_recent_multiline_content_up_to_ten_lines(self):
+        lines = _last_message_lines("\n".join(f"line {i}" for i in range(20)))
+        assert lines[:9] == [f"line {i}" for i in range(9)]
+        assert lines[9] == "line 9…"
+
+    def test_flattens_image_content_parts(self):
+        lines = _last_message_lines([
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,secret"}},
+            {"type": "text", "text": "Describe this"},
+        ])
+        assert lines == ["[image] Describe this"]
+
+
 class TestConfirmDisplay:
+    @pytest.mark.parametrize("mode,expected", [
+        ("all", "YOLO"),
+        ("safe", "Safe"),
+        ("none", "Confirm All"),
+    ])
+    def test_labels(self, mode, expected):
+        cli = PengyCLI(no_save=True)
+        cli.config["tool_confirmation"] = mode
+        assert cli._confirm_display() == expected
+
+    def test_safest_mode_is_not_labelled_none(self):
+        """"none" means *confirm everything*; showing "None" reads as the opposite."""
+        cli = PengyCLI(no_save=True)
+        cli.config["tool_confirmation"] = "none"
+        assert cli._confirm_display() != "None"
+
+    def test_unknown_mode_falls_back_to_safest_label(self):
+        cli = PengyCLI(no_save=True)
+        cli.config["tool_confirmation"] = "nonsense"
+        assert cli._confirm_display() == "Confirm All"
+
+
     @pytest.mark.parametrize("mode,expected", [
         ("all", "YOLO"),
         ("safe", "Safe"),

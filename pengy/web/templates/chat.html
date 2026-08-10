@@ -73,6 +73,7 @@
            data-bs-target="#body-{{ ev.safe_id }}">
         <i class="bi bi-gear-fill text-warning" style="font-size:0.8rem"></i>
         <code class="fw-semibold text-warning">{{ ev.name }}</code>
+        {% if ev.summary %}<span class="tool-summary text-muted" title="{{ ev.summary }}">{{ ev.summary }}</span>{% endif %}
         {% if ev.declined %}
           <span class="badge bg-danger ms-1">declined</span>
         {% elif ev.result is not none %}
@@ -321,6 +322,28 @@ function escHtml(text) {
 
 function safeId(toolCallId) {
   return 'tc_' + toolCallId.replace(/[^a-zA-Z0-9]/g, '');
+}
+
+const SUMMARY_SECRET_KEYS = new Set(['password', 'passwd', 'api_key', 'apikey',
+  'token', 'access_token', 'refresh_token', 'authorization', 'secret', 'private_key']);
+
+function toolSummary(name, args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return '';
+  const val = key => SUMMARY_SECRET_KEYS.has(key.toLowerCase()) ? '[redacted]' :
+    (typeof args[key] === 'string' ? args[key].replace(/\n/g, ' ').trim() :
+     args[key] == null ? '' : String(args[key]));
+  let summary = '';
+  if (['read_file', 'write_file', 'replace_in_file', 'directory_tree'].includes(name)) summary = val('path');
+  else if (name === 'read_multiple_files') summary = Array.isArray(args.paths) ? `${args.paths.length} files` : '';
+  else if (name === 'web_search') summary = val('query');
+  else if (name === 'fetch_url') summary = val('url');
+  else if (name === 'download_file') summary = val('filename') || val('url');
+  else if (name === 'run_bash') summary = val('command');
+  else if (name === 'run_python') summary = val('code');
+  else if (['search_content', 'glob'].includes(name)) summary = val('pattern') + (val('path') ? ` in ${val('path')}` : '');
+  else if (name === 'apply_changes') summary = Array.isArray(args.changes) ? `${args.changes.length} files` : '';
+  else if (name === 'ask_user_question') summary = Array.isArray(args.questions) ? `${args.questions.length} questions` : '';
+  return summary.length <= 100 ? summary : summary.slice(0, 97).trimEnd() + '…';
 }
 
 // ── Wake Lock (prevents screen sleep during tasks) ───────────
@@ -736,6 +759,7 @@ function appendUserMessage(content) {
 
 function appendToolRequest(data) {
   const sid = safeId(data.tool_call_id);
+  data.summary = data.summary || toolSummary(data.name, data.args);
   const el = document.createElement('div');
   el.className = 'msg-tool';
   el.innerHTML = `
@@ -744,6 +768,7 @@ function appendToolRequest(data) {
            data-bs-toggle="collapse" data-bs-target="#body-${sid}">
         <i class="bi bi-gear-fill text-warning" style="font-size:.8rem"></i>
         <code class="fw-semibold text-warning">${escHtml(data.name)}</code>
+        ${data.summary ? `<span class="tool-summary text-muted" title="${escHtml(data.summary)}">${escHtml(data.summary)}</span>` : ''}
         <span class="badge bg-secondary ms-1" id="badge-${sid}">
           ${data.auto_approved ? 'running…' : 'pending'}
         </span>

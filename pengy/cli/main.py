@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import sys
+import textwrap
 import urllib.request
 import uuid
 from datetime import datetime
@@ -162,6 +163,33 @@ def _preview(text: str, max_len: int = 72) -> str:
     """Return a single-line preview of possibly multiline/Markdown text."""
     return _truncate(" ".join(str(text).split()), max_len)
 
+def _last_message_lines(content: object, max_lines: int = 10, width: int = 100) -> list[str]:
+    """Format the recent user message as a bounded, readable multi-line preview."""
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(str(part.get("text", "")))
+            elif isinstance(part, dict) and part.get("type") == "image_url":
+                parts.append("[image]")
+        content = " ".join(parts)
+    text = str(content or "").strip()
+    if not text:
+        return []
+
+    lines = []
+    for source_line in text.splitlines() or [text]:
+        lines.extend(textwrap.wrap(
+            source_line,
+            width=width,
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or [""])
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = _truncate(lines[-1], max(1, width - 1)) + "…"
+    return lines
+
 
 _TEXT_EXTENSIONS = {
     '.txt', '.md', '.markdown', '.rst', '.json', '.xml', '.html', '.htm',
@@ -246,14 +274,19 @@ class PengyCLI:
                 if m.get("role") == "user":
                     last_user = m.get("content", "")
                     break
-            last_preview = _truncate(last_user or "", 80)
+            # Leave room for the two-space continuation indent while using
+            # the actual terminal width instead of a fixed desktop width.
+            preview_width = max(20, self.console.width - 2)
+            last_preview = _last_message_lines(last_user, width=preview_width)
 
             self.console.print(
                 f"[dim]Resumed:[/dim] [bold]{self.current_chat['title']}[/bold]"
                 f" [dim]({msg_count} messages)[/dim]"
             )
             if last_preview:
-                self.console.print(f"[dim]Last:[/dim] {last_preview}")
+                self.console.print("[dim]Last:[/dim]")
+                for line in last_preview:
+                    self.console.print(f"  {line}")
         else:
             self.current_chat = create_chat()
             self.console.print("[dim]New chat created.[/dim]")

@@ -137,6 +137,60 @@ def _safe_id(tool_call_id: str) -> str:
     """Convert a tool_call_id to a safe HTML element ID."""
     return "tc_" + re.sub(r"[^a-zA-Z0-9]", "", tool_call_id)
 
+_SUMMARY_SECRET_KEYS = {
+    "password", "passwd", "api_key", "apikey", "token", "access_token",
+    "refresh_token", "authorization", "secret", "private_key",
+}
+
+
+def _tool_summary(name: str, args: object) -> str:
+    """Return a short, non-sensitive description for a collapsed tool card."""
+    if not isinstance(args, dict):
+        return ""
+
+    def value(key: str) -> str:
+        raw = args.get(key, "")
+        if key.lower() in _SUMMARY_SECRET_KEYS:
+            return "[redacted]"
+        if isinstance(raw, (dict, list)):
+            return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+        return str(raw).replace("\n", " ").strip()
+
+    if name in {"read_file", "write_file", "replace_in_file", "directory_tree"}:
+        summary = value("path")
+    elif name == "read_multiple_files":
+        paths = args.get("paths")
+        summary = f"{len(paths)} files" if isinstance(paths, list) else ""
+    elif name in {"web_search"}:
+        summary = value("query")
+    elif name == "fetch_url":
+        summary = value("url")
+    elif name == "download_file":
+        summary = value("filename") or value("url")
+    elif name in {"run_bash", "run_python"}:
+        summary = value("command") or value("code")
+    elif name in {"search_content", "glob"}:
+        pattern = value("pattern")
+        path = value("path")
+        summary = f"{pattern} in {path}" if pattern and path else pattern or path
+    elif name == "apply_changes":
+        changes = args.get("changes")
+        summary = f"{len(changes)} files" if isinstance(changes, list) else ""
+    elif name == "ask_user_question":
+        questions = args.get("questions")
+        summary = f"{len(questions)} questions" if isinstance(questions, list) else ""
+    else:
+        for key, raw in args.items():
+            if key.lower() in _SUMMARY_SECRET_KEYS:
+                continue
+            summary = str(raw).replace("\n", " ").strip()
+            if summary:
+                break
+        else:
+            summary = ""
+
+    return summary if len(summary) <= 100 else summary[:97].rstrip() + "…"
+
 
 def _fix_file_urls(html: str) -> str:
     """Replace ``file://`` image URLs with ``/files?path=`` URLs that browsers can load.
@@ -255,6 +309,7 @@ def _group_messages(raw_messages: list[dict]) -> list[dict]:
                         "args": args,
                         "tool_call_id": tc_id,
                         "safe_id": _safe_id(tc_id),
+                        "summary": _tool_summary(fn.get("name", "?"), args),
                         "result": None,
                         "declined": False,
                     })

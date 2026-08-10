@@ -293,6 +293,13 @@ class TestScrollAffordances:
         assert "function appendToArea(" in html
         assert "function isNearBottom(" in html
 
+    def test_tool_card_shows_compact_summary(self, client):
+        chat = make_chat()
+        html = client.get(f"/chat/{chat['id']}").data.decode()
+        assert "function toolSummary(name, args)" in html
+        assert "tool-summary" in html
+        assert "behavior: 'instant'" not in html
+
     def test_streamed_appends_go_through_the_sticky_helper(self, client):
         """Direct appendChild + scrollToBottom in these paths is the old bug."""
         chat = make_chat()
