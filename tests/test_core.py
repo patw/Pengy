@@ -6,6 +6,7 @@ Run with:  python -m pytest tests/ -v
 import json
 import io
 import os
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -578,9 +579,9 @@ class TestTools:
         result = execute_tool("read_file", {"path": str(f), "offset": 99})
         assert "Error" in result and "3 lines" in result
 
-    def test_read_file_snip_mentions_paging(self, tmp_path):
-        """A truncated whole-file read has to tell the model paging exists,
-        otherwise offset/limit is undiscoverable."""
+    def test_read_file_truncates_from_head_with_continuation(self, tmp_path):
+        """Files truncate from the head, not the middle: the head holds imports
+        and declarations, and unlike a log the rest can be paged to."""
         from pengy.core import tools
         f = tmp_path / "big.txt"
         f.write_text("\n".join(f"line {i}" for i in range(1, 5001)))
@@ -588,8 +589,67 @@ class TestTools:
         try:
             tools.set_tool_output_max_chars(2000)
             result = tools.execute_tool("read_file", {"path": str(f)})
-            assert "5,000 lines" in result
-            assert "offset and limit" in result
+            header, *body = result.split("\n")
+
+            # No middle gap — content runs contiguously from line 1.
+            assert "snipped" not in result
+            assert body[0] == "line 1"
+            assert "of 5,000 in" in header
+            assert "output limit reached" in header
+
+            # The stated continuation offset is the next unseen line, and
+            # following it actually resumes where the truncation stopped.
+            last_shown = int(body[-1].split()[1])
+            offset = int(header.split("offset=")[1].split(" ")[0].replace(",", ""))
+            assert offset == last_shown + 1
+            nxt = tools.execute_tool("read_file", {"path": str(f), "offset": offset})
+            assert nxt.split("\n")[1] == f"line {offset}"
+        finally:
+            tools.set_tool_output_max_chars(original)
+
+    def test_command_output_stays_tail_biased(self, tmp_path):
+        """run_bash output keeps head+tail: the command echo is at the start and
+        the error that matters is usually at the end."""
+        from pengy.core import tools
+        original = tools._MAX_TOOL_OUTPUT_CHARS
+        try:
+            tools.set_tool_output_max_chars(2000)
+            text = "\n".join(f"line {i}" for i in range(1, 5001))
+            out = tools._snip_tool_output(text)
+            assert out.startswith("line 1")
+            assert out.rstrip().endswith("line 5000")
+            assert "snipped" in out
+        finally:
+            tools.set_tool_output_max_chars(original)
+
+    def test_truncation_never_splits_a_line(self, tmp_path):
+        """Character-index cuts left a broken half-line at each seam, which on
+        source code is a fragment the model may try to 'fix'."""
+        from pengy.core import tools
+        original = tools._MAX_TOOL_OUTPUT_CHARS
+        try:
+            tools.set_tool_output_max_chars(2000)
+            text = "\n".join(f"line {i}" for i in range(1, 5001))
+
+            head, tail = tools._snip_tool_output(text).split("[... snipped", 1)
+            tail = tail.split("]", 1)[1]
+            for fragment in head.strip().split("\n") + tail.strip().split("\n"):
+                assert re.fullmatch(r"line \d+", fragment), fragment
+
+            kept, _, _ = tools._truncate_head_lines(text)
+            assert re.fullmatch(r"line \d+", kept.split("\n")[-1])
+        finally:
+            tools.set_tool_output_max_chars(original)
+
+    def test_truncation_handles_one_giant_line(self, tmp_path):
+        """A single line longer than the budget has no line break to back up
+        to — it must still be cut rather than blowing the limit."""
+        from pengy.core import tools
+        original = tools._MAX_TOOL_OUTPUT_CHARS
+        try:
+            tools.set_tool_output_max_chars(500)
+            kept, _, truncated = tools._truncate_head_lines("x" * 5000)
+            assert truncated and len(kept) == 500
         finally:
             tools.set_tool_output_max_chars(original)
 

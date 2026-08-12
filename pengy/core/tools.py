@@ -194,8 +194,38 @@ def set_tool_output_max_chars(chars: int):
     _MAX_TOOL_OUTPUT_CHARS = chars
 
 
+def _cut_at_line_end(text: str, chars: int) -> str:
+    """Return the first *chars* of *text*, backed up to the last line break.
+
+    Cutting on a raw character index leaves a broken half-line at the seam,
+    which on source code is a fragment the model may try to reason about or
+    "fix".  Falls back to a hard cut when a single line is longer than the
+    budget, since there is no line break to back up to.
+    """
+    if chars >= len(text):
+        return text
+    cut = text.rfind("\n", 0, chars)
+    return text[:cut] if cut > 0 else text[:chars]
+
+
+def _cut_at_line_start(text: str, chars: int) -> str:
+    """Return the last *chars* of *text*, advanced to the next line break."""
+    if chars >= len(text):
+        return text
+    start = len(text) - chars
+    nl = text.find("\n", start)
+    return text[nl + 1:] if nl != -1 else text[start:]
+
+
 def _snip_tool_output(text: str) -> str:
-    """If *text* exceeds the configured max, keep the head and tail and snip the middle."""
+    """Tail-biased truncation for *command* output (run_bash, run_python).
+
+    Keeps the head (~20%) and tail (~80%) and snips the middle: a command echo
+    sits at the start and the error that matters usually sits at the end, so
+    the middle of a build log is the disposable part.  File reads want
+    :func:`_truncate_head_lines` instead — a gap in the middle of a source file
+    is not disposable, and unlike a log it can be paged around.
+    """
     limit = _MAX_TOOL_OUTPUT_CHARS
     if limit <= 0 or len(text) <= limit:
         return text
@@ -204,16 +234,32 @@ def _snip_tool_output(text: str) -> str:
     head_chars = max(limit // 5, 500)
     tail_chars = limit - head_chars
 
-    head = text[:head_chars]
-    tail = text[-tail_chars:]
+    head = _cut_at_line_end(text, head_chars)
+    tail = _cut_at_line_start(text, tail_chars)
 
-    snipped = len(text) - head_chars - tail_chars
+    snipped = len(text) - len(head) - len(tail)
     return (
         head
         + f"\n\n[... snipped {snipped:,} chars from middle — set tool_output_max_chars "
         + f"to change this limit (current: {limit:,}) ...]\n\n"
         + tail
     )
+
+
+def _truncate_head_lines(text: str, limit: int | None = None
+                         ) -> tuple[str, int, bool]:
+    """Head truncation for *file* content, cut on a line boundary.
+
+    Returns ``(text, lines_kept, truncated)``.  Files are truncated from the
+    head rather than snipped in the middle: the head is where imports and
+    declarations live, and the caller can report which lines survived so the
+    model can page through the rest with offset/limit.
+    """
+    budget = _MAX_TOOL_OUTPUT_CHARS if limit is None else limit
+    if budget <= 0 or len(text) <= budget:
+        return text, text.count("\n") + 1, False
+    kept = _cut_at_line_end(text, budget)
+    return kept, kept.count("\n") + 1, True
 
 TOOLS = [
     {
@@ -713,16 +759,6 @@ def _read_file(path: str, offset: int | None = None,
 
         text = p.read_text(encoding="utf-8")
 
-        if offset is None and limit is None:
-            snipped = _snip_tool_output(text)
-            if snipped != text:
-                total = text.count("\n") + 1
-                snipped += (
-                    f"\n\n[{path} has {total:,} lines — pass offset and limit "
-                    f"to read a specific range instead.]"
-                )
-            return snipped
-
         lines = text.split("\n")
         total = len(lines)
         start = 1 if offset is None else max(1, offset)
@@ -735,10 +771,19 @@ def _read_file(path: str, offset: int | None = None,
         end = min(total, start + count - 1)
 
         body = "\n".join(lines[start - 1:end])
-        return (
-            f"[Lines {start:,}-{end:,} of {total:,} in {path}]\n"
-            + _snip_tool_output(body)
-        )
+        body, kept, truncated = _truncate_head_lines(body)
+        shown_end = start + kept - 1
+
+        # A plain whole-file read that fit stays bare — no header to parse.
+        if not truncated and offset is None and limit is None:
+            return body
+
+        header = f"[Lines {start:,}-{shown_end:,} of {total:,} in {path}"
+        if truncated:
+            header += (
+                f" — output limit reached, pass offset={shown_end + 1:,} to continue"
+            )
+        return header + "]\n" + body
     except Exception as e:
         return f"Error reading file: {e}"
 
@@ -1455,11 +1500,15 @@ def _read_multiple_files(paths: list[str]) -> str:
             errors += 1
             continue
 
-        # Truncate individual file if needed
-        if len(content) > _MAX_PER_FILE:
-            content = content[:_MAX_PER_FILE] + (
-                f"\n\n[... truncated at {_MAX_PER_FILE:,} characters "
-                f"(full file is {p.stat().st_size:,} bytes) ...]"
+        # Truncate individual file if needed.  Same head-truncation and
+        # line-range reporting as read_file, so the model can follow up with
+        # read_file(offset=...) on whichever file got cut.
+        total_lines = content.count("\n") + 1
+        content, kept, truncated = _truncate_head_lines(content, _MAX_PER_FILE)
+        if truncated:
+            content += (
+                f"\n\n[... showed lines 1-{kept:,} of {total_lines:,} — "
+                f"read_file with offset={kept + 1:,} to continue ...]"
             )
 
         # Check if adding this file would blow the total budget
