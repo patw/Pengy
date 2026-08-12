@@ -336,3 +336,105 @@ class TestToolLoop:
         gen = client.chat([{"role": "user", "content": "hi"}])
         with pytest.raises(Exception):
             next(gen)
+
+
+# ── Tests: read_image attachment ───────────────────────────────────────────────
+
+class TestReadImageAttachment:
+    """read_image can't return a picture through a role:"tool" message, so the
+    loop attaches it as a follow-up user message.  These tests pin the shape of
+    the request the model actually receives."""
+
+    @staticmethod
+    def _png(tmp_path, name="shot.png", size=(48, 32)):
+        from PIL import Image
+        path = tmp_path / name
+        Image.new("RGB", size, (10, 120, 200)).save(path)
+        return path
+
+    def test_image_attached_as_user_message_after_tool_result(
+            self, stub, client, tmp_path):
+        path = self._png(tmp_path)
+        stub.queue(
+            completion(tool_calls=[tool_call("c1", "read_image", {"path": str(path)})]),
+            completion(content="It is a blue rectangle."),
+        )
+        events = collect_auto(client.chat(
+            [{"role": "user", "content": "what is in the image?"}],
+            tool_confirmation="all",
+        ))
+
+        result = [e for e in events if e["type"] == "tool_result"][0]
+        assert "Loaded shot.png" in result["content"]
+        assert "48×32" in result["content"]
+
+        # Second request carries the picture the first one produced.
+        sent = stub.requests[1]["body"]["messages"]
+        tool_msg = [m for m in sent if m["role"] == "tool"][0]
+        assert isinstance(tool_msg["content"], str), "tool content must stay a string"
+
+        attached = sent[-1]
+        assert attached["role"] == "user"
+        images = [p for p in attached["content"] if p["type"] == "image_url"]
+        assert len(images) == 1
+        assert images[0]["image_url"]["url"].startswith("data:image/")
+        assert ";base64," in images[0]["image_url"]["url"]
+
+    def test_tool_message_directly_follows_assistant(self, stub, client, tmp_path):
+        """The attachment must not be wedged between an assistant tool_calls
+        message and its matching tool result — that is an API error."""
+        path = self._png(tmp_path)
+        stub.queue(
+            completion(tool_calls=[
+                tool_call("c1", "read_image", {"path": str(path)}),
+                tool_call("c2", "read_file", {"path": str(tmp_path / "n.txt")}),
+            ]),
+            completion(content="done"),
+        )
+        (tmp_path / "n.txt").write_text("hi")
+        collect_auto(client.chat(
+            [{"role": "user", "content": "look"}], tool_confirmation="all"))
+
+        roles = [m["role"] for m in stub.requests[1]["body"]["messages"]]
+        first_tool = roles.index("tool")
+        assert roles[first_tool - 1] == "assistant"
+        assert roles[first_tool:first_tool + 2] == ["tool", "tool"]
+        assert roles[-1] == "user"
+
+    def test_declined_read_image_attaches_nothing(self, stub, client, tmp_path):
+        path = self._png(tmp_path)
+        stub.queue(
+            completion(tool_calls=[tool_call("c1", "read_image", {"path": str(path)})]),
+            completion(content="ok"),
+        )
+        gen = client.chat([{"role": "user", "content": "look"}],
+                          tool_confirmation="none")
+        events, pending = [], None
+        try:
+            ev = next(gen)
+            while True:
+                events.append(ev)
+                if ev["type"] == "tool_request":
+                    ev = gen.send({"confirmed": False})
+                else:
+                    ev = next(gen)
+        except StopIteration:
+            pass
+
+        assert all(
+            m["role"] != "user" or isinstance(m["content"], str)
+            for m in stub.requests[1]["body"]["messages"]
+        ), "nothing should be attached when the call was declined"
+
+    def test_error_result_attaches_nothing(self, stub, client, tmp_path):
+        stub.queue(
+            completion(tool_calls=[
+                tool_call("c1", "read_image", {"path": str(tmp_path / "nope.png")})]),
+            completion(content="ok"),
+        )
+        collect_auto(client.chat([{"role": "user", "content": "look"}],
+                                 tool_confirmation="all"))
+        assert all(
+            isinstance(m["content"], str)
+            for m in stub.requests[1]["body"]["messages"] if m["role"] == "user"
+        )

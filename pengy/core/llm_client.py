@@ -364,6 +364,27 @@ class LLMClient:
                             yield {"type": "tool_result", "tool_call_id": tool_call.id,
                                    "name": tool_name, "args": tool_args,
                                    "content": declined_msg, "declined": True}
+
+                # read_image parks its picture on the tool context because a
+                # role:"tool" message only accepts string content on
+                # OpenAI-compatible APIs.  Attach anything queued as a follow-up
+                # user message — after the loop, so every tool_call keeps its
+                # matching tool message immediately behind the assistant one.
+                pending_images = _tools_mod.take_pending_images(tool_context)
+                if pending_images:
+                    parts = []
+                    for image in pending_images:
+                        parts.append({
+                            "type": "text",
+                            "text": f"Image loaded by read_image: {image['path']}",
+                        })
+                        parts.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{image['mime']};base64,{image['b64']}",
+                            },
+                        })
+                    current_messages.append({"role": "user", "content": parts})
             else:
                 yield {"type": "final_response", "content": assistant_msg.content,
                        "message": _serialize_assistant_message(assistant_msg, preserve_reasoning),

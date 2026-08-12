@@ -549,6 +549,50 @@ class TestTools:
         result = execute_tool("read_file", {"path": "/nonexistent/file"})
         assert "Error" in result or "not found" in result.lower()
 
+    def test_read_file_offset_and_limit(self, tmp_path):
+        """offset/limit page through a file; the header states where you are so
+        the model can request the next page."""
+        from pengy.core.tools import execute_tool
+        f = tmp_path / "many.txt"
+        f.write_text("\n".join(f"line {i}" for i in range(1, 21)))
+        call = lambda **kw: execute_tool("read_file", {"path": str(f), **kw})
+
+        ranged = call(offset=5, limit=3)
+        assert ranged.splitlines()[0] == f"[Lines 5-7 of 20 in {f}]"
+        assert ranged.splitlines()[1:] == ["line 5", "line 6", "line 7"]
+
+        # limit alone starts at line 1; offset alone runs to the end.
+        assert call(limit=2).splitlines()[1:] == ["line 1", "line 2"]
+        assert call(offset=19).splitlines()[1:] == ["line 19", "line 20"]
+
+        # A limit past the end clamps instead of erroring.
+        assert call(offset=19, limit=100).splitlines()[0] == f"[Lines 19-20 of 20 in {f}]"
+
+        # No offset/limit keeps the plain whole-file behaviour (no header).
+        assert call().startswith("line 1")
+
+    def test_read_file_offset_past_end_errors(self, tmp_path):
+        from pengy.core.tools import execute_tool
+        f = tmp_path / "short.txt"
+        f.write_text("a\nb\nc")
+        result = execute_tool("read_file", {"path": str(f), "offset": 99})
+        assert "Error" in result and "3 lines" in result
+
+    def test_read_file_snip_mentions_paging(self, tmp_path):
+        """A truncated whole-file read has to tell the model paging exists,
+        otherwise offset/limit is undiscoverable."""
+        from pengy.core import tools
+        f = tmp_path / "big.txt"
+        f.write_text("\n".join(f"line {i}" for i in range(1, 5001)))
+        original = tools._MAX_TOOL_OUTPUT_CHARS
+        try:
+            tools.set_tool_output_max_chars(2000)
+            result = tools.execute_tool("read_file", {"path": str(f)})
+            assert "5,000 lines" in result
+            assert "offset and limit" in result
+        finally:
+            tools.set_tool_output_max_chars(original)
+
     def test_write_file(self):
         from pengy.core.tools import execute_tool
         with tempfile.TemporaryDirectory() as td:
@@ -782,6 +826,22 @@ class TestTools:
             assert "foo" in result
             assert "search_me.py" in result
 
+    def test_download_filename_cannot_escape_downloads(self):
+        """The model picks this name and may be acting on a fetched page's
+        instructions, so a path component must never leave ~/Downloads."""
+        from pengy.core.tools import _safe_download_name
+        assert _safe_download_name("../../.bashrc") == ".bashrc"
+        assert _safe_download_name("/etc/passwd") == "passwd"
+        assert _safe_download_name("a/b/c.txt") == "c.txt"
+        assert _safe_download_name("..\\..\\evil.exe") == "evil.exe"
+        # Nothing usable left over — fall back rather than write to the dir itself.
+        assert _safe_download_name("..") == "download"
+        assert _safe_download_name(".") == "download"
+        assert _safe_download_name("") == "download"
+        assert _safe_download_name("subdir/") == "download"
+        # Ordinary names pass through untouched.
+        assert _safe_download_name("report.pdf") == "report.pdf"
+
     def test_download_file_scheme_reject(self):
         from pengy.core.tools import execute_tool
         result = execute_tool("download_file", {"url": "file:///etc/passwd"})
@@ -882,6 +942,46 @@ class TestGlob:
         result = execute_tool("glob", {"pattern": "*.py", "path": str(tmp_path)})
         assert "visible.py" in result
         assert ".hidden.py" not in result
+
+    def test_glob_finds_dotenv_file(self, tmp_path):
+        """'.env' is in the skip set as a virtualenv *directory* name; matching
+        it against the entry's own name made the common .env *file* unfindable."""
+        from pengy.core.tools import execute_tool
+        (tmp_path / ".env").write_text("SECRET=1")
+        result = execute_tool("glob", {"pattern": ".env", "path": str(tmp_path)})
+        assert ".env" in result
+        assert "No files matching" not in result
+
+    def test_glob_still_skips_dotenv_directory_contents(self, tmp_path):
+        """The virtualenv case the skip entry was there for must keep working."""
+        from pengy.core.tools import execute_tool
+        (tmp_path / ".env").mkdir()
+        (tmp_path / ".env" / "pyvenv.py").write_text("x")
+        (tmp_path / "real.py").write_text("y")
+        result = execute_tool("glob", {"pattern": "**/*.py", "path": str(tmp_path)})
+        assert "real.py" in result
+        assert "pyvenv.py" not in result
+
+    def test_glob_finds_hidden_when_pattern_asks(self, tmp_path):
+        """A pattern whose final component starts with '.' wants hidden entries,
+        even when the pattern as a whole starts with '*' or a directory name."""
+        from pengy.core.tools import execute_tool
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / ".config").write_text("x")
+        result = execute_tool("glob", {"pattern": "**/.config", "path": str(tmp_path)})
+        assert ".config" in result
+        assert "No files matching" not in result
+
+    def test_glob_skips_build_dir_contents(self, tmp_path):
+        """Ancestors are still filtered, and the noise directory itself stays hidden."""
+        from pengy.core.tools import execute_tool
+        (tmp_path / "build").mkdir()
+        (tmp_path / "build" / "out.py").write_text("x")
+        (tmp_path / "app.py").write_text("y")
+        assert "out.py" not in execute_tool(
+            "glob", {"pattern": "**/*.py", "path": str(tmp_path)})
+        assert "build" not in execute_tool(
+            "glob", {"pattern": "*", "path": str(tmp_path)})
 
     def test_glob_skips_node_modules(self, tmp_path):
         from pengy.core.tools import execute_tool

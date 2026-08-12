@@ -1095,6 +1095,11 @@ class PengyCLI:
         tools.set_user_agent(self.config.get("user_agent", "PengyAgent/1.0"))
         tools.set_tool_timeout(self.config.get("tool_timeout", 60))
         tools.set_tool_output_max_chars(self.config.get("tool_output_max_chars", 250000))
+        tools.set_image_limits(
+            self.config.get("image_max_dimension", 4096),
+            self.config.get("image_max_mb", 4.5),
+            self.config.get("image_quality", 85),
+        )
 
     def _build_messages(self, chat: dict, _current_text: str,
                          image_paths: list[Path] | None = None) -> list[dict]:

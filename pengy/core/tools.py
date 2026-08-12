@@ -1,9 +1,11 @@
 """Tool definitions and execution for Pengy."""
+import base64
 import concurrent.futures
 import difflib
 import fnmatch
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys as _sys_module
@@ -16,16 +18,43 @@ from pathlib import Path
 
 from ddgs import DDGS
 
+from pengy.core.image_utils import preprocess as _preprocess_image
+
 _user_agent = "PengyAgent/1.0"
 
+# read_image limits; set by whichever frontend is active via set_image_limits().
+_image_max_dimension = 4096
+_image_max_mb = 4.5
+_image_quality = 85
+
 _tool_timeout = 60  # seconds; -1 means no timeout
+
+# Shell used by run_bash, resolved once at import.
+#
+# subprocess with shell=True defaults to /bin/sh, which on Debian/Ubuntu is
+# dash — so bashisms the model reliably emits ([[ ]], arrays, <<<, ${v,,})
+# fail with "not found" in a tool named run_bash.  which() rather than a
+# hardcoded /bin/bash because:
+#   - macOS ships bash 3.2.57 at /bin/bash (frozen at the last GPLv2 release);
+#     Homebrew's bash 5 appears earlier on PATH when installed
+#   - busybox/Alpine images have no /bin/bash at all
+# None means "let Popen pick the platform default" — /bin/sh on POSIX when
+# bash is genuinely absent, COMSPEC (cmd.exe) on Windows.  Windows is
+# aspirational: run_bash's kill path is still POSIX-only (os.killpg/SIGKILL).
+_SHELL = None if os.name == "nt" else shutil.which("bash")
 
 # Read-only tools that can be auto-approved when tool_confirmation is "safe"
 READONLY_TOOLS = frozenset({
     "read_file", "read_multiple_files", "directory_tree",
     "search_content", "web_search", "fetch_url",
-    "glob", "todowrite",
+    "glob", "todowrite", "read_image",
 })
+
+# Extensions read_image will attempt; anything else is rejected before Pillow
+# is handed the file, so the model gets a useful error instead of a decode trace.
+_IMAGE_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff",
+}
 
 # apply_changes safety limits. The tool is deliberately transactional and
 # conservative: validate everything in memory before writing anything.
@@ -61,7 +90,27 @@ class ToolContext:
         self.sudo_provider = sudo_provider
         self.cached_sudo_password = None
         self._procs: set = set()
+        self._pending_images: list[dict] = []
         self._lock = threading.Lock()
+
+    def add_pending_image(self, path: str, mime: str, b64: str):
+        """Queue an image for attachment to the conversation.
+
+        ``execute_tool`` returns a plain string and OpenAI-compatible APIs only
+        accept string content in a ``role: "tool"`` message, so ``read_image``
+        can't hand the picture back through its return value.  It parks the
+        encoded image here instead and the caller drains the queue once every
+        tool result for the turn is in place.
+        """
+        with self._lock:
+            self._pending_images.append({"path": path, "mime": mime, "b64": b64})
+
+    def take_pending_images(self) -> list[dict]:
+        """Return queued images and clear the queue."""
+        with self._lock:
+            images = self._pending_images
+            self._pending_images = []
+        return images
 
     def register_process(self, proc):
         with self._lock:
@@ -81,6 +130,11 @@ class ToolContext:
 
     def clear_sudo(self):
         self.cached_sudo_password = None
+
+
+def take_pending_images(context: "ToolContext | None" = None) -> list[dict]:
+    """Drain queued read_image results for *context* (default context if None)."""
+    return (context or _default_context).take_pending_images()
 
 
 # Context used by callers that don't pass their own (CLI, Web, direct calls).
@@ -126,6 +180,14 @@ def set_tool_timeout(seconds: int):
     _tool_timeout = seconds
 
 
+def set_image_limits(max_dimension: int, max_mb: float, quality: int):
+    """Set the preprocessing limits read_image applies before encoding."""
+    global _image_max_dimension, _image_max_mb, _image_quality
+    _image_max_dimension = max_dimension
+    _image_max_mb = max_mb
+    _image_quality = quality
+
+
 def set_tool_output_max_chars(chars: int):
     """Set the max chars for tool output before head+tail snipping.  0 = no limit."""
     global _MAX_TOOL_OUTPUT_CHARS
@@ -158,13 +220,38 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file",
+            "description": "Read the contents of a text file. Returns the whole file by default; pass offset and limit to read one line range instead, which is how to page through a file too large to return at once. Use read_image for images — this tool cannot decode binary data.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "The file path to read",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-based line number to start reading from. Omit to start at the beginning.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to return, counting from offset. Omit to read to the end of the file.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_image",
+            "description": "Look at an image file — a screenshot, photo, diagram, or a chart/render produced by an earlier command. The image is added to the conversation so you can see it directly and describe or judge what it shows; use this instead of read_file, which cannot decode image data. Supports PNG, JPEG, GIF, WebP, BMP and TIFF; large images are downscaled automatically.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path of the image file to look at",
                     },
                 },
                 "required": ["path"],
@@ -175,7 +262,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write content to a file",
+            "description": "Write content to a file, replacing it entirely if it already exists. Parent directories are created automatically, so there is no need to mkdir first. To change part of an existing file use replace_in_file instead of rewriting the whole thing.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -274,7 +361,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run a bash command in the terminal",
+            "description": "Run a command with bash. The command is non-interactive: stdin is closed, so anything that prompts or waits for input (a password prompt, an editor, `read`) will fail rather than wait — pass non-interactive flags instead. sudo is supported and prompts the user for their password separately. Commands are killed once the configured tool timeout elapses.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -333,7 +420,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "fetch_url",
-            "description": "Fetch the text content of a URL into the context window, useful for reading documentation or web pages before coding",
+            "description": "Fetch a URL and return its text content. Works for documentation and web pages (HTML is stripped to plain text) and for JSON or plain-text endpoints, including local ones such as http://127.0.0.1:8080/api/status. Returns the body only — use run_bash with curl if you need status codes or response headers.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -350,7 +437,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_python",
-            "description": "Execute Python code",
+            "description": "Execute Python code in a fresh subprocess. Nothing persists between calls — variables, imports and state from an earlier call are gone, so each call must stand on its own. Only what you print() comes back; a bare expression returns nothing.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -444,7 +531,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "Find files matching a glob pattern. Returns sorted file paths with sizes. Use ** for recursive search (e.g. 'src/**/*.py'). Respects .gitignore — skipped directories like node_modules are excluded. Prefer this over run_bash('find ...') or run_bash('ls ...').",
+            "description": "Find files matching a glob pattern. Returns sorted file paths with sizes. Use ** for recursive search (e.g. 'src/**/*.py'). Noise directories are always skipped: .git, node_modules, __pycache__, .venv/venv, build, dist and target. Prefer this over run_bash('find ...') or run_bash('ls ...').",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -553,7 +640,13 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
     """
     ctx = context or _default_context
     if name == "read_file":
-        return _read_file(arguments["path"])
+        return _read_file(
+            arguments["path"],
+            arguments.get("offset"),
+            arguments.get("limit"),
+        )
+    elif name == "read_image":
+        return _read_image(arguments["path"], ctx)
     elif name == "write_file":
         return _write_file(arguments["path"], arguments["content"])
     elif name == "replace_in_file":
@@ -603,17 +696,101 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
         return f"Unknown tool: {name}"
 
 
-def _read_file(path: str) -> str:
-    """Read file contents."""
+def _read_file(path: str, offset: int | None = None,
+               limit: int | None = None) -> str:
+    """Read file contents, optionally just the line range *offset*..*offset+limit*.
+
+    A ranged read is reported as ``[Lines A-B of N]`` so the model knows where
+    it is in the file and can ask for the next page; a whole-file read that had
+    to be snipped says how many lines exist so paging is discoverable.
+    """
     try:
         p = Path(path).expanduser()
         if not p.exists():
             return f"Error: File not found: {path}"
         if not p.is_file():
             return f"Error: Not a file: {path}"
-        return _snip_tool_output(p.read_text(encoding="utf-8"))
+
+        text = p.read_text(encoding="utf-8")
+
+        if offset is None and limit is None:
+            snipped = _snip_tool_output(text)
+            if snipped != text:
+                total = text.count("\n") + 1
+                snipped += (
+                    f"\n\n[{path} has {total:,} lines — pass offset and limit "
+                    f"to read a specific range instead.]"
+                )
+            return snipped
+
+        lines = text.split("\n")
+        total = len(lines)
+        start = 1 if offset is None else max(1, offset)
+        if start > total:
+            return (
+                f"Error: offset {start} is past the end of {path}, "
+                f"which has {total:,} lines."
+            )
+        count = (total - start + 1) if limit is None else max(1, limit)
+        end = min(total, start + count - 1)
+
+        body = "\n".join(lines[start - 1:end])
+        return (
+            f"[Lines {start:,}-{end:,} of {total:,} in {path}]\n"
+            + _snip_tool_output(body)
+        )
     except Exception as e:
         return f"Error reading file: {e}"
+
+
+def _read_image(path: str, ctx: "ToolContext" = None) -> str:
+    """Queue an image for attachment to the conversation.
+
+    Returns a text summary for the tool result; the picture itself is handed to
+    the caller via ``ToolContext.take_pending_images()`` — see
+    :meth:`ToolContext.add_pending_image` for why it can't ride in the return
+    value.
+    """
+    ctx = ctx or _default_context
+    try:
+        p = Path(path).expanduser()
+        if not p.exists():
+            return f"Error: File not found: {path}"
+        if not p.is_file():
+            return f"Error: Not a file: {path}"
+        if p.suffix.lower() not in _IMAGE_SUFFIXES:
+            return (
+                f"Error: {path} is not a recognized image file. "
+                f"Supported extensions: {', '.join(sorted(_IMAGE_SUFFIXES))}. "
+                f"Use read_file for text."
+            )
+
+        original_size = p.stat().st_size
+        try:
+            from PIL import Image
+            with Image.open(p) as probe:
+                width, height = probe.size
+        except Exception as e:
+            return f"Error: {path} could not be decoded as an image: {e}"
+
+        img_bytes, mime = _preprocess_image(
+            p,
+            max_dimension=_image_max_dimension,
+            max_mb=_image_max_mb,
+            quality=_image_quality,
+        )
+        ctx.add_pending_image(
+            str(p), mime, base64.b64encode(img_bytes).decode(),
+        )
+
+        summary = (
+            f"Loaded {p.name} — {width}×{height}, {_format_size(original_size)}"
+        )
+        if len(img_bytes) != original_size:
+            summary += f" → {mime}, {_format_size(len(img_bytes))} after preprocessing"
+        return summary + ". The image is attached below; look at it directly."
+    except Exception as e:
+        return f"Error reading image: {e}"
 
 
 def _write_file(path: str, content: str) -> str:
@@ -927,6 +1104,7 @@ def _run_bash(command: str, ctx: "ToolContext" = None) -> str:
         proc = subprocess.Popen(
             command,
             shell=True,
+            executable=_SHELL,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -990,6 +1168,20 @@ def _web_search(query: str, max_results: int = 5) -> str:
     return "\n".join(lines).strip()
 
 
+def _safe_download_name(raw: str) -> str:
+    """Reduce *raw* to a bare filename inside ~/Downloads.
+
+    The model chooses this name and may be acting on instructions from a fetched
+    page, so a path component here must never escape the download directory —
+    ``../../.bashrc`` has to land as ``.bashrc``.  Backslashes are folded too so
+    a Windows-style path can't slip through on POSIX.
+    """
+    name = (raw or "").replace("\\", "/").split("/")[-1].strip()
+    if name in ("", ".", ".."):
+        return "download"
+    return name
+
+
 def _download_file(url: str, filename: str | None = None) -> str:
     """Download a file to ~/Downloads/."""
     try:
@@ -1000,8 +1192,8 @@ def _download_file(url: str, filename: str | None = None) -> str:
         downloads = Path.home() / "Downloads"
         downloads.mkdir(exist_ok=True)
         if not filename:
-            filename = url.split("?")[0].rstrip("/").split("/")[-1] or "download"
-        dest = downloads / filename
+            filename = url.split("?")[0].rstrip("/").split("/")[-1]
+        dest = downloads / _safe_download_name(filename)
         req = urllib.request.Request(url, headers={"User-Agent": _user_agent})
         timeout = None if _tool_timeout == -1 else _tool_timeout
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -1590,16 +1782,26 @@ def _glob(pattern: str, path: str | None = None) -> str:
     except Exception as e:
         return f"Error with glob pattern '{pattern}': {e}"
 
+    # A pattern whose final component starts with "." is asking for hidden
+    # entries.  Testing the whole pattern would miss "**/.config" or "src/.env",
+    # since those start with "*" and "s".
+    last_component = pattern.replace("\\", "/").rstrip("/").split("/")[-1]
+    wants_hidden = last_component.startswith(".")
+
     # Filter out noise directories and their contents
     filtered = []
     for m in matches:
-        # Check if any parent directory is in the skip set
+        # Only ancestors are checked against the skip set: ".env" is in there as
+        # a virtualenv *directory* name, and matching it against the entry's own
+        # name made the common ".env" *file* unfindable.
         parts = m.relative_to(search_dir).parts
-        if any(p in _GLOB_SKIP_CONTENTS for p in parts):
+        if any(p in _GLOB_SKIP_CONTENTS for p in parts[:-1]):
+            continue
+        if m.is_dir() and m.name in _GLOB_SKIP_CONTENTS:
             continue
         if m.name in _GLOB_SKIP_DIRS or m.name in _GLOB_SKIP_FILES:
             continue
-        if m.name.startswith(".") and not pattern.startswith("."):
+        if m.name.startswith(".") and not wants_hidden:
             continue  # skip hidden unless explicitly requested
         filtered.append(m)
 

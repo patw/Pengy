@@ -448,6 +448,11 @@ class WebWorker:
             tools.set_user_agent(config.get("user_agent", "PengyAgent/1.0"))
             tools.set_tool_timeout(config.get("tool_timeout", 60))
             tools.set_tool_output_max_chars(config.get("tool_output_max_chars", 250000))
+            tools.set_image_limits(
+                config.get("image_max_dimension", 4096),
+                config.get("image_max_mb", 4.5),
+                config.get("image_quality", 85),
+            )
 
             llm = LLMClient(
                 base_url=config.get("base_url", "https://api.openai.com/v1"),
