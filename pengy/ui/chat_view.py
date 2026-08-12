@@ -1,6 +1,7 @@
 """Chat view with markdown rendering for Pengy."""
 import base64
 import json
+import os
 import re
 import threading
 import urllib.request
@@ -184,9 +185,13 @@ class ChatView(QTextBrowser):
                     pass
                 return None
 
-            # ── Local file:// images ──────────────────────────────
-            if url_str.startswith("file://"):
-                local_path = url.toLocalFile()
+            # ── Local file images ─────────────────────────────────
+            # Skills normally emit file:/// URLs, but an LLM may wrap the
+            # returned absolute macOS path directly as <img src="/Users/...">.
+            # QTextDocument passes that through as a scheme-less QUrl, so
+            # accept it explicitly.
+            if url.isLocalFile() or os.path.isabs(url_str):
+                local_path = url.toLocalFile() if url.isLocalFile() else url_str
                 image = QImage()
                 if image.load(local_path):
                     if image.width() > 600:
