@@ -1,6 +1,43 @@
 # Changelog
 
-## v1.5.9 (current)
+## v1.6.0 (current)
+
+- **New `read_image` tool** — the agent can inspect local images (screenshots,
+  photos, diagrams, charts, rendered plots) and attach them to the conversation
+  so vision-capable models can describe what they show.
+  - Images are decoded, preprocessed (resize/compress to configurable limits:
+    `image_max_dimension`, `image_max_mb`, `image_quality`), and base64-encoded
+  - Parked on `ToolContext` (not the tool return value) because OpenAI-compatible
+    APIs only accept string content in `role: "tool"` messages
+  - Attached as a follow-up user message with `image_url` parts after the tool
+    loop completes
+  - Added to `READONLY_TOOLS` safe-list for auto-approval in "safe" mode
+  - Limits shared via `set_image_limits()` across all frontends
+  - Full test coverage: image attachment, error handling, LLM loop integration
+- **Graceful degradation for text-only models**: if the API returns HTTP 400
+  because the model doesn't support vision inputs, the `image_url` parts are
+  automatically stripped from all messages, a clarifying note is appended
+  (`"[This AI model does not support image/vision inputs…]"`), and the
+  conversation retries without the image — instead of crashing with a raw
+  "API error (HTTP 400)" that kills the chat. Implemented in all three editions
+  (Python, C++, Rust).
+- **Fix: tool output truncation now cuts on line boundaries and separates file
+  reads from command output**:
+  - `read_file` / `read_multiple_files`: truncate from the head only
+    (contiguous, no middle gap) — the head has imports/declarations, the rest
+    can be paged via `offset`
+  - `run_bash` / `run_python`: remain tail-biased (head + tail, middle snipped)
+    — command echo at the start, errors at the end, disposable middle
+  - Both seams cut on full line boundaries so the model never sees a broken
+    half-line fragment it might try to "fix"
+  - Whole-file reads that fit within the limit stay bare — no `[Lines X-Y]`
+    header to parse
+  - Truncated file headers now show the exact continuation offset for easy
+    paging
+  - Giant single-line files fall back to character-boundary cutting
+- **Updated README screenshots** — new settings, templates, and main UI images.
+
+## v1.5.9
 
 - Fix web SSE reconnect race: events are now stored in an append-only log with
   monotonic IDs and `Last-Event-ID` resume, so a dropped connection can no
