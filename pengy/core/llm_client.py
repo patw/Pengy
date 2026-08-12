@@ -21,6 +21,47 @@ _MAX_DELAY = 60.0          # cap
 _JITTER = 0.25             # ±25 %
 _RETRYABLE_STATUSES = {429, 529}
 
+# Sentinel for graceful image-stripping recovery.
+_RETRY_WITHOUT_IMAGES = object()
+
+
+def _has_image_url_parts(messages: list[dict]) -> bool:
+    """True if any message in the list contains image_url parts."""
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+    return False
+
+
+def _strip_image_url_parts(messages: list[dict]):
+    """Remove image_url parts from all messages in-place."""
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            msg["content"] = [
+                p for p in content
+                if not (isinstance(p, dict) and p.get("type") == "image_url")
+            ]
+            # Collapse single remaining text items back to plain string
+            if len(msg["content"]) == 1 and msg["content"][0].get("type") == "text":
+                msg["content"] = msg["content"][0]["text"]
+            elif not msg["content"]:
+                msg["content"] = "[Empty — image content was removed]"
+
+
+_IMAGE_ERROR_KEYWORDS = {"image", "multimodal", "vision", "not support", "unsupported"}
+
+
+def _is_image_input_error(e: "APIStatusError") -> bool:
+    """Check if the API error is about the model not supporting image inputs."""
+    err_text = (e.message or "").lower()
+    body = getattr(e, "body", None)
+    if body and isinstance(body, (dict, list)):
+        err_text += " " + str(body).lower()
+    return any(kw in err_text for kw in _IMAGE_ERROR_KEYWORDS)
 
 def _retry_after_delay(status_code: int, headers) -> float | None:
     """Extract Retry-After from response headers.
@@ -232,6 +273,23 @@ class LLMClient:
                     response = self.client.chat.completions.create(**request_kwargs)
                     break  # success — exit retry loop
                 except APIStatusError as e:
+                    # ── Graceful handling: model doesn't support images ──
+                    if (e.status_code == 400
+                            and _has_image_url_parts(current_messages)
+                            and _is_image_input_error(e)):
+                        _strip_image_url_parts(current_messages)
+                        current_messages.append({
+                            "role": "user",
+                            "content": (
+                                "[This AI model does not support image/vision inputs, "
+                                "so the image could not be attached. "
+                                "The file metadata was returned above.]"
+                            ),
+                        })
+                        self._reset_client()
+                        response = _RETRY_WITHOUT_IMAGES
+                        break  # exit retry loop
+
                     if e.status_code not in _RETRYABLE_STATUSES or attempt >= _MAX_RETRIES:
                         self._reset_client()
                         raise
@@ -261,6 +319,11 @@ class LLMClient:
                 except Exception:
                     self._reset_client()
                     raise
+
+            # If images were stripped due to model not supporting vision,
+            # restart the outer loop without them.
+            if response is _RETRY_WITHOUT_IMAGES:
+                continue
 
             # Accumulate token usage across all calls in this turn
             if response.usage:
