@@ -1291,6 +1291,26 @@ class TestToolContext:
         result = execute_tool("run_bash", {"command": "cat; echo done"})
         assert "done" in result
 
+    def test_run_bash_cwd(self, tmp_path):
+        from pengy.core.tools import execute_tool
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        result = execute_tool("run_bash", {"command": "touch marker.txt && ls", "cwd": str(sub)})
+        assert "marker.txt" in result
+        assert (sub / "marker.txt").exists()
+
+    def test_run_bash_cwd_invalid(self):
+        from pengy.core.tools import execute_tool
+        result = execute_tool("run_bash", {"command": "pwd", "cwd": "/nonexistent_dir_xyz"})
+        assert "cwd not found" in result
+
+    def test_run_python_cwd(self, tmp_path):
+        from pengy.core.tools import execute_tool
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        execute_tool("run_python", {"code": "open('marker.txt','w').write('x')", "cwd": str(sub)})
+        assert (sub / "marker.txt").exists()
+
     def test_kill_all_only_affects_own_context(self):
         """kill_all() on one context must not touch another's subprocess."""
         import subprocess

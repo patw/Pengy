@@ -266,7 +266,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a text file. Returns the whole file by default; pass offset and limit to read one line range instead, which is how to page through a file too large to return at once. Use read_image for images — this tool cannot decode binary data.",
+            "description": "Read the contents of a text file. Returns the whole file by default; very large files are truncated to the output limit, with a header telling you how to continue with offset/limit. Pass offset and limit to read one line range instead, which is how to page through a file too large to return at once. Use read_image for images — this tool cannot decode binary data.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -354,7 +354,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "apply_changes",
-            "description": "Apply a bounded, transactional set of exact-text edits across files. All operations are validated in memory first; if any operation fails, no files are changed. Use dry_run=true to preview the unified diff before writing.",
+            "description": "Apply a bounded, transactional set of exact-text edits across files. Every operation is validated in memory before anything is written — if validation fails, nothing is changed. Use dry_run=true to preview the unified diff before writing. Limits: at most 20 files, 100 operations total, and ~1 MB of content.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -407,13 +407,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run a command with bash. The command is non-interactive: stdin is closed, so anything that prompts or waits for input (a password prompt, an editor, `read`) will fail rather than wait — pass non-interactive flags instead. sudo is supported and prompts the user for their password separately. Commands are killed once the configured tool timeout elapses.",
+            "description": "Run a command with bash. The command is non-interactive: stdin is closed, so anything that prompts or waits for input (a password prompt, an editor, `read`) will fail rather than wait — pass non-interactive flags instead. Set cwd to run the command in a specific working directory (defaults to the current directory). sudo is supported and prompts the user for their password separately. Commands are killed once the configured tool timeout elapses.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
                         "description": "The bash command to execute",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory to run the command in",
                     },
                 },
                 "required": ["command"],
@@ -445,7 +449,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "download_file",
-            "description": "Download a file from a URL to the user's Downloads directory",
+            "description": "Download a file from a URL to the user's Downloads directory. Existing files of the same name are overwritten; downloads larger than 100 MB are rejected.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -466,7 +470,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "fetch_url",
-            "description": "Fetch a URL and return its text content. Works for documentation and web pages (HTML is stripped to plain text) and for JSON or plain-text endpoints, including local ones such as http://127.0.0.1:8080/api/status. Returns the body only — use run_bash with curl if you need status codes or response headers.",
+            "description": "Fetch a URL and return its text content. Works for documentation and web pages (HTML is stripped to plain text) and for JSON or plain-text endpoints, including local ones such as http://127.0.0.1:8080/api/status. Returns the body only — use run_bash with curl if you need status codes or response headers. Very large responses are truncated; a notice is appended when truncation occurs.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -483,13 +487,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_python",
-            "description": "Execute Python code in a fresh subprocess. Nothing persists between calls — variables, imports and state from an earlier call are gone, so each call must stand on its own. Only what you print() comes back; a bare expression returns nothing.",
+            "description": "Execute Python code in a fresh subprocess. Nothing persists between calls — variables, imports and state from an earlier call are gone, so each call must stand on its own. Only what you print() comes back; a bare expression returns nothing. Set cwd to run in a specific working directory. The process is killed once the configured tool timeout elapses.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "code": {
                         "type": "string",
                         "description": "The Python code to execute",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory to run the code in",
                     },
                 },
                 "required": ["code"],
@@ -581,7 +589,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "Find files matching a glob pattern. Returns sorted file paths with sizes. Use ** for recursive search (e.g. 'src/**/*.py'). Noise directories are always skipped: .git, node_modules, __pycache__, .venv/venv, build, dist and target. Prefer this over run_bash('find ...') or run_bash('ls ...').",
+            "description": "Find files matching a glob pattern. Returns sorted file paths with sizes. Use ** for recursive search (e.g. 'src/**/*.py'). Noise directories are always skipped: .git, node_modules, __pycache__, .venv/venv, build, dist and target. Prefer this over run_bash('find ...') or run_bash('ls ...'). Results are capped at 200 paths.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -602,7 +610,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "todowrite",
-            "description": "Create and update a structured task list for tracking progress during complex multi-step operations. Send the COMPLETE list every time — do not send incremental updates. Exactly one task must be in_progress at any time. Mark tasks completed immediately after finishing them. Use imperative forms for content (e.g. 'Run tests', 'Add JWT middleware').",
+            "description": "Create and update a structured task list for tracking progress during complex multi-step operations. Send the COMPLETE list every time — do not send incremental updates. At most one task must be in_progress at any time — it is fine to have none. Mark tasks completed immediately after finishing them. Use imperative forms for content (e.g. 'Run tests', 'Add JWT middleware').",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -618,7 +626,7 @@ TOOLS = [
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"],
-                                    "description": "Current task status — exactly one task must be in_progress",
+                                    "description": "Current task status — at most one task should be in_progress",
                                 },
                             },
                             "required": ["content", "status"],
@@ -708,7 +716,7 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
             arguments.get("postconditions", []),
         )
     elif name == "run_bash":
-        return _run_bash(arguments["command"], ctx)
+        return _run_bash(arguments["command"], ctx, arguments.get("cwd"))
     elif name == "web_search":
         return _web_search(arguments["query"], arguments.get("max_results", 5))
     elif name == "download_file":
@@ -716,7 +724,7 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
     elif name == "fetch_url":
         return _fetch_url(arguments["url"])
     elif name == "run_python":
-        return _run_python(arguments["code"], ctx)
+        return _run_python(arguments["code"], ctx, arguments.get("cwd"))
     elif name == "directory_tree":
         return _directory_tree(
             arguments["path"],
@@ -1124,9 +1132,25 @@ class _AskpassHelper:
             pass
 
 
-def _run_bash(command: str, ctx: "ToolContext" = None) -> str:
+def _resolve_cwd(cwd: str | None) -> "tuple[str | None, str | None]":
+    """Expand and validate an optional working directory for run_bash/run_python.
+
+    Returns ``(resolved_path, error)``; exactly one of the two is non-None.
+    """
+    if not cwd:
+        return None, None
+    p = Path(cwd).expanduser()
+    if not p.is_dir():
+        return None, f"Error: cwd not found or not a directory: {cwd}"
+    return str(p), None
+
+
+def _run_bash(command: str, ctx: "ToolContext" = None, cwd: str | None = None) -> str:
     """Run a bash command."""
     ctx = ctx or _default_context
+    run_cwd, cwd_err = _resolve_cwd(cwd)
+    if cwd_err:
+        return cwd_err
     proc = None
     askpass = None
     env = None
@@ -1161,6 +1185,7 @@ def _run_bash(command: str, ctx: "ToolContext" = None) -> str:
             text=True,
             start_new_session=True,
             env=env,
+            cwd=run_cwd,
         )
         ctx.register_process(proc)
         try:
@@ -1322,9 +1347,12 @@ def _fetch_url(url: str) -> str:
         return f"Error fetching URL: {e}"
 
 
-def _run_python(code: str, ctx: "ToolContext" = None) -> str:
+def _run_python(code: str, ctx: "ToolContext" = None, cwd: str | None = None) -> str:
     """Execute Python code."""
     ctx = ctx or _default_context
+    run_cwd, cwd_err = _resolve_cwd(cwd)
+    if cwd_err:
+        return cwd_err
     proc = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1339,6 +1367,7 @@ def _run_python(code: str, ctx: "ToolContext" = None) -> str:
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=True,
+            cwd=run_cwd,
         )
         ctx.register_process(proc)
         try:
