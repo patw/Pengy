@@ -370,6 +370,7 @@ Browser shows Bootstrap modal (tool name + args JSON)
   "llm_timeout": 300,
   "tool_timeout": 300,
   "tool_output_max_chars": 250000,
+  "download_max_mb": 100,
   "image_max_dimension": 4096,
   "image_max_mb": 4.5,
   "image_quality": 85
@@ -393,6 +394,7 @@ Browser shows Bootstrap modal (tool name + args JSON)
 | `llm_timeout` | int | `300` | HTTP timeout in seconds for each LLM API request |
 | `tool_timeout` | int | `300` | Timeout in seconds for tool execution (-1 = no timeout) |
 | `tool_output_max_chars` | int | `250000` | Tool output longer than this is snipped head+tail with a `[... snipped N chars from middle ...]` marker. 0 = no limit |
+| `download_max_mb` | int | `100` | Default maximum download size for `download_file` in MB. Per-call `max_size_mb` overrides it; `0` = no limit |
 | `image_max_dimension` | int | `4096` | Attached images are downscaled so neither side exceeds this (px) |
 | `image_max_mb` | float | `4.5` | Attached images are re-encoded until under this size (MB) |
 | `image_quality` | int | `85` | JPEG quality (0–100) used when re-encoding attached images |
@@ -442,7 +444,7 @@ Tool argument previews are shown in the chat view truncated to 40 characters: `�
 Reads a local file. Expands `~`. Returns file contents or an error string.
 
 ### `read_multiple_files(paths)`
-Reads up to 20 files at once, each under a clear header. Individual files capped at 50,000 chars; total output capped at 120,000 chars. Binary files are rejected with a clear error.
+Reads up to 20 files at once, each under a clear header. The per-file budget equals `tool_output_max_chars`; the total batch budget is five times that value. `0` disables these output limits. Binary files are rejected with a clear error.
 
 ### `write_file(path, content)`
 Writes content to a file. Creates parent directories as needed. Returns success or error.
@@ -467,34 +469,34 @@ Safety limits (rejected with an error if exceeded): 20 files, 100 total operatio
 
 Returns the unified diff on success.
 
-### `run_bash(command)`
-Executes a bash command via `subprocess.Popen` in its own process group. Timeout configurable via `tool_timeout` (default 300s). Captures stdout and stderr.
+### `run_bash(command, cwd=None)`
+Executes a bash command via `subprocess.Popen` in its own process group. An optional `cwd` is expanded and must name an existing directory. Timeout configurable via `tool_timeout` (default 300s). Captures stdout and stderr.
 
 **sudo support:** If the command contains `sudo`, the password provider callback is invoked. In the GUI this shows a `QInputDialog`; in the CLI it uses `Prompt.ask(..., password=True)`. The password reaches sudo via `SUDO_ASKPASS` (every `sudo` rewritten to `sudo -A`; see Design Decisions), not stdin — the command's own stdin is `/dev/null`. The password prompt line is stripped from stderr. Cancelling returns a cancellation message to the LLM. The password is cached for the duration of the LLM run (so multi-step sudo workflows within one turn don't re-prompt) and cleared when the run completes.
 
-### `run_python(code)`
-Writes code to a temp file and executes it with `python3`. Timeout configurable via `tool_timeout` (default 300s). Captures stdout and stderr.
+### `run_python(code, cwd=None)`
+Writes code to a temp file and executes it with `python3`. An optional `cwd` is expanded and must name an existing directory. Timeout configurable via `tool_timeout` (default 300s). Captures stdout and stderr.
 
 ### `web_search(query, max_results=5)`
 Searches the web using DuckDuckGo (`ddgs`). 5-second hard timeout on the search call. Returns numbered results with title, URL, and snippet.
 
-### `download_file(url, filename=None)`
-Downloads a file to `~/Downloads/`. Derives filename from URL if not specified. Uses the configured `user_agent` for the HTTP request. Returns destination path and file size.
+### `download_file(url, filename=None, dir=None, max_size_mb=None)`
+Streams an HTTP(S) file to `dir` (default `~/Downloads/`), deriving the filename from the URL when needed. Existing same-name files are overwritten. The default size cap is `download_max_mb` (100 MB); `max_size_mb=0` disables the cap. Uses the configured `user_agent`, removes partial files on failure, and uses a 120-second no-data stall timeout.
 
-### `fetch_url(url)`
-Fetches a URL and returns its text content (up to 50,000 characters). HTML is stripped to readable text (scripts, styles, and head removed via `HTMLParser`). Useful for pulling in documentation before coding.
+### `fetch_url(url, max_chars=None)`
+Fetches a URL and returns its text content. HTML is stripped to readable text (scripts, styles, and head removed via `HTMLParser`). Responses are limited by `tool_output_max_chars` by default; `max_chars` overrides the limit and `0` disables it (subject to the 2 MB response cap).
 
 ### `directory_tree(path, max_depth=3, show_hidden=False)`
 Shows a visual tree of the directory structure. Skips common noise directories (`.git`, `node_modules`, `__pycache__`, etc.) by default. Entries capped at 500; output capped at 40,000 characters. Uses Unicode box-drawing characters (├── └── │).
 
-### `search_content(pattern, path, file_glob=None, context_lines=0, max_results=50)`
-Searches for a regex pattern in files under a directory. If the regex is invalid, it's re-attempted as a literal search. Returns matching lines with file path, line number, context lines, and a `▸` marker on matched lines. Results are grouped into contiguous regions to avoid duplicate context. Skips binary files and common noise directories.
+### `search_content(pattern, path, file_glob=None, context_lines=0, max_results=50, regex=False)`
+Searches for text in files under a directory. Matching is literal by default; set `regex=true` to interpret the pattern as a regular expression (invalid regexes return an error). Returns matching lines with file path, line number, context lines, and a `▸` marker on matched lines. Results are grouped into contiguous regions to avoid duplicate context. Skips binary files and common noise directories.
 
 ### `glob(pattern, path=None)`
 Finds files matching a glob pattern. Supports `**` for recursive search (e.g. `src/**/*.py`). Respects `.gitignore`-style skip directories (`node_modules`, `__pycache__`, `.git`, `venv`, `build`, `dist`, `target`, etc.). Returns up to 200 matching paths sorted by name with file sizes. Prefer this over `run_bash('find ...')` or `run_bash('ls ...')` — it's faster, safer, and respects project boundaries.
 
 ### `todowrite(todos)`
-Creates and updates a structured task list for tracking progress during complex multi-step operations. The LLM must send the **complete** list every time — not incremental updates. Exactly one task must be `in_progress` at any time; tasks may be `pending`, `in_progress`, or `completed`. The tool validates these rules and echoes back the formatted list with status icons (`[ ]`, `[→]`, `[✓]`). This gives the LLM a persistent scratchpad that survives context window limits and tool-call round-trips.
+Creates and updates a structured task list for tracking progress during complex multi-step operations. The LLM must send the **complete** list every time — not incremental updates. At most one task may be `in_progress` at any time (zero is allowed); tasks may be `pending`, `in_progress`, or `completed`. The tool validates these rules and echoes back the formatted list with status icons (`[ ]`, `[→]`, `[✓]`). This gives the LLM a persistent scratchpad that survives context window limits and tool-call round-trips.
 
 ### `ask_user_question(questions)`
 Asks the user one or more multiple-choice questions to clarify requirements, gather preferences, or resolve ambiguity. Each question includes a short header, the question text, and a list of options with descriptions. This tool should be used when instructions are vague, multiple valid approaches exist, or the LLM needs a decision before proceeding. The harness handles rendering the form and returning the user's choices — this tool should never reach `execute_tool` directly.
