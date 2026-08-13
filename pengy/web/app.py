@@ -446,7 +446,7 @@ class WebWorker:
         try:
             tools.set_sudo_password_provider(self._get_sudo_password)
             tools.set_user_agent(config.get("user_agent", "PengyAgent/1.0"))
-            tools.set_tool_timeout(config.get("tool_timeout", 60))
+            tools.set_tool_timeout(config.get("tool_timeout", 300))
             tools.set_tool_output_max_chars(config.get("tool_output_max_chars", 250000))
             tools.set_image_limits(
                 config.get("image_max_dimension", 4096),
@@ -1152,7 +1152,7 @@ def settings_view():
         except ValueError:
             pass
         try:
-            config["tool_timeout"] = max(1, int(request.form.get("tool_timeout", 60)))
+            config["tool_timeout"] = max(1, int(request.form.get("tool_timeout", 300)))
         except ValueError:
             pass
         try:

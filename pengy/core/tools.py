@@ -27,7 +27,7 @@ _image_max_dimension = 4096
 _image_max_mb = 4.5
 _image_quality = 85
 
-_tool_timeout = 60  # seconds; -1 means no timeout
+_tool_timeout = 300  # seconds; -1 means no timeout
 
 # Shell used by run_bash, resolved once at import.
 #

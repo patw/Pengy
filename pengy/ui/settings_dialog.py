@@ -188,7 +188,7 @@ class SettingsDialog(QDialog):
         self.timeout_spinbox.setSpecialValueText("No timeout")
         self.timeout_spinbox.setSuffix(" sec")
         self.timeout_spinbox.setToolTip("Maximum wall-clock time a single tool invocation can run before being killed. -1 = no timeout.")
-        self.timeout_spinbox.setValue(config.get("tool_timeout", 60))
+        self.timeout_spinbox.setValue(config.get("tool_timeout", 300))
         tools_layout.addRow(_label("Tool timeout:", "Maximum wall-clock time a single tool invocation can run before being killed. -1 = no timeout."), self.timeout_spinbox)
 
         self.tool_output_max_spinbox = QSpinBox()

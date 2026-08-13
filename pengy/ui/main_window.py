@@ -372,7 +372,7 @@ class MainWindow(QMainWindow):
             llm_timeout=self.config.get("llm_timeout", 300),
         )
         tools.set_user_agent(self.config.get("user_agent", "PengyAgent/1.0"))
-        tools.set_tool_timeout(self.config.get("tool_timeout", 60))
+        tools.set_tool_timeout(self.config.get("tool_timeout", 300))
         tools.set_tool_output_max_chars(self.config.get("tool_output_max_chars", 250000))
         tools.set_image_limits(
             self.config.get("image_max_dimension", 4096),
