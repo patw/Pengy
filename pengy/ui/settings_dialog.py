@@ -199,6 +199,14 @@ class SettingsDialog(QDialog):
         self.tool_output_max_spinbox.setValue(config.get("tool_output_max_chars", 250000))
         tools_layout.addRow(_label("Max tool output:", "Tool output longer than this is snipped (head+tail) to avoid blowing up the context window. 0 = no limit."), self.tool_output_max_spinbox)
 
+        self.download_max_spinbox = QSpinBox()
+        self.download_max_spinbox.setRange(0, 1_000_000)
+        self.download_max_spinbox.setSpecialValueText("No limit")
+        self.download_max_spinbox.setSuffix(" MB")
+        self.download_max_spinbox.setToolTip("Default maximum download size for download_file. 0 = no limit.")
+        self.download_max_spinbox.setValue(config.get("download_max_mb", 100))
+        tools_layout.addRow(_label("Max download:", "Default maximum download size for download_file. 0 = no limit."), self.download_max_spinbox)
+
         self.user_agent_input = QLineEdit(config.get("user_agent", "PengyAgent/1.0"))
         self.user_agent_input.setToolTip("HTTP User-Agent header sent with LLM API requests and any HTTP-based tool calls.")
         tools_layout.addRow(_label("User Agent:", "HTTP User-Agent header sent with LLM API requests and any HTTP-based tool calls."), self.user_agent_input)
@@ -286,5 +294,6 @@ class SettingsDialog(QDialog):
         self.config["llm_timeout"] = self.llm_timeout_spinbox.value()
         self.config["tool_timeout"] = self.timeout_spinbox.value()
         self.config["tool_output_max_chars"] = self.tool_output_max_spinbox.value()
+        self.config["download_max_mb"] = self.download_max_spinbox.value()
         self.config["user_agent"] = self.user_agent_input.text() or "PengyAgent/1.0"
         return self.config

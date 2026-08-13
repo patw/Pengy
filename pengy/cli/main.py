@@ -35,7 +35,7 @@ _HISTFILE: Path | None = None
 SLASH_COMMANDS = (
     "/help", "/new", "/show", "/tail", "/rename", "/clear", "/export",
     "/yolo", "/config", "/model", "/models", "/list", "/load", "/baseurl",
-    "/apikey", "/llm-timeout", "/timeout", "/agent", "/context-keep",
+    "/apikey", "/llm-timeout", "/timeout", "/download-max", "/agent", "/context-keep",
     "/system", "/delete", "/attach", "/compact", "/quit", "/exit", "/q",
 )
 
@@ -456,6 +456,9 @@ class PengyCLI:
         elif cmd == "/timeout":
             self._cmd_timeout(args)
 
+        elif cmd == "/download-max":
+            self._cmd_download_max(args)
+
         elif cmd == "/agent":
             self._cmd_agent(args)
 
@@ -497,6 +500,7 @@ class PengyCLI:
         table.add_row("/apikey <key>", "Set the API key")
         table.add_row("/llm-timeout <sec>", "Set LLM API request timeout in seconds")
         table.add_row("/timeout <sec>", "Set tool execution timeout in seconds")
+        table.add_row("/download-max <mb>", "Set default download size limit in MB (0 = no limit)")
         table.add_row("/agent <string>", "Set the user agent string")
         table.add_row("/context-keep <n>", "Set how many recent turns to keep when compacting")
         table.add_row("/yolo [all|safe|none]", "Set tool confirmation: all (YOLO), safe (read-only), none")
@@ -706,7 +710,7 @@ class PengyCLI:
         table.add_row("Tool Confirmation", self._confirm_display())
         table.add_row("Context keep turns", str(self.config.get("context_keep_turns", 0)))
         table.add_row("LLM Timeout", f"{self.config.get('llm_timeout', 300)}s")
-        table.add_row("Tool Timeout", f"{self.config.get('tool_timeout', 60)}s")
+        table.add_row("Tool Timeout", f"{self.config.get('tool_timeout', 300)}s")
         table.add_row("User Agent", self.config.get("user_agent", "—"))
 
         self.console.print(table)
@@ -926,7 +930,7 @@ class PengyCLI:
         """Set the tool execution timeout in seconds."""
         if not args:
             self.console.print(
-                f"[dim]Current tool timeout:[/dim] {self.config.get('tool_timeout', 60)}s"
+                f"[dim]Current tool timeout:[/dim] {self.config.get('tool_timeout', 300)}s"
             )
             self.console.print("[dim]Usage: /timeout <seconds>[/dim]")
             return
@@ -944,6 +948,30 @@ class PengyCLI:
         tools.set_tool_timeout(secs)
         self.console.print(
             f"[green]✓ Tool timeout changed:[/green] {old}s → [bold]{secs}s[/bold]"
+        )
+
+    def _cmd_download_max(self, args: list[str]):
+        """Set the default download size limit in MB."""
+        if not args:
+            self.console.print(
+                f"[dim]Current download max:[/dim] {self.config.get('download_max_mb', 100)} MB"
+            )
+            self.console.print("[dim]Usage: /download-max <mb> (0 = no limit)[/dim]")
+            return
+        try:
+            mb = int(args[0])
+        except ValueError:
+            self.console.print("[red]Invalid number. Usage: /download-max <mb>[/red]")
+            return
+        if mb < 0:
+            self.console.print("[red]Size must be 0 (no limit) or greater.[/red]")
+            return
+        old = self.config.get("download_max_mb", 100)
+        self.config["download_max_mb"] = mb
+        self._save_config()
+        tools.set_download_max_mb(mb)
+        self.console.print(
+            f"[green]✓ Download max changed:[/green] {old} MB → [bold]{mb} MB[/bold]"
         )
 
     def _cmd_agent(self, args: list[str]):
@@ -1095,6 +1123,7 @@ class PengyCLI:
         tools.set_user_agent(self.config.get("user_agent", "PengyAgent/1.0"))
         tools.set_tool_timeout(self.config.get("tool_timeout", 300))
         tools.set_tool_output_max_chars(self.config.get("tool_output_max_chars", 250000))
+        tools.set_download_max_mb(self.config.get("download_max_mb", 100))
         tools.set_image_limits(
             self.config.get("image_max_dimension", 4096),
             self.config.get("image_max_mb", 4.5),

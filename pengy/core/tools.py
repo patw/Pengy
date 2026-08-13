@@ -140,8 +140,13 @@ def take_pending_images(context: "ToolContext | None" = None) -> list[dict]:
 # Context used by callers that don't pass their own (CLI, Web, direct calls).
 _default_context = ToolContext()
 
-# Maximum download size for download_file (100 MB)
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024
+# Default max download size for download_file, in MB (0 = no limit).  The
+# per-call max_size_mb argument overrides this.
+_DOWNLOAD_MAX_MB = 100
+
+# download_file uses a stall timeout (no bytes for this long) instead of the
+# tool timeout, so a large transfer isn't killed mid-stream.
+_DOWNLOAD_STALL_TIMEOUT = 120
 
 # Maximum chars for tool output before head+tail snipping kicks in.
 # Set via set_tool_output_max_chars().  0 means no limit.
@@ -192,6 +197,12 @@ def set_tool_output_max_chars(chars: int):
     """Set the max chars for tool output before head+tail snipping.  0 = no limit."""
     global _MAX_TOOL_OUTPUT_CHARS
     _MAX_TOOL_OUTPUT_CHARS = chars
+
+
+def set_download_max_mb(mb: int):
+    """Set the default max download size for download_file.  0 = no limit."""
+    global _DOWNLOAD_MAX_MB
+    _DOWNLOAD_MAX_MB = mb
 
 
 def _cut_at_line_end(text: str, chars: int) -> str:
@@ -449,7 +460,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "download_file",
-            "description": "Download a file from a URL to the user's Downloads directory. Existing files of the same name are overwritten; downloads larger than 100 MB are rejected.",
+            "description": "Download a file from a URL to disk, streaming to the target directory and returning the saved path and byte size. Existing files of the same name are overwritten. Set max_size_mb to opt into large downloads (0 = no limit). For auth headers, resume, mirrors, or non-HTTP sources, use run_bash with curl or wget.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -460,6 +471,14 @@ TOOLS = [
                     "filename": {
                         "type": "string",
                         "description": "Optional filename to save as; defaults to the name from the URL",
+                    },
+                    "dir": {
+                        "type": "string",
+                        "description": "Directory to save into (default: ~/Downloads). Created if missing.",
+                    },
+                    "max_size_mb": {
+                        "type": "integer",
+                        "description": "Maximum download size in MB. Defaults to the configured download limit; 0 = no limit.",
                     },
                 },
                 "required": ["url"],
@@ -724,7 +743,12 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
     elif name == "web_search":
         return _web_search(arguments["query"], arguments.get("max_results", 5))
     elif name == "download_file":
-        return _download_file(arguments["url"], arguments.get("filename"))
+        return _download_file(
+            arguments["url"],
+            arguments.get("filename"),
+            arguments.get("dir"),
+            arguments.get("max_size_mb"),
+        )
     elif name == "fetch_url":
         return _fetch_url(arguments["url"], arguments.get("max_chars"))
     elif name == "run_python":
@@ -1261,42 +1285,73 @@ def _safe_download_name(raw: str) -> str:
     return name
 
 
-def _download_file(url: str, filename: str | None = None) -> str:
-    """Download a file to ~/Downloads/."""
+def _safe_unlink(path) -> None:
+    """Unlink *path* if it exists, swallowing any error."""
+    try:
+        if path is not None and path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _download_file(url: str, filename: str | None = None,
+                   directory: str | None = None,
+                   max_size_mb: int | None = None) -> str:
+    """Download a URL to disk, streaming into *directory* (default ~/Downloads).
+
+    The size cap defaults to the configured limit and can be overridden per
+    call; 0 or negative means no limit.  A stall timeout (rather than the tool
+    timeout) lets large transfers finish, and the partial file is removed on
+    any failure.
+    """
+    dest = None
     try:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in ("http", "https"):
             return f"Error: Only http/https URLs are supported (got '{parsed.scheme}')."
 
-        downloads = Path.home() / "Downloads"
-        downloads.mkdir(exist_ok=True)
+        target_dir = Path(directory).expanduser() if directory else (Path.home() / "Downloads")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        if not target_dir.is_dir():
+            return f"Error: dir is not a directory: {directory}"
+
         if not filename:
             filename = url.split("?")[0].rstrip("/").split("/")[-1]
-        dest = downloads / _safe_download_name(filename)
+        dest = target_dir / _safe_download_name(filename)
+
+        limit_mb = _DOWNLOAD_MAX_MB if max_size_mb is None else max_size_mb
+        limit_bytes = 0 if limit_mb <= 0 else limit_mb * 1024 * 1024
+
+        # Fail fast when the target filesystem can't hold the request.
+        if limit_bytes > 0:
+            free = shutil.disk_usage(str(target_dir)).free
+            if free < limit_bytes:
+                return (
+                    f"Error: not enough disk space — need {_format_size(limit_bytes)}, "
+                    f"have {_format_size(free)} free in {target_dir}"
+                )
+
         req = urllib.request.Request(url, headers={"User-Agent": _user_agent})
-        timeout = None if _tool_timeout == -1 else _tool_timeout
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            # Stream to disk in chunks, enforcing a size cap
-            total = 0
+        total = 0
+        exceeded = False
+        with urllib.request.urlopen(req, timeout=_DOWNLOAD_STALL_TIMEOUT) as resp:
             with open(dest, "wb") as out:
                 while True:
                     chunk = resp.read(64 * 1024)
                     if not chunk:
                         break
                     total += len(chunk)
-                    if total > _MAX_DOWNLOAD_SIZE:
-                        out.close()
-                        try:
-                            dest.unlink()
-                        except OSError:
-                            pass
-                        return (
-                            f"Error: Download exceeds maximum size of "
-                            f"{_MAX_DOWNLOAD_SIZE:,} bytes."
-                        )
+                    if limit_bytes > 0 and total > limit_bytes:
+                        exceeded = True
+                        break
                     out.write(chunk)
+
+        if exceeded:
+            _safe_unlink(dest)
+            return f"Error: Download exceeds maximum size of {_format_size(limit_bytes)}."
         return f"Downloaded to {dest} ({total:,} bytes)"
     except Exception as e:
+        _safe_unlink(dest)
         return f"Error downloading file: {e}"
 
 

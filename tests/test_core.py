@@ -931,6 +931,63 @@ class TestTools:
         assert "Error" in result
         assert "http" in result.lower()
 
+    def test_download_file_dir_and_filename(self):
+        from pengy.core import tools
+        server, thread, url = self._start_server("hello download")
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                result = tools.execute_tool("download_file", {
+                    "url": url,
+                    "filename": "report.txt",
+                    "dir": td,
+                })
+                assert "Downloaded to" in result
+                assert (Path(td) / "report.txt").read_text() == "hello download"
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_download_file_max_size_exceeded(self):
+        from pengy.core import tools
+        body = "x" * (1024 * 1024 + 100)
+        server, thread, url = self._start_server(body)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                result = tools.execute_tool("download_file", {
+                    "url": url,
+                    "filename": "big.bin",
+                    "dir": td,
+                    "max_size_mb": 1,
+                })
+                assert "exceeds maximum size" in result
+                assert not (Path(td) / "big.bin").exists()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_download_file_max_size_unlimited(self):
+        from pengy.core import tools
+        body = "x" * (1024 * 1024 + 100)
+        server, thread, url = self._start_server(body)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                old = tools._DOWNLOAD_MAX_MB
+                tools.set_download_max_mb(1)  # default now 1 MB
+                try:
+                    result = tools.execute_tool("download_file", {
+                        "url": url,
+                        "filename": "big.bin",
+                        "dir": td,
+                        "max_size_mb": 0,
+                    })
+                finally:
+                    tools.set_download_max_mb(old)
+                assert "Downloaded to" in result
+                assert (Path(td) / "big.bin").stat().st_size > 1024 * 1024
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
     def test_fetch_url_scheme_reject(self):
         from pengy.core.tools import execute_tool
         result = execute_tool("fetch_url", {"url": "file:///etc/passwd"})

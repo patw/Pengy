@@ -448,6 +448,7 @@ class WebWorker:
             tools.set_user_agent(config.get("user_agent", "PengyAgent/1.0"))
             tools.set_tool_timeout(config.get("tool_timeout", 300))
             tools.set_tool_output_max_chars(config.get("tool_output_max_chars", 250000))
+            tools.set_download_max_mb(config.get("download_max_mb", 100))
             tools.set_image_limits(
                 config.get("image_max_dimension", 4096),
                 config.get("image_max_mb", 4.5),
@@ -1157,6 +1158,10 @@ def settings_view():
             pass
         try:
             config["tool_output_max_chars"] = max(0, int(request.form.get("tool_output_max_chars", 250000)))
+        except ValueError:
+            pass
+        try:
+            config["download_max_mb"] = max(0, int(request.form.get("download_max_mb", 100)))
         except ValueError:
             pass
         try:
