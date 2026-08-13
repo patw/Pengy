@@ -886,6 +886,29 @@ class TestTools:
             assert "foo" in result
             assert "search_me.py" in result
 
+    def test_search_content_literal_by_default(self):
+        from pengy.core.tools import execute_tool
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "search.py").write_text("value = 'a.b'\nvalue2 = 'axb'\n")
+
+            # Default: literal match — "a.b" must not match "axb".
+            literal = execute_tool("search_content", {
+                "pattern": "a.b",
+                "path": td,
+                "file_glob": "*.py",
+            })
+            assert "a.b" in literal
+            assert "axb" not in literal
+
+            # regex=true: '.' is a wildcard, so it should match "axb" too.
+            regex = execute_tool("search_content", {
+                "pattern": "a.b",
+                "path": td,
+                "file_glob": "*.py",
+                "regex": True,
+            })
+            assert "axb" in regex
+
     def test_download_filename_cannot_escape_downloads(self):
         """The model picks this name and may be acting on a fetched page's
         instructions, so a path component must never leave ~/Downloads."""

@@ -543,13 +543,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_content",
-            "description": "Search for a regex pattern in files under a directory. Returns matching lines with file path, line number, and optional surrounding context. Useful for finding where symbols, strings, or patterns appear in a codebase. Skips binary files and common noise directories.",
+            "description": "Search for text in files under a directory. Returns matching lines with file path, line number, and optional surrounding context. Useful for finding where symbols, strings, or patterns appear in a codebase. The pattern is matched literally by default — regex metacharacters are escaped automatically; set regex=true to interpret it as a regular expression. Skips binary files and common noise directories.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "The regex pattern to search for. Use simple strings for literal matching — they will be escaped automatically. Use proper regex syntax for patterns, e.g. r'class\\s+\\w+'",
+                        "description": "The text to search for. Matched literally by default — metacharacters like '.', '*', '(', '[' are escaped automatically. Set regex=true to interpret it as a regular expression instead.",
+                    },
+                    "regex": {
+                        "type": "boolean",
+                        "description": "Treat pattern as a regular expression instead of a literal string (default: false)",
                     },
                     "path": {
                         "type": "string",
@@ -728,6 +732,7 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
             arguments.get("file_glob"),
             arguments.get("context_lines", 0),
             arguments.get("max_results", 50),
+            arguments.get("regex", False),
         )
     elif name == "glob":
         return _glob(
@@ -1594,8 +1599,9 @@ def _expand_braces(pattern: str) -> list[str]:
 
 
 def _search_content(pattern: str, path: str, file_glob: str | None,
-                    context_lines: int, max_results: int) -> str:
-    """Search for a regex pattern in files."""
+                    context_lines: int, max_results: int,
+                    regex: bool = False) -> str:
+    """Search for text in files — literal by default, regex when requested."""
     try:
         root = Path(path).expanduser().resolve()
         if not root.exists():
@@ -1603,15 +1609,15 @@ def _search_content(pattern: str, path: str, file_glob: str | None,
     except Exception as e:
         return f"Error resolving path: {e}"
 
-    # Compile the regex
-    try:
-        compiled = re.compile(pattern)
-    except re.error as e:
-        # Try escaping as a literal
+    # Literal by default so metacharacters in code symbols (".", "(", "[", "*",
+    # ...) don't silently become regex syntax; regex=true opts into regex.
+    if regex:
         try:
-            compiled = re.compile(re.escape(pattern))
-        except re.error:
+            compiled = re.compile(pattern)
+        except re.error as e:
             return f"Error: Invalid regex pattern: {e}"
+    else:
+        compiled = re.compile(re.escape(pattern))
 
     context_lines = max(0, min(context_lines, 10))
     max_results = max(1, min(max_results, 200))
