@@ -937,6 +937,74 @@ class TestTools:
         assert "Error" in result
         assert "http" in result.lower()
 
+    def _start_server(self, body: str):
+        import http.server
+        import threading
+
+        payload = body.encode("utf-8")
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, thread, f"http://127.0.0.1:{server.server_address[1]}/"
+
+    def test_fetch_url_truncates_to_output_limit(self):
+        from pengy.core import tools
+        server, thread, url = self._start_server("x" * 5000)
+        try:
+            old = tools._MAX_TOOL_OUTPUT_CHARS
+            tools.set_tool_output_max_chars(1000)
+            try:
+                result = tools.execute_tool("fetch_url", {"url": url})
+            finally:
+                tools.set_tool_output_max_chars(old)
+            assert "truncated at 1000" in result
+            assert len(result) < 5000
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_fetch_url_max_chars_override(self):
+        from pengy.core import tools
+        server, thread, url = self._start_server("x" * 5000)
+        try:
+            old = tools._MAX_TOOL_OUTPUT_CHARS
+            tools.set_tool_output_max_chars(1000)
+            try:
+                result = tools.execute_tool("fetch_url", {"url": url, "max_chars": 0})
+            finally:
+                tools.set_tool_output_max_chars(old)
+            assert "truncated" not in result
+            assert len(result) >= 5000
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_read_multiple_files_limits_follow_output_limit(self):
+        from pengy.core import tools
+        with tempfile.TemporaryDirectory() as td:
+            p1 = Path(td) / "a.txt"
+            p1.write_text("\n".join(f"line {i}" for i in range(2000)))
+            old = tools._MAX_TOOL_OUTPUT_CHARS
+            tools.set_tool_output_max_chars(1000)
+            try:
+                result = tools.execute_tool("read_multiple_files", {"paths": [str(p1)]})
+            finally:
+                tools.set_tool_output_max_chars(old)
+            assert "showed lines 1-" in result
+            assert "read_file with offset=" in result
+
     def test_unknown_tool(self):
         from pengy.core.tools import execute_tool
         result = execute_tool("nonexistent_tool", {})

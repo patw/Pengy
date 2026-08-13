@@ -470,13 +470,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "fetch_url",
-            "description": "Fetch a URL and return its text content. Works for documentation and web pages (HTML is stripped to plain text) and for JSON or plain-text endpoints, including local ones such as http://127.0.0.1:8080/api/status. Returns the body only — use run_bash with curl if you need status codes or response headers. Very large responses are truncated; a notice is appended when truncation occurs.",
+            "description": "Fetch a URL and return its text content. Works for documentation and web pages (HTML is stripped to plain text) and for JSON or plain-text endpoints, including local ones such as http://127.0.0.1:8080/api/status. Returns the body only — use run_bash with curl if you need status codes or response headers. Large responses are truncated to the configured tool output limit; pass max_chars to return more (0 = no limit).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
                         "description": "The URL to fetch",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters to return. Defaults to the configured tool output limit; 0 returns everything (up to the 2 MB response cap).",
                     },
                 },
                 "required": ["url"],
@@ -722,7 +726,7 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
     elif name == "download_file":
         return _download_file(arguments["url"], arguments.get("filename"))
     elif name == "fetch_url":
-        return _fetch_url(arguments["url"])
+        return _fetch_url(arguments["url"], arguments.get("max_chars"))
     elif name == "run_python":
         return _run_python(arguments["code"], ctx, arguments.get("cwd"))
     elif name == "directory_tree":
@@ -1323,7 +1327,7 @@ class _TextExtractor(HTMLParser):
         return text.strip()
 
 
-def _fetch_url(url: str) -> str:
+def _fetch_url(url: str, max_chars: int | None = None) -> str:
     """Fetch a URL and return its text content."""
     try:
         parsed = urllib.parse.urlparse(url)
@@ -1339,9 +1343,14 @@ def _fetch_url(url: str) -> str:
             parser = _TextExtractor()
             parser.feed(text)
             text = parser.get_text()
-        # Truncate to ~50k chars so it fits comfortably in context
-        if len(text) > 50_000:
-            text = text[:50_000] + "\n\n[... truncated at 50,000 characters ...]"
+        # Truncate to the configured output limit (or an explicit max_chars
+        # override) so a large page doesn't flood the context; the notice
+        # gives the model a lever to request more.
+        limit = _MAX_TOOL_OUTPUT_CHARS if max_chars is None else max_chars
+        if limit > 0 and len(text) > limit:
+            text = text[:limit] + (
+                f"\n\n[... truncated at {limit} characters — pass max_chars to adjust ...]"
+            )
         return text
     except Exception as e:
         return f"Error fetching URL: {e}"
@@ -1492,8 +1501,6 @@ def _directory_tree(path: str, max_depth: int = 3, show_hidden: bool = False) ->
 # ---------------------------------------------------------------------------
 
 _MAX_FILES = 20
-_MAX_PER_FILE = 250_000
-_MAX_TOTAL = 1_250_000  # 5× the global tool output limit
 
 
 def _read_multiple_files(paths: list[str]) -> str:
@@ -1505,6 +1512,13 @@ def _read_multiple_files(paths: list[str]) -> str:
             f"Error: too many files ({len(paths)}). "
             f"Maximum is {_MAX_FILES}. Please narrow your selection."
         )
+
+    # Derive per-file and total budgets from the tool output limit so the
+    # single "max tool output" setting governs how much context a batch can
+    # consume.  0 means "no limit".
+    budget = _MAX_TOOL_OUTPUT_CHARS
+    per_file = budget
+    total = budget * 5 if budget > 0 else 0
 
     parts: list[str] = []
     total_chars = 0
@@ -1538,7 +1552,7 @@ def _read_multiple_files(paths: list[str]) -> str:
         # line-range reporting as read_file, so the model can follow up with
         # read_file(offset=...) on whichever file got cut.
         total_lines = content.count("\n") + 1
-        content, kept, truncated = _truncate_head_lines(content, _MAX_PER_FILE)
+        content, kept, truncated = _truncate_head_lines(content, per_file)
         if truncated:
             content += (
                 f"\n\n[... showed lines 1-{kept:,} of {total_lines:,} — "
@@ -1547,8 +1561,8 @@ def _read_multiple_files(paths: list[str]) -> str:
 
         # Check if adding this file would blow the total budget
         block = f"{header}\n{content}"
-        if total_chars + len(block) > _MAX_TOTAL:
-            remaining = _MAX_TOTAL - total_chars
+        if total > 0 and total_chars + len(block) > total:
+            remaining = total - total_chars
             if remaining > 200:
                 block = block[:remaining] + "\n[... truncated to fit total output limit ...]"
             else:
