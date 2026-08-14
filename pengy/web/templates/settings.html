@@ -53,7 +53,7 @@
                  value="{{ config.model }}"
                  placeholder="gpt-4o">
           <button type="button" id="fetchModelsBtn" class="btn btn-outline-secondary"
-                  onclick="fetchModels()">
+                  onclick="fetchModels(true)">
             <i class="bi bi-cloud-download me-1"></i>Fetch
           </button>
         </div>
@@ -161,11 +161,14 @@
 </div>
 
 <script>
-async function fetchModels() {
+async function fetchModels(refresh) {
+  refresh = !!refresh;
   const btn = document.getElementById('fetchModelsBtn');
   const list = document.getElementById('modelsList');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Fetching…';
+  if (refresh) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Fetching…';
+  }
   list.classList.add('d-none');
 
   function showNote(text, cls) {
@@ -176,11 +179,15 @@ async function fetchModels() {
     list.appendChild(note);
   }
 
+  function fetchedDateText(ts) {
+    return new Date(ts * 1000).toLocaleString();
+  }
+
   try {
-    const resp = await fetch('/models');
+    const resp = await fetch(refresh ? '/models?refresh=1' : '/models');
     const data = await resp.json();
-    if (data.error) {
-      showNote('Error: ' + data.error, 'text-danger small');
+    if (!resp.ok && !data.models) {
+      showNote('Error: ' + (data.error || resp.status), 'text-danger small');
     } else if (data.models && data.models.length > 0) {
       // Built with DOM APIs rather than an HTML string so model names coming
       // back from the endpoint can't inject markup.
@@ -205,17 +212,35 @@ async function fetchModels() {
         });
         list.appendChild(badge);
       }
+
+      const note = document.createElement('div');
+      note.className = 'form-text';
+      if (data.stale) {
+        note.className = 'text-warning small';
+        note.textContent = 'Endpoint unreachable — showing saved list from ' +
+          (data.fetched_at ? fetchedDateText(data.fetched_at) : 'an earlier fetch') + '. ' + data.error;
+      } else if (data.fetched_at) {
+        note.textContent = 'List fetched ' + fetchedDateText(data.fetched_at) +
+          (data.cached ? ' (from cache) — click Fetch to refresh.' : '.');
+      }
+      list.appendChild(note);
     } else {
-      showNote('No models returned.', 'text-muted small');
+      showNote('No models cached or returned. Use Fetch to load the list from the endpoint.', 'text-muted small');
     }
     list.classList.remove('d-none');
   } catch (e) {
     showNote('Failed: ' + e, 'text-danger small');
     list.classList.remove('d-none');
   } finally {
-    btn.disabled = false;
-    btn.innerHTML = '<i class="bi bi-cloud-download me-1"></i>Fetch';
+    if (refresh) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-cloud-download me-1"></i>Fetch';
+    }
   }
 }
+
+// Populate the list immediately from the persistent cache (no network
+// round-trip unless the cache is missing or the user clicks Fetch).
+document.addEventListener('DOMContentLoaded', () => fetchModels(false));
 </script>
 {% endblock %}

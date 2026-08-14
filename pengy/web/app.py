@@ -16,6 +16,7 @@ from flask import Flask, Response, jsonify, redirect, render_template, request, 
 from pygments.formatters import HtmlFormatter
 
 from pengy.core.config import load_config, save_config, render_system_message
+from pengy.core.model_cache import load_model_cache, save_model_cache
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
     create_chat, delete_chat, get_chat, load_index, save_chat,
@@ -1092,10 +1093,31 @@ def chat_command(chat_id: str):
 
 @app.route("/models")
 def api_models():
+    """Return the model list for the configured endpoint.
+
+    Serves the persistent cache when it matches the configured base URL,
+    so the settings page is populated immediately without hitting the
+    network.  ``?refresh=1`` forces a live fetch (and updates the cache);
+    if that fetch fails, the stale cache is returned with ``stale: true``
+    so the UI can still show *something*.
+    """
     config = load_config()
     base_url = config.get("base_url", "").rstrip("/")
     api_key = config.get("api_key", "")
     models_url = f"{base_url}/models"
+    refresh = request.args.get("refresh") in ("1", "true")
+
+    cache = load_model_cache()
+    cache_matches = bool(cache) and (
+        cache["url"].rstrip("/").lower() == base_url.lower()
+    )
+
+    if cache_matches and not refresh:
+        return jsonify({
+            "models": cache["models"],
+            "cached": True,
+            "fetched_at": cache["fetched_at"],
+        })
 
     try:
         req = urllib.request.Request(models_url)
@@ -1105,8 +1127,22 @@ def api_models():
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
         model_ids = sorted(m.get("id", "") for m in data.get("data", []) if m.get("id"))
-        return jsonify({"models": model_ids})
+        if model_ids:
+            save_model_cache(base_url, model_ids)
+        return jsonify({
+            "models": model_ids,
+            "cached": False,
+            "fetched_at": int(time.time()) if model_ids else None,
+        })
     except Exception as e:
+        if cache_matches:  # live fetch failed — fall back to the stale list
+            return jsonify({
+                "models": cache["models"],
+                "cached": True,
+                "stale": True,
+                "fetched_at": cache["fetched_at"],
+                "error": str(e),
+            })
         return jsonify({"error": str(e)}), 502
 
 

@@ -9,7 +9,9 @@ from PySide6.QtWidgets import (
     QSpinBox, QPushButton, QHBoxLayout, QMessageBox, QTabWidget, QWidget,
 )
 from PySide6.QtCore import Qt, Signal
+from datetime import datetime
 
+from pengy.core.model_cache import cached_models_for, load_model_cache, save_model_cache
 from pengy.ui.theme import ACCENT_NAMES, THEME_MODES, get_theme, scaled_size
 from pengy.ui.icons import apply_button_icon
 
@@ -106,17 +108,30 @@ class SettingsDialog(QDialog):
         current_model = config.get("model", "gpt-4o")
         self.model_combo.addItem(current_model)
         self.model_combo.setCurrentText(current_model)
+        # Pre-populate from the persistent model cache so the dropdown
+        # survives between sessions.  The list may be stale, but populated.
+        cached = cached_models_for(self.base_url_input.text())
+        self.model_cache_note = QLabel("")
+        self.model_cache_note.setStyleSheet(f"color: {self._theme['muted']};")
+        self.model_cache_note.setWordWrap(True)
+        if cached:
+            items = [current_model] + [m for m in cached if m != current_model]
+            self.model_combo.clear()
+            self.model_combo.addItems(items)
+            self.model_combo.setCurrentText(current_model)
+            self._update_cache_note(load_model_cache())
         self.model_combo.setToolTip("Model name sent in chat completion requests. Use Fetch to list available models from the endpoint.")
         model_row.addWidget(self.model_combo, 1)
 
         self.fetch_models_btn = QPushButton("Fetch")
         apply_button_icon(self.fetch_models_btn, "refresh", self._theme, size=15)
-        self.fetch_models_btn.setToolTip("Fetch available models from the /models endpoint")
+        self.fetch_models_btn.setToolTip("Fetch available models from the /models endpoint and update the saved list")
         self.fetch_models_btn.setFixedWidth(80)
         self.fetch_models_btn.clicked.connect(self._fetch_models)
         model_row.addWidget(self.fetch_models_btn)
 
         llm_layout.addRow(_label("Model:", "Model name sent in chat completion requests. Use Fetch to list available models from the endpoint."), model_row)
+        llm_layout.addRow("", self.model_cache_note)
 
         self.system_message_input = QTextEdit(config.get("system_message", "You are a helpful assistant."))
         self.system_message_input.setMaximumHeight(scaled_size(100, self._theme))
@@ -227,6 +242,16 @@ class SettingsDialog(QDialog):
 
         self.adjustSize()
 
+    def _update_cache_note(self, cache: dict | None):
+        """Show when the current model list was last fetched from the endpoint."""
+        if not cache or not cache.get("fetched_at"):
+            self.model_cache_note.setText("")
+            return
+        fetched = datetime.fromtimestamp(cache["fetched_at"]).strftime("%Y-%m-%d %H:%M")
+        self.model_cache_note.setText(
+            f"Model list last fetched {fetched}. Use Fetch to refresh."
+        )
+
     # ── model fetch (unchanged logic) ─────────────────────────
     def _fetch_models(self):
         """Fetch available models from the endpoint's /v1/models (non-blocking)."""
@@ -249,6 +274,8 @@ class SettingsDialog(QDialog):
                     m.get("id", "") for m in data.get("data", [])
                     if m.get("id")
                 )
+                if model_ids:
+                    save_model_cache(base_url, model_ids)
                 self._models_fetched.emit(model_ids)
             except urllib.error.HTTPError as e:
                 self._models_fetch_failed.emit(
@@ -272,6 +299,7 @@ class SettingsDialog(QDialog):
             self.model_combo.setCurrentText(current)
         elif model_ids:
             self.model_combo.setCurrentText(model_ids[0])
+        self._update_cache_note(load_model_cache())
 
     def _on_models_fetch_failed(self, error: str):
         self.fetch_models_btn.setEnabled(True)
