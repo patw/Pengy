@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QTextOption
 
 from pengy.core.config import load_config, save_config, render_system_message
+from pengy.core.model_cache import cached_models_for
 from pengy.core.chat_manager import (
     load_index, create_chat, save_chat, get_chat, delete_chat,
     clean_dangling_tool_calls, elide_old_tool_results,
@@ -76,6 +77,8 @@ class MainWindow(QMainWindow):
         self.chat_history.chat_selected.connect(self._on_chat_selected)
         self.chat_history.settings_requested.connect(self.open_settings)
         self.chat_history.tasks_requested.connect(self.open_tasks)
+        self.chat_history.model_changed.connect(self._on_model_changed)
+        self._refresh_model_combo()
 
         # Restore open tabs or create initial chat
         open_ids = self.config.get("open_tabs", [])
@@ -381,6 +384,23 @@ class MainWindow(QMainWindow):
             self.config.get("image_quality", 85),
         )
 
+    def _refresh_model_combo(self):
+        """Populate the sidebar model dropdown from the persistent cache."""
+        models = cached_models_for(self.config.get("base_url", ""))
+        self.chat_history.set_models(models, self.config.get("model", "gpt-4o"))
+
+    def _on_model_changed(self, model: str):
+        """Handle a model committed in the sidebar dropdown (global override)."""
+        model = (model or "").strip()
+        if not model or model == self.config.get("model"):
+            return
+        self.config["model"] = model
+        save_config(self.config)
+        self.update_llm_client()
+        session = self._tab_for_chat(self.active_chat_id) if self.active_chat_id else None
+        if session:
+            self._update_quick_settings_for(session)
+
     def load_chat_list(self):
         """Load and display chat history."""
         chats = load_index()
@@ -417,6 +437,7 @@ class MainWindow(QMainWindow):
             if self.active_chat_id:
                 self.chat_history.select_chat_by_id(self.active_chat_id)
             self.update_llm_client()
+            self._refresh_model_combo()
             session = self._tab_for_chat(self.active_chat_id) if self.active_chat_id else None
             if session:
                 self._update_quick_settings_for(session)

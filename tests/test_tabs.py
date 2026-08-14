@@ -302,6 +302,73 @@ class TestQuickSettings:
         assert "50" in window.chat_history.tokens_label.text()
 
 
+class TestModelDropdown:
+    def test_model_field_is_editable_combo(self, window):
+        from PySide6.QtWidgets import QComboBox
+
+        combo = window.chat_history.model_combo
+        assert isinstance(combo, QComboBox)
+        assert combo.isEditable()
+        assert combo.insertPolicy() == QComboBox.InsertPolicy.NoInsert
+
+    def test_dropdown_populated_from_cache(self, window):
+        """The cached model list pre-populates the dropdown (endpoint-scoped)."""
+        from pengy.core.model_cache import save_model_cache
+
+        save_model_cache("https://api.openai.com/v1", ["gpt-4o", "gpt-4o-mini"])
+        window._refresh_model_combo()
+
+        combo = window.chat_history.model_combo
+        items = [combo.itemText(i) for i in range(combo.count())]
+        assert items == ["gpt-4o", "gpt-4o-mini"]
+        assert combo.currentText() == "gpt-4o"
+
+    def test_dropdown_ignores_cache_from_other_endpoint(self, window):
+        """A cached list from a different base URL is not offered."""
+        from pengy.core.model_cache import save_model_cache
+
+        save_model_cache("http://localhost:8080/v1", ["llama-3"])
+        window._refresh_model_combo()
+
+        combo = window.chat_history.model_combo
+        items = [combo.itemText(i) for i in range(combo.count())]
+        assert items == ["gpt-4o"]  # only the configured default survives
+
+    def test_combo_commit_emits_model_changed(self, window):
+        emitted = []
+        window.chat_history.model_changed.connect(emitted.append)
+        combo = window.chat_history.model_combo
+
+        combo.setCurrentText("gpt-4o-mini")
+        window.chat_history._on_model_commit()
+        assert emitted == ["gpt-4o-mini"]
+
+        # Committing the same value again must not re-emit
+        window.chat_history._on_model_commit()
+        assert emitted == ["gpt-4o-mini"]
+
+    def test_model_change_updates_config_and_rebuilds_client(self, window):
+        from pengy.core.config import load_config
+
+        assert window.config["model"] == "gpt-4o"
+        window._on_model_changed("gpt-4o-mini")
+
+        assert window.config["model"] == "gpt-4o-mini"
+        assert window.chat_history.model_combo.currentText() == "gpt-4o-mini"
+        # Persisted to settings.json so the CLI/web/next session agree
+        assert load_config()["model"] == "gpt-4o-mini"
+
+    def test_model_change_ignores_blank_and_same(self, window):
+        from pengy.core.config import load_config
+
+        window._on_model_changed("   ")
+        assert window.config["model"] == "gpt-4o"
+
+        window._on_model_changed("gpt-4o")
+        assert window.config["model"] == "gpt-4o"
+        assert load_config()["model"] == "gpt-4o"
+
+
 class TestCloseEvent:
     def test_close_cancels_running_workers(self, window, qapp):
         """closeEvent must cancel live workers so no QThread is destroyed mid-run."""

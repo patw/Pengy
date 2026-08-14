@@ -3,7 +3,7 @@ import re
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QListWidget,
     QListWidgetItem, QMenu, QFrame, QLabel, QHBoxLayout,
-    QFileDialog, QMessageBox,
+    QFileDialog, QMessageBox, QComboBox,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
 from PySide6.QtGui import QAction
@@ -19,10 +19,12 @@ class ChatHistoryWidget(QWidget):
     new_chat_requested = Signal()
     settings_requested = Signal()
     tasks_requested = Signal()
+    model_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_chat_id = None
+        self._current_model = ""
         self._theme = get_theme()
         self.setup_ui()
         self.apply_theme(self._theme)
@@ -107,9 +109,29 @@ class ChatHistoryWidget(QWidget):
         qs_divider.setFrameShadow(QFrame.Shadow.Sunken)
         qs_layout.addWidget(qs_divider)
 
-        self.model_label = QLabel("Model: gpt-4o")
+        model_row = QWidget()
+        model_row_layout = QHBoxLayout(model_row)
+        model_row_layout.setContentsMargins(0, 0, 0, 0)
+        model_row_layout.setSpacing(6)
+
+        self.model_label = QLabel("Model:")
         self.model_label.setStyleSheet(f"color: {self._theme['fg']};")
-        qs_layout.addWidget(self.model_label)
+        model_row_layout.addWidget(self.model_label)
+
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_combo.setMinimumWidth(scaled_size(120, self._theme))
+        self.model_combo.setToolTip(
+            "Model used for new messages. Populated from the saved model list — "
+            "use Settings → Fetch to refresh it."
+        )
+        # Both a popup selection and a typed name (Enter / focus-out) commit.
+        self.model_combo.activated.connect(lambda _index: self._on_model_commit())
+        self.model_combo.lineEdit().editingFinished.connect(self._on_model_commit)
+        model_row_layout.addWidget(self.model_combo, 1)
+
+        qs_layout.addWidget(model_row)
 
         self.confirm_label = QLabel("Tool Confirm: None")
         self.confirm_label.setStyleSheet(f"color: {self._theme['fg']};")
@@ -353,9 +375,30 @@ class ChatHistoryWidget(QWidget):
         "none": "Tool Confirm: Confirm All",
     }
 
+    def set_models(self, models: list[str], current: str):
+        """Populate the model dropdown, keeping *current* selected."""
+        items = list(models)
+        if current and current not in items:
+            items.insert(0, current)
+        self.model_combo.clear()
+        self.model_combo.addItems(items)
+        if current:
+            self.model_combo.setCurrentText(current)
+        self._current_model = current or self.model_combo.currentText()
+
+    def _on_model_commit(self):
+        """Emit model_changed when the user commits a (possibly typed) model."""
+        model = self.model_combo.currentText().strip()
+        if not model or model == self._current_model:
+            return
+        self._current_model = model
+        self.model_changed.emit(model)
+
     def update_quick_settings(self, model: str, tool_confirmation: str):
         """Update the quick settings display."""
-        self.model_label.setText(f"Model: {model}")
+        if model:
+            self.model_combo.setCurrentText(model)
+            self._current_model = model
         self.confirm_label.setText(
             self._CONFIRM_LABELS.get(tool_confirmation, f"Tool Confirm: {tool_confirmation}")
         )
