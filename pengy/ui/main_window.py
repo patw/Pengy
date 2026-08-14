@@ -387,19 +387,25 @@ class MainWindow(QMainWindow):
     def _refresh_model_combo(self):
         """Populate the sidebar model dropdown from the persistent cache."""
         models = cached_models_for(self.config.get("base_url", ""))
-        self.chat_history.set_models(models, self.config.get("model", "gpt-4o"))
+        session = self._tab_for_chat(self.active_chat_id) if self.active_chat_id else None
+        current = self._model_for_session(session) if session else self.config.get("model", "gpt-4o")
+        self.chat_history.set_models(models, current)
+
+    def _model_for_session(self, session: _TabSession) -> str:
+        """Resolve the model for a tab: its per-tab override, else the default."""
+        return session.chat.get("model") or self.config.get("model", "gpt-4o")
 
     def _on_model_changed(self, model: str):
-        """Handle a model committed in the sidebar dropdown (global override)."""
+        """Handle a model committed in the sidebar dropdown (active tab only)."""
         model = (model or "").strip()
-        if not model or model == self.config.get("model"):
-            return
-        self.config["model"] = model
-        save_config(self.config)
-        self.update_llm_client()
         session = self._tab_for_chat(self.active_chat_id) if self.active_chat_id else None
-        if session:
-            self._update_quick_settings_for(session)
+        if not session or not model:
+            return
+        if session.chat.get("model") == model:
+            return
+        session.chat["model"] = model
+        save_chat(session.chat)
+        self._update_quick_settings_for(session)
 
     def load_chat_list(self):
         """Load and display chat history."""
@@ -565,6 +571,7 @@ class MainWindow(QMainWindow):
             tool_confirmation=tool_confirmation,
             reasoning_effort=self.config.get("reasoning_effort", ""),
             preserve_reasoning=bool(self.config.get("preserve_reasoning", False)),
+            model=self._model_for_session(session),
         )
         thread = QThread()
         worker.moveToThread(thread)
@@ -851,7 +858,7 @@ class MainWindow(QMainWindow):
     def _update_quick_settings_for(self, session: _TabSession):
         """Update the sidebar quick-settings panel for a given tab."""
         self.chat_history.update_quick_settings(
-            self.config.get("model", "gpt-4o"),
+            self._model_for_session(session),
             self.config.get("tool_confirmation", "none"),
         )
         if session.prompt_tokens or session.completion_tokens:

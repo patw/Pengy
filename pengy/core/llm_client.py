@@ -242,7 +242,7 @@ class LLMClient:
     def chat(self, messages: list[dict], tool_confirmation: str = "none",
              reasoning_effort: str = "", preserve_reasoning: bool = False,
              cancel_fn: Callable[[], bool] | None = None,
-             tool_context=None):
+             tool_context=None, model: str | None = None):
         """
         Send a chat request and handle tool calls.
         Yields intermediate tool call info for UI updates.
@@ -251,6 +251,9 @@ class LLMClient:
           "all"  – execute every tool without asking (YOLO)
           "safe" – auto-approve read-only tools; confirm write/execute
           "none" – confirm every tool call
+
+        *model*, if given, overrides the client's default model for this
+        request (used by per-tab model selection).
 
         *cancel_fn*, if given, is polled during retry backoff sleeps so the
         user can abort a long wait.  Return ``True`` to cancel.
@@ -263,7 +266,7 @@ class LLMClient:
             for attempt in range(_MAX_RETRIES + 1):
                 try:
                     request_kwargs = {
-                        "model": self.model,
+                        "model": model or self.model,
                         "messages": current_messages,
                         "tools": _tools_mod.TOOLS,
                         "tool_choice": "auto",

@@ -114,7 +114,7 @@ class ChatHistoryWidget(QWidget):
         model_row_layout.setContentsMargins(0, 0, 0, 0)
         model_row_layout.setSpacing(6)
 
-        self.model_label = QLabel("Model:")
+        self.model_label = QLabel("Model (this tab):")
         self.model_label.setStyleSheet(f"color: {self._theme['fg']};")
         model_row_layout.addWidget(self.model_label)
 
@@ -123,8 +123,8 @@ class ChatHistoryWidget(QWidget):
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model_combo.setMinimumWidth(scaled_size(120, self._theme))
         self.model_combo.setToolTip(
-            "Model used for new messages. Populated from the saved model list — "
-            "use Settings → Fetch to refresh it."
+            "Model used for this tab's messages. Populated from the saved "
+            "model list — use Settings → Fetch to refresh it."
         )
         # Both a popup selection and a typed name (Enter / focus-out) commit.
         self.model_combo.activated.connect(lambda _index: self._on_model_commit())

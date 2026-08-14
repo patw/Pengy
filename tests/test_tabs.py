@@ -347,26 +347,55 @@ class TestModelDropdown:
         window.chat_history._on_model_commit()
         assert emitted == ["gpt-4o-mini"]
 
-    def test_model_change_updates_config_and_rebuilds_client(self, window):
-        from pengy.core.config import load_config
+    def test_model_change_sets_active_tab_model_and_persists(self, window):
+        from pengy.core.chat_manager import get_chat
 
+        session = _active_session(window)
+        assert session.chat.get("model") is None
         assert window.config["model"] == "gpt-4o"
+
         window._on_model_changed("gpt-4o-mini")
 
-        assert window.config["model"] == "gpt-4o-mini"
+        assert session.chat["model"] == "gpt-4o-mini"
         assert window.chat_history.model_combo.currentText() == "gpt-4o-mini"
-        # Persisted to settings.json so the CLI/web/next session agree
-        assert load_config()["model"] == "gpt-4o-mini"
+        # Persisted to the chat file, not the global default
+        assert get_chat(session.chat["id"])["model"] == "gpt-4o-mini"
+        assert window.config["model"] == "gpt-4o"
+
+    def test_model_change_is_per_tab(self, window):
+        first = _active_session(window)
+        _dirty_chat(first)
+        window.create_new_chat()
+        second = _active_session(window)
+        assert second is not first
+
+        window._on_model_changed("deepseek-chat")
+        assert first.chat.get("model") is None
+        assert second.chat["model"] == "deepseek-chat"
+
+        # Switching tabs swaps the dropdown to that tab's model
+        for i in range(window.tab_widget.count()):
+            if window.tab_widget.widget(i) is first.chat_view:
+                window.tab_widget.setCurrentIndex(i)
+                break
+        assert window.chat_history.model_combo.currentText() == "gpt-4o"
+
+        for i in range(window.tab_widget.count()):
+            if window.tab_widget.widget(i) is second.chat_view:
+                window.tab_widget.setCurrentIndex(i)
+                break
+        assert window.chat_history.model_combo.currentText() == "deepseek-chat"
 
     def test_model_change_ignores_blank_and_same(self, window):
-        from pengy.core.config import load_config
+        session = _active_session(window)
+        window._on_model_changed("gpt-4o-mini")
+        assert session.chat["model"] == "gpt-4o-mini"
 
         window._on_model_changed("   ")
-        assert window.config["model"] == "gpt-4o"
+        assert session.chat["model"] == "gpt-4o-mini"
 
-        window._on_model_changed("gpt-4o")
-        assert window.config["model"] == "gpt-4o"
-        assert load_config()["model"] == "gpt-4o"
+        window._on_model_changed("gpt-4o-mini")
+        assert session.chat["model"] == "gpt-4o-mini"
 
 
 class TestCloseEvent:

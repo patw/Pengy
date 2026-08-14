@@ -149,6 +149,13 @@ class TestFinalResponse:
             [{"role": "user", "content": "hi"}], reasoning_effort="high"))
         assert stub.requests[0]["body"]["reasoning_effort"] == "high"
 
+    def test_model_override_sent(self, stub, client):
+        """A per-call model override wins over the client's default model."""
+        stub.queue(completion(content="ok"))
+        collect_auto(client.chat(
+            [{"role": "user", "content": "hi"}], model="custom-model"))
+        assert stub.requests[0]["body"]["model"] == "custom-model"
+
     def test_preserve_reasoning_keeps_fields(self, stub, client, tmp_path):
         f = tmp_path / "a.txt"
         f.write_text("data")

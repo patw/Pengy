@@ -16,13 +16,14 @@ class ChatWorker(QObject):
 
     def __init__(self, llm_client, messages: list[dict],
                  tool_confirmation: str = "none", reasoning_effort: str = "",
-                 preserve_reasoning: bool = False):
+                 preserve_reasoning: bool = False, model: str | None = None):
         super().__init__()
         self.llm_client = llm_client
         self.messages = messages
         self.tool_confirmation = tool_confirmation
         self.reasoning_effort = reasoning_effort
         self.preserve_reasoning = preserve_reasoning
+        self.model = model
         self.generator = None
         self._cancelled = threading.Event()
         self._confirmation_event = threading.Event()
@@ -61,6 +62,7 @@ class ChatWorker(QObject):
                 preserve_reasoning=self.preserve_reasoning,
                 cancel_fn=self._cancelled.is_set,
                 tool_context=self._tool_context,
+                model=self.model,
             )
             send_value = None
             while True:
