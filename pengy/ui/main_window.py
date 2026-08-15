@@ -739,6 +739,7 @@ class MainWindow(QMainWindow):
         session.thinking = False
         session.tool_running = False
         self._update_tab_title(session)
+        self._update_quick_settings_for(session)
 
         if session.chat:
             session.chat["messages"] = clean_dangling_tool_calls(session.chat["messages"])
