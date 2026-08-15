@@ -1080,6 +1080,155 @@ class TestRequestOriginGuard:
 
 
 # ────────────────────────────────────────────────────────────────────
+# Incremental persistence — tool calls must reach disk before the turn ends
+# ────────────────────────────────────────────────────────────────────
+
+class _FakeLLM:
+    """Stands in for LLMClient; replays a scripted event list, then raises."""
+
+    def __init__(self, events, explode=None, **kwargs):
+        self._events = events
+        self._explode = explode
+
+    def chat(self, messages, **kwargs):
+        for event in self._events:
+            yield event
+        if self._explode:
+            raise self._explode
+
+
+def _script(*events):
+    """Build a WebWorker-compatible LLMClient factory over *events*."""
+    def factory(**kwargs):
+        return _FakeLLM(events, explode=kwargs.pop("_explode", None))
+    return factory
+
+
+_TOOL_CALL_EVENTS = [
+    {
+        "type": "assistant_tool_calls",
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": '{"path": "/etc/hostname"}'},
+            }],
+        },
+    },
+    {
+        "type": "tool_request",
+        "name": "read_file",
+        "args": {"path": "/etc/hostname"},
+        "tool_call_id": "call-1",
+    },
+    {
+        "type": "tool_result",
+        "tool_call_id": "call-1",
+        "name": "read_file",
+        "args": {"path": "/etc/hostname"},
+        "content": "pengy-box",
+        "declined": False,
+    },
+]
+
+
+class TestIncrementalPersistence:
+    """A run that dies mid-turn must not take its tool calls with it."""
+
+    def _run_worker(self, monkeypatch, events, explode=None):
+        from pengy.core.chat_manager import create_chat, get_chat
+        from pengy.web import app as app_mod
+
+        chat = create_chat()
+        chat["messages"].append({"role": "user", "content": "read the hostname"})
+        app_mod.save_chat(chat)
+
+        class _LLM(_FakeLLM):
+            def __init__(self, **kwargs):
+                super().__init__(events, explode=explode)
+
+        monkeypatch.setattr(app_mod, "LLMClient", _LLM)
+        config = {"model": "gpt-4o", "tool_confirmation": "all"}
+        worker = WebWorker(chat, config)
+        worker._run()
+        return get_chat(chat["id"])
+
+    def test_tool_messages_persist_when_run_explodes(self, tmp_dirs, monkeypatch):
+        saved = self._run_worker(
+            monkeypatch, _TOOL_CALL_EVENTS, explode=RuntimeError("connection reset")
+        )
+        roles = [m["role"] for m in saved["messages"]]
+        assert roles == ["user", "assistant", "tool"], (
+            f"tool call lost on crash; got {roles}"
+        )
+        assert saved["messages"][2]["content"] == "pengy-box"
+
+    def test_dangling_tool_call_repaired_on_crash(self, tmp_dirs, monkeypatch):
+        # Died between the assistant tool_calls message and the tool result.
+        saved = self._run_worker(
+            monkeypatch, _TOOL_CALL_EVENTS[:2], explode=RuntimeError("killed")
+        )
+        roles = [m["role"] for m in saved["messages"]]
+        assert roles == ["user", "assistant", "tool"], (
+            f"dangling tool_calls not repaired; got {roles}"
+        )
+        # Synthesized placeholder, so the next request does not 400.
+        assert saved["messages"][2]["tool_call_id"] == "call-1"
+
+    def test_question_answer_is_persisted(self, tmp_dirs, monkeypatch):
+        events = [
+            _TOOL_CALL_EVENTS[0],
+            {
+                "type": "question_result",
+                "tool_call_id": "call-1",
+                "name": "ask_user_question",
+                "content": "**Approach**: Rebase",
+            },
+            {"type": "final_response", "content": "ok", "message": None, "usage": {}},
+        ]
+        saved = self._run_worker(monkeypatch, events)
+        tool_msgs = [m for m in saved["messages"] if m["role"] == "tool"]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0]["content"] == "**Approach**: Rebase"
+
+    def test_rename_during_run_is_not_clobbered(self, tmp_dirs, monkeypatch):
+        """A rename landing mid-run survives the worker's next save."""
+        from pengy.core.chat_manager import create_chat, get_chat, save_chat
+
+        from pengy.web import app as app_mod
+
+        chat = create_chat()
+        chat["title"] = "Original"
+        chat["messages"].append({"role": "user", "content": "hi"})
+        save_chat(chat)
+
+        def events():
+            yield _TOOL_CALL_EVENTS[0]
+            # Simulate POST /rename arriving now, on its own copy of the chat.
+            other = get_chat(chat["id"])
+            other["title"] = "Renamed by user"
+            save_chat(other)
+            yield _TOOL_CALL_EVENTS[2]
+            yield {"type": "final_response", "content": "done", "message": None, "usage": {}}
+
+        class _LLM(_FakeLLM):
+            def __init__(self, **kwargs):
+                super().__init__(events())
+
+        monkeypatch.setattr(app_mod, "LLMClient", _LLM)
+        worker = WebWorker(chat, {"model": "gpt-4o", "tool_confirmation": "all"})
+        worker._run()
+
+        saved = get_chat(chat["id"])
+        assert saved["title"] == "Renamed by user"
+        assert [m["role"] for m in saved["messages"]] == [
+            "user", "assistant", "tool", "assistant",
+        ]
+
+
+# ────────────────────────────────────────────────────────────────────
 # pytest marker
 # ────────────────────────────────────────────────────────────────────
 pytestmark = pytest.mark.web

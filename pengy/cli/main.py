@@ -1188,6 +1188,15 @@ class PengyCLI:
 
         return messages
 
+    def _save_progress(self, chat: dict):
+        """Persist mid-turn, so a crash can't take the turn's tool calls with it.
+
+        One small per-chat file write; the whole store is not touched.
+        """
+        if self._no_save:
+            return
+        save_chat(chat)
+
     def _drive_generator(self, messages: list[dict], chat: dict):
         """Drive the LLMClient.chat() generator, handling tool confirmations.
 
@@ -1226,6 +1235,7 @@ class PengyCLI:
                     expecting_api_call = False
                     self._yolo_this_turn = False
                     chat["messages"].append(response["message"])
+                    self._save_progress(chat)
 
                 elif rtype == "tool_request":
                     expecting_api_call = False
@@ -1255,6 +1265,15 @@ class PengyCLI:
                 elif rtype == "question_result":
                     expecting_api_call = True
                     self._render_tool_result({"content": response.get("content", ""), "declined": False})
+                    # The generator already has this on its own message list;
+                    # persist it too, or the assistant tool_calls message is
+                    # left dangling in chat history.
+                    chat["messages"].append({
+                        "role": "tool",
+                        "tool_call_id": response["tool_call_id"],
+                        "content": response.get("content", ""),
+                    })
+                    self._save_progress(chat)
 
                 elif rtype == "tool_result":
                     expecting_api_call = True
@@ -1264,6 +1283,7 @@ class PengyCLI:
                         "tool_call_id": response["tool_call_id"],
                         "content": response["content"],
                     })
+                    self._save_progress(chat)
 
                 if rtype == "final_response":
                     break
@@ -1276,6 +1296,10 @@ class PengyCLI:
         finally:
             gen.close()
             if not self._no_save:
+                # Ctrl-C or an error leaves the loop mid-turn, where the last
+                # assistant message can hold tool_calls with no result behind
+                # them (the API 400s on that next request).
+                chat["messages"] = clean_dangling_tool_calls(chat["messages"])
                 save_chat(chat)
 
     def _show_thinking(self):

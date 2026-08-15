@@ -19,7 +19,7 @@ from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.model_cache import load_model_cache, save_model_cache
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
-    create_chat, delete_chat, get_chat, load_index, save_chat,
+    create_chat, delete_chat, get_chat, load_index, save_chat, save_chat_progress,
     clean_dangling_tool_calls, elide_old_tool_results,
 )
 from pengy.core.image_utils import preprocess as preprocess_image
@@ -493,6 +493,7 @@ class WebWorker:
                 if rtype == "assistant_tool_calls":
                     self._yolo_this_turn = False
                     chat["messages"].append(response["message"])
+                    save_chat_progress(chat)
 
                 elif rtype == "tool_request":
                     name = response.get("name", "")
@@ -550,6 +551,15 @@ class WebWorker:
 
                 elif rtype == "question_result":
                     content = response.get("content", "")
+                    # The generator already put this on its own message list;
+                    # persist it too, or the assistant tool_calls message above
+                    # is left dangling in chat history.
+                    chat["messages"].append({
+                        "role": "tool",
+                        "tool_call_id": response["tool_call_id"],
+                        "content": content,
+                    })
+                    save_chat_progress(chat)
                     self._put_event({
                         "type": "tool_result",
                         "tool_call_id": response["tool_call_id"],
@@ -567,6 +577,7 @@ class WebWorker:
                         "tool_call_id": response["tool_call_id"],
                         "content": content,
                     })
+                    save_chat_progress(chat)
                     display = content if len(content) <= 3000 else content[:3000] + "\n… [truncated]"
                     self._put_event({
                         "type": "tool_result",
@@ -580,7 +591,7 @@ class WebWorker:
                 elif rtype == "final_response":
                     content = response.get("content") or ""
                     chat["messages"].append(response.get("message") or {"role": "assistant", "content": content})
-                    save_chat(chat)
+                    save_chat_progress(chat)
                     self._put_event({
                         "type": "final_response",
                         "html": _render_md(content),
@@ -594,6 +605,15 @@ class WebWorker:
         finally:
             self._done = True
             tools.set_sudo_password_provider(None)
+            # Cancel and errors both leave the loop mid-turn, where the last
+            # assistant message can hold tool_calls with no result behind them
+            # (the API 400s on that next request).  Repair, then persist what
+            # the turn got through.
+            try:
+                chat["messages"] = clean_dangling_tool_calls(chat["messages"])
+                save_chat_progress(chat)
+            except Exception as e:  # never let a save failure mask the run
+                app.logger.error("Final save failed for chat %s: %s", chat["id"], e)
             # Do not depend on a client reconnecting to free completed
             # workers.  Keep the replay log for a bounded reconnect grace
             # period, then let persisted chat history take over.

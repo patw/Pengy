@@ -370,6 +370,24 @@ def save_chat(chat: dict) -> None:
     _update_index_entry(chat)
 
 
+def save_chat_progress(chat: dict) -> None:
+    """Save an in-flight chat without clobbering out-of-band metadata edits.
+
+    A worker holds its own snapshot of the chat dict for the whole run, so a
+    rename that lands mid-run (a different copy, saved by another thread) would
+    be overwritten by the worker's next write. Adopt the on-disk title first;
+    messages still come from the worker's copy, which is the newer one.
+    """
+    if not chat or not chat.get("id"):
+        return
+    on_disk = _safe_json_load(_chat_file(chat["id"]), expect=dict)
+    if on_disk:
+        title = on_disk.get("title")
+        if title and title != chat.get("title"):
+            chat["title"] = title
+    save_chat(chat)
+
+
 def get_chat(chat_id: str) -> dict | None:
     """Get a chat session by ID.
 

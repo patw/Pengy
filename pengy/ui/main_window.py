@@ -644,6 +644,16 @@ class MainWindow(QMainWindow):
         elif response["type"] == "assistant_tool_calls":
             session.yolo_this_turn = False
             session.chat["messages"].append(response["message"])
+            save_chat(session.chat)
+        elif response["type"] == "question_result":
+            # The generator already has this on its own message list; persist it
+            # too, or the assistant tool_calls message above is left dangling.
+            session.chat["messages"].append({
+                "role": "tool",
+                "tool_call_id": response["tool_call_id"],
+                "content": response.get("content", ""),
+            })
+            save_chat(session.chat)
         elif response["type"] == "tool_result":
             session.tool_running = False
             session.thinking = True  # still thinking after tool result
@@ -655,6 +665,7 @@ class MainWindow(QMainWindow):
                 "tool_call_id": response["tool_call_id"],
                 "content": response["content"],
             })
+            save_chat(session.chat)
             session.chat_view.append_message("tool_result", response)
 
     def _on_worker_error(self, error_msg: str):
@@ -665,6 +676,11 @@ class MainWindow(QMainWindow):
         if not session:
             return
         session.chat_view.append_message("assistant", f"Error: {error_msg}")
+        # The run died mid-turn: the last assistant message may hold tool_calls
+        # with no result behind them, which 400s on the next request.
+        if session.chat:
+            session.chat["messages"] = clean_dangling_tool_calls(session.chat["messages"])
+            save_chat(session.chat)
         session.thinking = False
         session.tool_running = False
         self._update_tab_title(session)
