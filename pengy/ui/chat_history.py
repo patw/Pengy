@@ -133,6 +133,11 @@ class ChatHistoryWidget(QWidget):
 
         qs_layout.addWidget(model_row)
 
+        self.model_hint_label = QLabel("")
+        self.model_hint_label.setWordWrap(True)
+        self.model_hint_label.setStyleSheet(f"color: {self._theme['muted']}; font-size: 9pt;")
+        qs_layout.addWidget(self.model_hint_label)
+
         self.confirm_label = QLabel("Tool Confirm: None")
         self.confirm_label.setStyleSheet(f"color: {self._theme['fg']};")
         qs_layout.addWidget(self.confirm_label)
@@ -161,6 +166,7 @@ class ChatHistoryWidget(QWidget):
                           size=scaled_size(16, theme))
         for label in (self.model_label, self.confirm_label, self.tokens_label):
             label.setStyleSheet(f"color: {theme['fg']};")
+        self.model_hint_label.setStyleSheet(f"color: {theme['muted']}; font-size: 9pt;")
         self.load_chats([]) if False else None  # keep method import-safe; rows are restyled on reload
 
     def _make_item_widget(self, chat_id: str, title: str) -> QWidget:
@@ -385,6 +391,13 @@ class ChatHistoryWidget(QWidget):
         if current:
             self.model_combo.setCurrentText(current)
         self._current_model = current or self.model_combo.currentText()
+        # Nudge the user toward Fetch when there's no cached list to pick from.
+        if models:
+            self.model_hint_label.setText("")
+        else:
+            self.model_hint_label.setText(
+                "No cached model list — use Settings → Fetch to populate."
+            )
 
     def _on_model_commit(self):
         """Emit model_changed when the user commits a (possibly typed) model."""

@@ -347,6 +347,18 @@ class TestModelDropdown:
         window.chat_history._on_model_commit()
         assert emitted == ["gpt-4o-mini"]
 
+    def test_hint_shown_when_no_cached_list(self, window):
+        """Without a cache the dropdown shows a nudge toward Settings → Fetch."""
+        hint = window.chat_history.model_hint_label
+        assert "Fetch" in hint.text()
+
+    def test_hint_hidden_when_cache_populated(self, window):
+        from pengy.core.model_cache import save_model_cache
+
+        save_model_cache("https://api.openai.com/v1", ["gpt-4o", "gpt-4o-mini"])
+        window._refresh_model_combo()
+        assert window.chat_history.model_hint_label.text() == ""
+
     def test_model_change_sets_active_tab_model_and_persists(self, window):
         from pengy.core.chat_manager import get_chat
 
