@@ -114,7 +114,7 @@ class ChatHistoryWidget(QWidget):
         model_row_layout.setContentsMargins(0, 0, 0, 0)
         model_row_layout.setSpacing(6)
 
-        self.model_label = QLabel("Model (this tab):")
+        self.model_label = QLabel("Model:")
         self.model_label.setStyleSheet(f"color: {self._theme['fg']};")
         model_row_layout.addWidget(self.model_label)
 
