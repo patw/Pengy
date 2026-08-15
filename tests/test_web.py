@@ -26,6 +26,24 @@ from pengy.web.app import (
 # Fixtures
 # ────────────────────────────────────────────────────────────────────
 
+def _drain_web_workers(timeout: float = 5.0) -> None:
+    """Wait for any live ``pengy.web`` worker threads to finish their run.
+
+    Each ``WebWorker`` runs on a daemon thread, and its incremental-persistence
+    final save (the ``finally`` block) happens on that thread. Joining them
+    before a temp ``PENGY_CONFIG_DIR`` is removed guarantees no in-flight write
+    can race the ``rmtree`` below and fail it with ``Directory not empty``.
+    """
+    from pengy.web.app import _workers, _workers_lock
+
+    with _workers_lock:
+        workers = list(_workers.values())
+        _workers.clear()
+    for w in workers:
+        if w._thread.is_alive():
+            w._thread.join(timeout)
+
+
 @pytest.fixture
 def tmp_dirs():
     """Temporarily redirect pengy config/chats to a temp directory.
@@ -51,6 +69,11 @@ def tmp_dirs():
         )
 
         yield cfg_dir, cfg_dir  # both config and chats live in the same dir now
+
+        # Drain web-worker threads before the temp dir is removed: a worker
+        # that just ended its run saves on a daemon thread, which can otherwise
+        # race this cleanup.
+        _drain_web_workers()
 
     # Reset config dir after test
     set_config_dir(None)
