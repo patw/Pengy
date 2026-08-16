@@ -5,6 +5,7 @@ Run with:  python -m pytest tests/test_web.py -v
 
 import json
 import threading
+import time
 import tempfile
 from pathlib import Path
 
@@ -1249,6 +1250,206 @@ class TestIncrementalPersistence:
         assert [m["role"] for m in saved["messages"]] == [
             "user", "assistant", "tool", "assistant",
         ]
+
+
+class TestMidTurnAssistantText:
+    """Narration attached to a tool_calls message must stream, not wait for reload."""
+
+    def _run(self, monkeypatch, message):
+        from pengy.core.chat_manager import create_chat
+        from pengy.web import app as app_mod
+
+        chat = create_chat()
+        chat["messages"].append({"role": "user", "content": "go"})
+        app_mod.save_chat(chat)
+
+        events = [
+            {"type": "assistant_tool_calls", "message": message},
+            _TOOL_CALL_EVENTS[2],
+            {"type": "final_response", "content": "done", "message": None, "usage": {}},
+        ]
+
+        class _LLM(_FakeLLM):
+            def __init__(self, **kwargs):
+                super().__init__(events)
+
+        monkeypatch.setattr(app_mod, "LLMClient", _LLM)
+        worker = WebWorker(chat, {"model": "gpt-4o", "tool_confirmation": "all"})
+        worker._run()
+        return worker._events
+
+    def test_preamble_streams_as_its_own_event(self, tmp_dirs, monkeypatch):
+        message = {**_TOOL_CALL_EVENTS[0]["message"], "content": "Let me **check** that."}
+        events = self._run(monkeypatch, message)
+        msgs = [e for e in events if e["type"] == "assistant_message"]
+        assert len(msgs) == 1, f"mid-turn narration not streamed; got {events}"
+        assert "<strong>check</strong>" in msgs[0]["html"]
+        # …and it arrives before the tool result it precedes.
+        assert events.index(msgs[0]) < next(
+            i for i, e in enumerate(events) if e["type"] == "tool_result"
+        )
+
+    def test_no_event_when_there_is_no_preamble(self, tmp_dirs, monkeypatch):
+        events = self._run(monkeypatch, _TOOL_CALL_EVENTS[0]["message"])
+        assert not [e for e in events if e["type"] == "assistant_message"]
+
+
+class TestAskUserQuestionFlow:
+    """The web UI must surface question_request and route answers back."""
+
+    def _worker_for_question(self, monkeypatch):
+        from pengy.core.chat_manager import create_chat
+        from pengy.web import app as app_mod
+
+        chat = create_chat()
+        chat["messages"].append({"role": "user", "content": "which way?"})
+        app_mod.save_chat(chat)
+
+        questions = [{
+            "header": "Approach",
+            "question": "Rebase or merge?",
+            "options": [
+                {"label": "Rebase", "description": "linear history"},
+                {"label": "Merge", "description": "keeps both parents"},
+            ],
+        }]
+        sent = []
+
+        class _LLM:
+            def __init__(self, **kwargs):
+                pass
+
+            def chat(self, messages, **kwargs):
+                yield {
+                    "type": "assistant_tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call-q",
+                            "type": "function",
+                            "function": {"name": "ask_user_question",
+                                         "arguments": json.dumps({"questions": questions})},
+                        }],
+                    },
+                }
+                reply = yield {
+                    "type": "question_request",
+                    "name": "ask_user_question",
+                    "args": {"questions": questions},
+                    "tool_call_id": "call-q",
+                    "questions": questions,
+                }
+                sent.append(reply)
+                if reply and reply.get("answered"):
+                    yield {
+                        "type": "question_result",
+                        "tool_call_id": "call-q",
+                        "name": "ask_user_question",
+                        "content": f"**Approach**: {reply['answers'][0]}",
+                    }
+                yield {"type": "final_response", "content": "ok",
+                       "message": None, "usage": {}}
+
+        monkeypatch.setattr(app_mod, "LLMClient", _LLM)
+        worker = WebWorker(chat, {"model": "gpt-4o", "tool_confirmation": "all"})
+        return chat, worker, sent
+
+    def test_question_request_is_streamed_with_args(self, tmp_dirs, monkeypatch):
+        chat, worker, _ = self._worker_for_question(monkeypatch)
+        worker.start()
+        deadline = time.time() + 5
+        while time.time() < deadline and not worker._events:
+            time.sleep(0.01)
+        ev = worker._events[0]
+        assert ev["type"] == "question_request"
+        # The browser renders a tool card from name/args, like any other tool.
+        assert ev["name"] == "ask_user_question"
+        assert ev["args"]["questions"][0]["header"] == "Approach"
+        assert ev["safe_id"] == _safe_id("call-q")
+        worker.send_answers(True, "call-q", ["Rebase"])
+        worker._thread.join(timeout=5)
+
+    def test_answers_resume_the_generator_and_persist(self, tmp_dirs, monkeypatch):
+        from pengy.core.chat_manager import get_chat
+
+        chat, worker, sent = self._worker_for_question(monkeypatch)
+        worker.start()
+        deadline = time.time() + 5
+        while time.time() < deadline and not worker._events:
+            time.sleep(0.01)
+        worker.send_answers(True, "call-q", ["Rebase"])
+        worker._thread.join(timeout=5)
+
+        assert sent == [{"answered": True, "tool_call_id": "call-q",
+                         "answers": ["Rebase"]}]
+        saved = get_chat(chat["id"])
+        tool_msgs = [m for m in saved["messages"] if m["role"] == "tool"]
+        assert tool_msgs and tool_msgs[0]["content"] == "**Approach**: Rebase"
+
+    def test_cancelled_question_does_not_answer(self, tmp_dirs, monkeypatch):
+        chat, worker, sent = self._worker_for_question(monkeypatch)
+        worker.start()
+        deadline = time.time() + 5
+        while time.time() < deadline and not worker._events:
+            time.sleep(0.01)
+        worker.send_answers(False, "call-q", [])
+        worker._thread.join(timeout=5)
+        assert sent == [None]
+
+    def test_answer_route_forwards_to_worker(self, tmp_dirs, monkeypatch, client):
+        from pengy.web.app import _workers, _workers_lock
+
+        class _Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def send_answers(self, answered, tool_call_id, answers):
+                self.calls.append((answered, tool_call_id, answers))
+
+        rec = _Recorder()
+        with _workers_lock:
+            _workers["cid"] = rec
+        try:
+            resp = client.post(
+                "/chat/cid/answer",
+                json={"answered": True, "tool_call_id": "call-q", "answers": ["Rebase"]},
+            )
+            assert resp.status_code == 200
+            assert rec.calls == [(True, "call-q", ["Rebase"])]
+
+            # An "answered" payload with nothing in it is a cancel, not an answer.
+            client.post("/chat/cid/answer",
+                        json={"answered": True, "tool_call_id": "call-q", "answers": []})
+            assert rec.calls[-1] == (False, "call-q", [])
+        finally:
+            with _workers_lock:
+                _workers.pop("cid", None)
+
+    def test_answer_route_without_worker(self, tmp_dirs, client):
+        resp = client.post("/chat/nope/answer",
+                           json={"answered": True, "tool_call_id": "x", "answers": ["y"]})
+        assert resp.status_code == 404
+
+
+class TestQuestionTemplateWiring:
+    """The SSE events are useless if chat.html ignores them."""
+
+    def _chat_html(self):
+        from pathlib import Path
+        import pengy.web.app as app_mod
+        return (Path(app_mod.__file__).parent / "templates" / "chat.html").read_text()
+
+    def test_handles_question_and_assistant_events(self):
+        html = self._chat_html()
+        assert "case 'question_request'" in html
+        assert "case 'assistant_message'" in html
+
+    def test_question_modal_posts_answers(self):
+        html = self._chat_html()
+        assert 'id="questionModal"' in html
+        assert "function submitAnswers" in html
+        assert "/answer" in html
 
 
 # ────────────────────────────────────────────────────────────────────

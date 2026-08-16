@@ -332,3 +332,50 @@ class TestDeleteConfirmation:
 
         assert not confirm.ask.called
         assert [c["title"] for c in load_chats()] == before
+
+
+# ────────────────────────────────────────────────────────────────────
+# Mid-turn assistant narration
+# ────────────────────────────────────────────────────────────────────
+
+class TestAssistantPreamble:
+    """Text the model writes alongside its tool calls must render live.
+
+    It is persisted with the turn, so a run that only showed the tool cards
+    looked like the model went straight to the tools with nothing to say —
+    the narration then appeared out of nowhere on a later /show.
+    """
+
+    @staticmethod
+    def _cli(mode="pretty"):
+        cli = PengyCLI(no_save=True)
+        cli._output_mode = mode
+        return cli
+
+    def _capture(self, cli, message):
+        printed = []
+        with patch.object(cli.console, "print", side_effect=lambda *a, **k: printed.append(a)):
+            with patch("builtins.print", side_effect=lambda *a, **k: printed.append(a)):
+                cli._render_assistant_preamble(message)
+        return printed
+
+    def test_pretty_mode_renders_narration(self):
+        cli = self._cli()
+        printed = self._capture(cli, {"role": "assistant", "content": "Let me check that."})
+        assert printed, "narration was dropped instead of rendered"
+
+    def test_raw_mode_prints_plain_text(self):
+        cli = self._cli("raw")
+        printed = self._capture(cli, {"role": "assistant", "content": "Let me check."})
+        assert printed == [("Let me check.",)]
+
+    @pytest.mark.parametrize("content", ["", "   ", None])
+    def test_empty_narration_prints_nothing(self, content):
+        cli = self._cli()
+        assert self._capture(cli, {"role": "assistant", "content": content}) == []
+
+    @pytest.mark.parametrize("mode", ["json", "silent"])
+    def test_machine_modes_stay_quiet(self, mode):
+        """json builds one object from the final response; stray text breaks it."""
+        cli = self._cli(mode)
+        assert self._capture(cli, {"role": "assistant", "content": "chatter"}) == []

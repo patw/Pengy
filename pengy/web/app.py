@@ -383,6 +383,15 @@ class WebWorker:
         }
         self._confirm_event.set()
 
+    def send_answers(self, answered: bool, tool_call_id: str, answers: list[str]):
+        """Answer a pending ask_user_question (shares the confirm channel)."""
+        self._confirm_result = {
+            "answered": answered,
+            "tool_call_id": tool_call_id,
+            "answers": answers,
+        }
+        self._confirm_event.set()
+
     def send_sudo_password(self, password: str | None):
         self._sudo_result = password
         self._sudo_event.set()
@@ -494,6 +503,16 @@ class WebWorker:
                     self._yolo_this_turn = False
                     chat["messages"].append(response["message"])
                     save_chat_progress(chat)
+                    # The assistant often narrates before calling tools.  That
+                    # text is persisted (and shows up on reload) but the live
+                    # stream dropped it, so mid-turn commentary only appeared
+                    # after a refresh.  Push it as its own event.
+                    preamble = (response["message"].get("content") or "").strip()
+                    if preamble:
+                        self._put_event({
+                            "type": "assistant_message",
+                            "html": _render_md(preamble),
+                        })
 
                 elif rtype == "tool_request":
                     name = response.get("name", "")
@@ -534,6 +553,8 @@ class WebWorker:
                     tool_call_id = response.get("tool_call_id", "")
                     self._put_event({
                         "type": "question_request",
+                        "name": "ask_user_question",
+                        "args": response.get("args", {"questions": questions}),
                         "questions": questions,
                         "tool_call_id": tool_call_id,
                         "safe_id": _safe_id(tool_call_id),
@@ -873,6 +894,25 @@ def chat_confirm(chat_id: str):
         confirmed=bool(data.get("confirmed")),
         tool_call_id=data.get("tool_call_id", ""),
         yolo_turn=bool(data.get("yolo_turn")),
+    )
+    return jsonify({"status": "ok"})
+
+
+@app.route("/chat/<chat_id>/answer", methods=["POST"])
+def chat_answer(chat_id: str):
+    """Submit (or decline) answers to a pending ask_user_question."""
+    data = request.get_json() or {}
+    with _workers_lock:
+        worker = _workers.get(chat_id)
+    if not worker:
+        return jsonify({"error": "No active task"}), 404
+    answers = data.get("answers") or []
+    if not isinstance(answers, list):
+        answers = []
+    worker.send_answers(
+        answered=bool(data.get("answered")) and bool(answers),
+        tool_call_id=data.get("tool_call_id", ""),
+        answers=[str(a) for a in answers],
     )
     return jsonify({"status": "ok"})
 

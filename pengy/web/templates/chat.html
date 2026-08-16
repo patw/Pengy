@@ -163,6 +163,29 @@
   </div>
 </div>
 
+<!-- Ask User Question Modal -->
+<div class="modal fade" id="questionModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title">
+          <i class="bi bi-question-circle text-info me-2"></i>Question
+        </h6>
+        <button type="button" class="btn-close" onclick="submitAnswers(false)" aria-label="Cancel and close"></button>
+      </div>
+      <div class="modal-body" id="questionBody"></div>
+      <div class="modal-footer">
+        <button class="btn btn-sm btn-outline-danger" onclick="submitAnswers(false)">
+          <i class="bi bi-x-circle me-1"></i>Cancel
+        </button>
+        <button class="btn btn-sm btn-success" onclick="submitAnswers(true)">
+          <i class="bi bi-check-circle me-1"></i>Submit Answers
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Sudo Password Modal -->
 <div class="modal fade" id="sudoModal" tabindex="-1" data-bs-backdrop="static">
   <div class="modal-dialog modal-sm">
@@ -213,14 +236,17 @@ let isProcessing = false;
 let eventSource = null;
 let sseCursor = sessionStorage.getItem('pengy_sse_cursor_' + CHAT_ID) || '';
 let pendingToolCallId = null;
+let pendingQuestionId = null;
+let pendingQuestions = [];
 let thinkingEl = null;
-let confirmModal, sudoModal, renameModal;
+let confirmModal, questionModal, sudoModal, renameModal;
 let pendingFiles = [];
 let wakeLock = null;
 
 document.addEventListener('DOMContentLoaded', () => {
   scrollToBottom();
   confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+  questionModal = new bootstrap.Modal(document.getElementById('questionModal'));
   sudoModal    = new bootstrap.Modal(document.getElementById('sudoModal'));
   renameModal  = new bootstrap.Modal(document.getElementById('renameModal'));
 
@@ -318,6 +344,12 @@ function escHtml(text) {
   const d = document.createElement('div');
   d.textContent = text;
   return d.innerHTML;
+}
+
+// escHtml is safe for element content but leaves quotes intact, which would
+// let model-supplied text break out of an attribute. Use this inside "…".
+function escAttr(text) {
+  return escHtml(text).replace(/"/g, '&quot;');
 }
 
 function safeId(toolCallId) {
@@ -434,6 +466,10 @@ function stopGeneration() {
       });
       pendingToolCallId = null;
     }
+  }
+  // Close question modal if open — the worker is blocked waiting on it
+  if (questionModal._isShown) {
+    submitAnswers(false);
   }
   // Close sudo modal if open
   if (sudoModal._isShown) {
@@ -703,6 +739,19 @@ function handleEvent(data) {
       }
       break;
 
+    case 'question_request':
+      hideThinking();
+      appendToolRequest({...data, auto_approved: false});
+      showQuestionModal(data);
+      break;
+
+    case 'assistant_message':
+      // Mid-turn narration that arrives before the tool calls it precedes.
+      hideThinking();
+      appendAssistantMessage(data.html, null);
+      showThinking();
+      break;
+
     case 'tool_result':
       hideThinking();
       updateToolResult(data);
@@ -759,6 +808,8 @@ function appendUserMessage(content) {
 
 function appendToolRequest(data) {
   const sid = safeId(data.tool_call_id);
+  // A replayed event (reconnect) must not duplicate a card already on screen.
+  if (document.getElementById(sid)) return;
   data.summary = data.summary || toolSummary(data.name, data.args);
   const el = document.createElement('div');
   el.className = 'msg-tool';
@@ -768,7 +819,7 @@ function appendToolRequest(data) {
            data-bs-toggle="collapse" data-bs-target="#body-${sid}">
         <i class="bi bi-gear-fill text-warning" style="font-size:.8rem"></i>
         <code class="fw-semibold text-warning">${escHtml(data.name)}</code>
-        ${data.summary ? `<span class="tool-summary text-muted" title="${escHtml(data.summary)}">${escHtml(data.summary)}</span>` : ''}
+        ${data.summary ? `<span class="tool-summary text-muted" title="${escAttr(data.summary)}">${escHtml(data.summary)}</span>` : ''}
         <span class="badge bg-secondary ms-1" id="badge-${sid}">
           ${data.auto_approved ? 'running…' : 'pending'}
         </span>
@@ -864,6 +915,84 @@ function confirmTool(confirmed, yoloTurn = false) {
   if (confirmed) showThinking();
 
   pendingToolCallId = null;
+}
+
+// ── Ask user question ────────────────────────────────────────
+
+function showQuestionModal(data) {
+  pendingQuestionId = data.tool_call_id;
+  pendingQuestions = Array.isArray(data.questions) ? data.questions : [];
+
+  const body = document.getElementById('questionBody');
+  body.innerHTML = pendingQuestions.map((q, qi) => {
+    const options = Array.isArray(q.options) ? q.options : [];
+    // Radio values are option indices — labels stay out of attributes and are
+    // looked up from pendingQuestions on submit.
+    const opts = options.map((opt, oi) => `
+      <div class="form-check mb-2">
+        <input class="form-check-input" type="radio" name="q${qi}" id="q${qi}o${oi}"
+               value="${oi}" ${oi === 0 ? 'checked' : ''}>
+        <label class="form-check-label" for="q${qi}o${oi}">
+          <span class="fw-semibold">${escHtml(opt.label || '')}</span>
+          ${opt.description ? `<div class="text-muted small">${escHtml(opt.description)}</div>` : ''}
+        </label>
+      </div>`).join('');
+    return `
+      <div class="mb-4" data-question-index="${qi}">
+        <div class="fw-semibold text-info small text-uppercase mb-1">${escHtml(q.header || ('Question ' + (qi + 1)))}</div>
+        <div class="mb-2">${escHtml(q.question || '')}</div>
+        ${opts}
+        <div class="form-check">
+          <input class="form-check-input" type="radio" name="q${qi}" id="q${qi}other" value="__other__"
+                 ${options.length ? '' : 'checked'}>
+          <label class="form-check-label" for="q${qi}other">Other</label>
+          <input type="text" class="form-control form-control-sm mt-1" id="q${qi}otherText"
+                 placeholder="Your own answer…"
+                 oninput="document.getElementById('q${qi}other').checked = true">
+        </div>
+      </div>`;
+  }).join('');
+
+  questionModal.show();
+}
+
+function submitAnswers(answered) {
+  questionModal.hide();
+  if (!pendingQuestionId) return;
+
+  const tool_call_id = pendingQuestionId;
+  const sid = safeId(tool_call_id);
+  let answers = [];
+
+  if (answered) {
+    answers = pendingQuestions.map((q, qi) => {
+      const picked = document.querySelector(`input[name="q${qi}"]:checked`);
+      if (!picked) return '';
+      if (picked.value === '__other__') {
+        return (document.getElementById(`q${qi}otherText`).value || '').trim();
+      }
+      const opt = (q.options || [])[Number(picked.value)];
+      return opt ? (opt.label || '') : '';
+    });
+    // An empty "Other" with nothing typed is not an answer.
+    if (answers.every(a => !a)) answered = false;
+  }
+
+  const badge = document.getElementById(`badge-${sid}`);
+  if (badge) {
+    badge.className = 'badge ms-1 ' + (answered ? 'text-bg-secondary' : 'bg-danger');
+    badge.textContent = answered ? 'answering…' : 'cancelled';
+  }
+
+  fetch(`/chat/${CHAT_ID}/answer`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({answered, tool_call_id, answers}),
+  });
+
+  pendingQuestionId = null;
+  pendingQuestions = [];
+  showThinking();
 }
 
 // ── Sudo ─────────────────────────────────────────────────────

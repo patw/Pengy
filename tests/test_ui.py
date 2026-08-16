@@ -617,3 +617,59 @@ class TestAutoScrollPin:
         assert view._auto_scroll is False
         view.clear()
         assert view._auto_scroll is True
+
+
+# ────────────────────────────────────────────────────────────────────
+# Mid-turn assistant narration (GUI)
+# ────────────────────────────────────────────────────────────────────
+
+class TestAssistantPreambleRendering:
+    """Narration attached to a tool_calls message must render, and render first.
+
+    It was persisted but never appended to the live view, so it appeared out of
+    nowhere when the tab was reopened — and the reload path put it *after* the
+    tool cards, which is the reverse of the order the model wrote it in.
+    """
+
+    class _RecordingView:
+        def __init__(self):
+            self.calls = []
+
+        def append_message(self, role, content, **kwargs):
+            self.calls.append((role, content))
+
+    @staticmethod
+    def _tool_call_message(content):
+        return {
+            "role": "assistant",
+            "content": content,
+            "tool_calls": [{
+                "id": "tc1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": '{"path": "/etc/hostname"}'},
+            }],
+        }
+
+    def _render(self, msg):
+        from pengy.ui.main_window import MainWindow
+        view = self._RecordingView()
+        # _render_message never touches self, so an unbound call avoids
+        # standing up a whole MainWindow.
+        MainWindow._render_message(None, view, msg)
+        return view.calls
+
+    def test_narration_renders_before_tool_cards(self):
+        calls = self._render(self._tool_call_message("Let me check that."))
+        roles = [role for role, _ in calls]
+        assert roles == ["assistant", "tool_request"], (
+            f"narration must precede the tool card; got {roles}"
+        )
+        assert calls[0][1] == "Let me check that."
+
+    def test_no_narration_renders_only_the_tool_card(self):
+        calls = self._render(self._tool_call_message(""))
+        assert [role for role, _ in calls] == ["tool_request"]
+
+    def test_plain_assistant_message_still_renders(self):
+        calls = self._render({"role": "assistant", "content": "done"})
+        assert [role for role, _ in calls] == ["assistant"]

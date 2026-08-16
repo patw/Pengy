@@ -462,6 +462,15 @@ class MainWindow(QMainWindow):
         if role == "user":
             chat_view.append_message("user", msg.get("content", ""), render=False)
         elif role == "assistant":
+            # Narration comes first: the model wrote it *before* deciding on the
+            # tool calls in the same message, and that is the order the live
+            # stream renders it in.
+            if msg.get("content"):
+                chat_view.append_message(
+                    "assistant", msg["content"],
+                    reasoning_content=msg.get("reasoning_content"),
+                    render=False,
+                )
             if msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
                     try:
@@ -475,12 +484,6 @@ class MainWindow(QMainWindow):
                         "name": tc["function"]["name"],
                         "args": args,
                     }, render=False)
-            if msg.get("content"):
-                chat_view.append_message(
-                    "assistant", msg["content"],
-                    reasoning_content=msg.get("reasoning_content"),
-                    render=False,
-                )
         elif role == "tool":
             chat_view.append_message("tool_result", {
                 "tool_call_id": msg.get("tool_call_id", ""),
@@ -643,6 +646,15 @@ class MainWindow(QMainWindow):
                 self._handle_tool_confirm(chat_id, session, response)
         elif response["type"] == "assistant_tool_calls":
             session.yolo_this_turn = False
+            # The narration the model wrote alongside its tool calls is
+            # persisted and shows on reload, so it has to render live too —
+            # before the tool cards, which is the order it was written in.
+            preamble = (response["message"].get("content") or "").strip()
+            if preamble:
+                session.chat_view.append_message(
+                    "assistant", preamble,
+                    reasoning_content=response["message"].get("reasoning_content"),
+                )
             session.chat["messages"].append(response["message"])
             save_chat(session.chat)
         elif response["type"] == "question_result":

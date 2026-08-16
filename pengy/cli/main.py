@@ -1234,6 +1234,7 @@ class PengyCLI:
                 elif rtype == "assistant_tool_calls":
                     expecting_api_call = False
                     self._yolo_this_turn = False
+                    self._render_assistant_preamble(response["message"])
                     chat["messages"].append(response["message"])
                     self._save_progress(chat)
 
@@ -1416,6 +1417,32 @@ class PengyCLI:
                 f"[dim]Tokens: {prompt:,} in / {completion:,} out "
                 f"({prompt + completion:,} total)[/dim]"
             )
+
+    def _render_assistant_preamble(self, message: dict):
+        """Show the narration the model wrote alongside its tool calls.
+
+        It is persisted with the turn and shows up on a later ``/show``, so a
+        live run that skipped it looked like the model went straight to the
+        tools with nothing to say.  ``json`` mode stays silent: its output is a
+        single object built from the final response.
+        """
+        content = (message.get("content") or "").strip()
+        if not content or self._output_mode in ("silent", "json"):
+            return
+
+        if self._output_mode == "raw":
+            print(content)
+            return
+
+        self.console.print()
+        self.console.print(
+            Panel(
+                Markdown(content),
+                title="Assistant 🤖",
+                title_align="left",
+                border_style="green",
+            )
+        )
 
     def _render_tool_request(self, response: dict):
         """Show the tool call that the model wants to make."""
