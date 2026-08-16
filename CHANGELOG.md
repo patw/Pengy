@@ -1,6 +1,22 @@
 # Changelog
 
-## v1.6.4 (current)
+## v1.7.0 (current)
+
+- **Ask the user a question, interactively.** The web UI now surfaces
+  `ask_user_question` in an interactive modal showing the model's options and a
+  free-text "Other" field, and routes the answers (submit or cancel) back through
+  a new `POST /chat/<id>/answer` endpoint. The assistant's preamble narration is
+  also streamed live instead of only appearing after a reload.
+- **Narration now renders before the tool cards.** The text the model writes
+  alongside its tool calls is persisted with the turn but was dropped from the
+  live run — and the reload path put it *after* the tool cards, the reverse of
+  the order it was written in. All three frontends (CLI, desktop GUI, web) now
+  render it live, and the reload path renders it first.
+- **Web hardening:** tool cards are de-duplicated on SSE reconnect, and
+  attribute content is escaped (`escAttr`) so model-supplied text can't break
+  out of `title="…"` and the markup.
+
+## v1.6.4
 
 - **Incremental persistence — a turn reaches disk before it finishes.** Every
   message a run produces (assistant tool calls, tool results, question answers,
