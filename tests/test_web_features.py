@@ -49,6 +49,36 @@ def make_chat(messages=None, title="Feature Test"):
     return chat
 
 
+# ── Cumulative token usage ──────────────────────────────────────────────────────
+
+class TestCumulativeTokens:
+    def test_chat_view_shows_stored_cumulative_usage(self, client):
+        chat = make_chat()
+        chat["usage"] = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
+        save_chat(chat)
+        resp = client.get(f"/chat/{chat['id']}")
+        assert "150 tokens" in resp.get_data(as_text=True)
+
+    def test_chat_view_without_usage_does_not_crash(self, client):
+        chat = make_chat()
+        resp = client.get(f"/chat/{chat['id']}")
+        assert resp.status_code == 200
+        assert 'id="navTokens"' in resp.get_data(as_text=True)
+
+    def test_add_usage_accumulates_across_worker_turns(self, client):
+        """WebWorker's final_response handler must accumulate into
+        chat['usage'], not just report the last turn's numbers."""
+        from pengy.core.chat_manager import add_usage
+
+        chat = make_chat()
+        add_usage(chat, {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+        add_usage(chat, {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28})
+        save_chat(chat)
+        assert get_chat(chat["id"])["usage"] == {
+            "prompt_tokens": 30, "completion_tokens": 13, "total_tokens": 43,
+        }
+
+
 # ── Export ─────────────────────────────────────────────────────────────────────
 
 class TestExport:
@@ -103,6 +133,133 @@ class TestRename:
     def test_rename_unknown_chat_404(self, client):
         resp = client.post("/chat/nope/rename", json={"title": "x"})
         assert resp.status_code == 404
+
+
+# ── Redact ─────────────────────────────────────────────────────────────────────
+
+class TestRedact:
+    def test_redact_default_removes_one_message(self, client):
+        chat = make_chat([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        resp = client.post(f"/chat/{chat['id']}/redact")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data == {"status": "ok", "removed": 1, "message_count": 1}
+        assert get_chat(chat["id"])["messages"] == [{"role": "user", "content": "hi"}]
+
+    def test_redact_count_removes_n(self, client):
+        chat = make_chat([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "one"},
+            {"role": "user", "content": "again"},
+            {"role": "assistant", "content": "two"},
+        ])
+        resp = client.post(f"/chat/{chat['id']}/redact", json={"count": 3})
+        assert resp.get_json()["removed"] == 3
+        assert get_chat(chat["id"])["messages"] == [{"role": "user", "content": "hi"}]
+
+    def test_redact_more_than_available_empties_without_erroring(self, client):
+        chat = make_chat([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        resp = client.post(f"/chat/{chat['id']}/redact", json={"count": 50})
+        assert resp.status_code == 200
+        assert resp.get_json()["removed"] == 2
+        assert get_chat(chat["id"])["messages"] == []
+
+    def test_redact_repeatable_to_empty(self, client):
+        chat = make_chat([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        client.post(f"/chat/{chat['id']}/redact")
+        resp = client.post(f"/chat/{chat['id']}/redact")
+        assert resp.get_json()["message_count"] == 0
+        # A third redact against an already-empty chat must not error.
+        resp = client.post(f"/chat/{chat['id']}/redact")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"status": "ok", "removed": 0, "message_count": 0}
+
+    def test_redact_unknown_chat_404(self, client):
+        resp = client.post("/chat/nope/redact")
+        assert resp.status_code == 404
+
+    def test_redact_invalid_count_400(self, client):
+        chat = make_chat([{"role": "user", "content": "hi"}])
+        resp = client.post(f"/chat/{chat['id']}/redact", json={"count": 0})
+        assert resp.status_code == 400
+        resp = client.post(f"/chat/{chat['id']}/redact", json={"count": "abc"})
+        assert resp.status_code == 400
+
+    def test_redact_blocked_while_worker_active(self, client):
+        chat = make_chat([{"role": "user", "content": "hi"}])
+        from pengy.web import app as web_app
+
+        class _FakeWorker:
+            _done = False
+
+        with web_app._workers_lock:
+            web_app._workers[chat["id"]] = _FakeWorker()
+        try:
+            resp = client.post(f"/chat/{chat['id']}/redact")
+            assert resp.status_code == 409
+            assert get_chat(chat["id"])["messages"] == [{"role": "user", "content": "hi"}]
+        finally:
+            with web_app._workers_lock:
+                web_app._workers.pop(chat["id"], None)
+
+
+# ── Tasks ──────────────────────────────────────────────────────────────────────
+
+class TestTasks:
+    def test_list_tasks_empty(self, client):
+        resp = client.get("/tasks")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"tasks": []}
+
+    def test_list_tasks_includes_placeholders(self, client):
+        from pengy.core.task_manager import create_task
+
+        task = create_task("Greet", "Say hello to %name% in %language%")
+        resp = client.get("/tasks")
+        data = resp.get_json()
+        assert len(data["tasks"]) == 1
+        entry = data["tasks"][0]
+        assert entry["id"] == task["id"]
+        assert entry["title"] == "Greet"
+        assert entry["placeholders"] == ["name", "language"]
+
+    def test_render_task_substitutes_values(self, client):
+        from pengy.core.task_manager import create_task
+
+        task = create_task("Greet", "Say hello to %name% in %language%")
+        resp = client.post("/tasks/render", json={
+            "id": task["id"],
+            "values": {"name": "Ada", "language": "French"},
+        })
+        assert resp.status_code == 200
+        assert resp.get_json() == {"prompt": "Say hello to Ada in French"}
+
+    def test_render_task_no_placeholders(self, client):
+        from pengy.core.task_manager import create_task
+
+        task = create_task("Static", "Summarize the last file I read.")
+        resp = client.post("/tasks/render", json={"id": task["id"], "values": {}})
+        assert resp.get_json() == {"prompt": "Summarize the last file I read."}
+
+    def test_render_unknown_task_404(self, client):
+        resp = client.post("/tasks/render", json={"id": "nope", "values": {}})
+        assert resp.status_code == 404
+
+    def test_render_invalid_values_400(self, client):
+        from pengy.core.task_manager import create_task
+
+        task = create_task("Greet", "hi %name%")
+        resp = client.post("/tasks/render", json={"id": task["id"], "values": "not-a-dict"})
+        assert resp.status_code == 400
 
 
 # ── Slash commands ─────────────────────────────────────────────────────────────

@@ -351,13 +351,19 @@ class TestModelDropdown:
         """Without a cache the dropdown shows a nudge toward Settings → Fetch."""
         hint = window.chat_history.model_hint_label
         assert "Fetch" in hint.text()
+        assert not hint.isHidden()
 
     def test_hint_hidden_when_cache_populated(self, window):
+        """An empty QLabel still claims a line of layout height, so once a
+        model list exists the hint must be hidden outright -- not just
+        text-cleared -- or it leaves a permanent gap above Tool Confirm."""
         from pengy.core.model_cache import save_model_cache
 
         save_model_cache("https://api.openai.com/v1", ["gpt-4o", "gpt-4o-mini"])
         window._refresh_model_combo()
-        assert window.chat_history.model_hint_label.text() == ""
+        hint = window.chat_history.model_hint_label
+        assert hint.text() == ""
+        assert hint.isHidden()
 
     def test_model_change_sets_active_tab_model_and_persists(self, window):
         from pengy.core.chat_manager import get_chat

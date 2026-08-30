@@ -15,8 +15,20 @@
   title="Tool confirmation mode">
   {{ {'all':'YOLO','safe':'Safe','none':'Confirm All'}.get(config.tool_confirmation, 'Confirm All') }}
 </span>
+<span class="text-muted small d-none d-md-inline ms-2" id="navTokens"
+      title="Cumulative token usage for this chat"
+      {% if not chat.usage or not chat.usage.total_tokens %}hidden{% endif %}>
+  {{ '{:,}'.format(chat.usage.total_tokens) if chat.usage else 0 }} tokens
+</span>
+<button class="btn btn-outline-secondary btn-sm ms-1" onclick="openTasks()" title="Run a saved prompt template">
+  <i class="bi bi-list-task"></i>
+</button>
 <button class="btn btn-outline-secondary btn-sm ms-1" onclick="exportChat()" title="Export chat as Markdown">
   <i class="bi bi-download"></i>
+</button>
+<button class="btn btn-outline-secondary btn-sm ms-1" onclick="redactLast()"
+        title="Redact last message — delete the last message from context (repeatable)">
+  <i class="bi bi-eraser"></i>
 </button>
 {% endblock %}
 
@@ -226,6 +238,36 @@
   </div>
 </div>
 
+<!-- Tasks Modal -->
+<div class="modal fade" id="tasksModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title">Tasks</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="tasksListView">
+          <p class="text-muted small" id="tasksEmptyHint" hidden>
+            No tasks saved yet — create one in the desktop app's Tasks dialog
+            (they're shared across all three frontends).
+          </p>
+          <div id="tasksList" class="list-group"></div>
+        </div>
+        <div id="tasksFormView" hidden>
+          <button type="button" class="btn btn-sm btn-link ps-0 mb-2" onclick="showTasksList()">&larr; Back to Tasks</button>
+          <h6 id="tasksFormTitle" class="mb-3"></h6>
+          <div id="tasksFormFields"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button id="tasksRunBtn" class="btn btn-sm btn-primary" onclick="runSelectedTask()" hidden>Run</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
@@ -239,7 +281,9 @@ let pendingToolCallId = null;
 let pendingQuestionId = null;
 let pendingQuestions = [];
 let thinkingEl = null;
-let confirmModal, questionModal, sudoModal, renameModal;
+let confirmModal, questionModal, sudoModal, renameModal, tasksModal;
+let tasksCache = [];
+let selectedTask = null;
 let pendingFiles = [];
 let wakeLock = null;
 
@@ -249,6 +293,7 @@ document.addEventListener('DOMContentLoaded', () => {
   questionModal = new bootstrap.Modal(document.getElementById('questionModal'));
   sudoModal    = new bootstrap.Modal(document.getElementById('sudoModal'));
   renameModal  = new bootstrap.Modal(document.getElementById('renameModal'));
+  tasksModal   = new bootstrap.Modal(document.getElementById('tasksModal'));
 
   document.getElementById('sudoPasswordInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') submitSudo();
@@ -509,6 +554,32 @@ function exportChat() {
   window.open(`/chat/${CHAT_ID}/export`, '_blank');
 }
 
+// ── Redact last ──────────────────────────────────────────────
+// Context-pruning "undo": deletes the last raw message from the chat.
+// Repeatable straight up to an empty chat — each click just reloads the
+// page against the freshly-trimmed history, same as a normal chat load.
+
+function redactLast() {
+  if (isProcessing) {
+    alert('Cannot redact while a response is in progress.');
+    return;
+  }
+  fetch(`/chat/${CHAT_ID}/redact`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({count: 1}),
+  })
+  .then(r => r.json().then(data => ({ok: r.ok, data})))
+  .then(({ok, data}) => {
+    if (!ok) {
+      alert(data.error || 'Redact failed.');
+      return;
+    }
+    location.reload();
+  })
+  .catch(err => console.error('Redact error:', err));
+}
+
 // ── Rename ────────────────────────────────────────────────────
 
 function showRename() {
@@ -534,6 +605,112 @@ function doRename() {
       document.title = data.title + ' — Pengy';
     }
   });
+}
+
+// ── Tasks ─────────────────────────────────────────────────────
+// Prompt templates shared with the GUI's Tasks dialog (tasks.json). Selecting
+// one fills in its %placeholders%, renders it server-side, then routes the
+// result through the normal send path — same shape as messageInput -> doSend().
+
+function openTasks() {
+  fetch('/tasks')
+    .then(r => r.json())
+    .then(data => {
+      tasksCache = data.tasks || [];
+      renderTasksList();
+      showTasksList();
+      tasksModal.show();
+    })
+    .catch(err => console.error('Failed to load tasks:', err));
+}
+
+function renderTasksList() {
+  const list = document.getElementById('tasksList');
+  const empty = document.getElementById('tasksEmptyHint');
+  list.innerHTML = '';
+  empty.hidden = tasksCache.length > 0;
+
+  for (const task of tasksCache) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'list-group-item list-group-item-action';
+    const title = document.createElement('div');
+    title.className = 'fw-semibold';
+    title.textContent = task.title;
+    const preview = document.createElement('div');
+    preview.className = 'text-muted small text-truncate';
+    preview.textContent = task.template;
+    btn.appendChild(title);
+    btn.appendChild(preview);
+    btn.addEventListener('click', () => selectTask(task.id));
+    list.appendChild(btn);
+  }
+}
+
+function showTasksList() {
+  document.getElementById('tasksListView').hidden = false;
+  document.getElementById('tasksFormView').hidden = true;
+  document.getElementById('tasksRunBtn').hidden = true;
+  selectedTask = null;
+}
+
+function selectTask(id) {
+  selectedTask = tasksCache.find(t => t.id === id);
+  if (!selectedTask) return;
+
+  document.getElementById('tasksFormTitle').textContent = selectedTask.title;
+  const fields = document.getElementById('tasksFormFields');
+  fields.innerHTML = '';
+  for (const name of selectedTask.placeholders) {
+    const wrap = document.createElement('div');
+    wrap.className = 'mb-2';
+    const label = document.createElement('label');
+    label.className = 'form-label small mb-1';
+    label.textContent = name;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'form-control form-control-sm task-field-input';
+    input.dataset.name = name;
+    wrap.appendChild(label);
+    wrap.appendChild(input);
+    fields.appendChild(wrap);
+  }
+
+  document.getElementById('tasksListView').hidden = true;
+  document.getElementById('tasksFormView').hidden = false;
+  document.getElementById('tasksRunBtn').hidden = false;
+  if (selectedTask.placeholders.length > 0) {
+    fields.querySelector('.task-field-input').focus();
+  }
+}
+
+function runSelectedTask() {
+  if (!selectedTask) return;
+  const values = {};
+  document.querySelectorAll('#tasksFormFields .task-field-input').forEach(input => {
+    values[input.dataset.name] = input.value;
+  });
+
+  fetch('/tasks/render', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: selectedTask.id, values}),
+  })
+  .then(r => r.json().then(data => ({ok: r.ok, data})))
+  .then(({ok, data}) => {
+    if (!ok) {
+      alert(data.error || 'Failed to run task.');
+      return;
+    }
+    if (!data.prompt) {
+      alert('This task produced an empty prompt.');
+      return;
+    }
+    tasksModal.hide();
+    document.getElementById('messageInput').value = data.prompt;
+    doSend();
+  })
+  .catch(err => console.error('Task render error:', err));
 }
 
 // ── Send ──────────────────────────────────────────────────────
@@ -761,6 +938,7 @@ function handleEvent(data) {
     case 'final_response':
       hideThinking();
       appendAssistantMessage(data.html, data.usage);
+      updateCumulativeTokens(data.cumulative_usage);
       eventSource.close(); eventSource = null;
       sessionStorage.removeItem('pengy_sse_cursor_' + CHAT_ID);
       setProcessing(false);
@@ -879,6 +1057,14 @@ function appendAssistantMessage(html, usage) {
       ${usageHtml}
     </div>`;
   appendToArea(el);
+}
+
+function updateCumulativeTokens(cumulativeUsage) {
+  const el = document.getElementById('navTokens');
+  const total = cumulativeUsage && cumulativeUsage.total_tokens;
+  if (!total) return;
+  el.textContent = `${total.toLocaleString()} tokens`;
+  el.hidden = false;
 }
 
 function appendError(message) {

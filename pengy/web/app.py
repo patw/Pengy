@@ -20,10 +20,11 @@ from pengy.core.model_cache import load_model_cache, save_model_cache
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
     create_chat, delete_chat, get_chat, load_index, save_chat, save_chat_progress,
-    clean_dangling_tool_calls, elide_old_tool_results,
+    clean_dangling_tool_calls, elide_old_tool_results, redact_last_message, add_usage,
 )
 from pengy.core.image_utils import preprocess as preprocess_image
 from pengy.core import tools
+from pengy.core import task_manager
 
 
 app = Flask(__name__)
@@ -612,11 +613,13 @@ class WebWorker:
                 elif rtype == "final_response":
                     content = response.get("content") or ""
                     chat["messages"].append(response.get("message") or {"role": "assistant", "content": content})
+                    cumulative_usage = add_usage(chat, response.get("usage"))
                     save_chat_progress(chat)
                     self._put_event({
                         "type": "final_response",
                         "html": _render_md(content),
                         "usage": response.get("usage", {}),
+                        "cumulative_usage": cumulative_usage,
                     })
                     break
 
@@ -1078,6 +1081,42 @@ def chat_rename(chat_id: str):
     return jsonify({"status": "ok", "title": new_title})
 
 
+@app.route("/chat/<chat_id>/redact", methods=["POST"])
+def chat_redact(chat_id: str):
+    """Delete the last N raw messages (default 1) from the chat.
+
+    The context-pruning "undo" button: repeatable all the way to an empty
+    chat. Refused while a turn is in flight for this chat, since popping
+    messages out from under an in-progress LLMClient generator (which holds
+    its own snapshot mid-run) would race with the worker's own saves.
+    """
+    with _workers_lock:
+        worker = _workers.get(chat_id)
+    if worker is not None and not worker._done:
+        return jsonify({"error": "Cannot redact while a response is in progress"}), 409
+
+    data = request.get_json(silent=True) or {}
+    try:
+        n = int(data.get("count", 1))
+    except (TypeError, ValueError):
+        return jsonify({"error": "count must be an integer"}), 400
+    if n < 1:
+        return jsonify({"error": "count must be at least 1"}), 400
+
+    chat = get_chat(chat_id)
+    if not chat:
+        return jsonify({"error": "Chat not found"}), 404
+
+    messages = chat.get("messages", [])
+    before = len(messages)
+    for _ in range(min(n, before)):
+        messages = redact_last_message(messages)
+    chat["messages"] = messages
+    save_chat(chat)
+
+    return jsonify({"status": "ok", "removed": before - len(messages), "message_count": len(messages)})
+
+
 # ─── NEW: Slash Command Handler ───────────────────────────────────────────────
 
 @app.route("/chat/<chat_id>/command", methods=["POST"])
@@ -1147,6 +1186,41 @@ def chat_command(chat_id: str):
         )})
 
     return jsonify({"type": "message", "message": f"Unknown command: {cmd}. Try /help."})
+
+
+# ─── Tasks (prompt templates) ─────────────────────────────────────────────────
+# Chat-independent: same store (tasks.json) as the GUI's Tasks dialog. The
+# client fills placeholders, renders here, then feeds the result through the
+# normal /send path — same "render, then route through the ordinary send
+# flow" shape as the GUI's task_played signal.
+
+@app.route("/tasks")
+def list_tasks():
+    tasks = task_manager.load_tasks()
+    return jsonify({"tasks": [
+        {
+            "id": t["id"],
+            "title": t.get("title", "Untitled Task"),
+            "template": t.get("template", ""),
+            "placeholders": task_manager.extract_placeholders(t.get("template", "")),
+        }
+        for t in tasks
+    ]})
+
+
+@app.route("/tasks/render", methods=["POST"])
+def render_task():
+    data = request.get_json(silent=True) or {}
+    task = task_manager.get_task(data.get("id", ""))
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+
+    values = data.get("values") or {}
+    if not isinstance(values, dict):
+        return jsonify({"error": "values must be an object"}), 400
+
+    prompt = task_manager.render_template(task.get("template", ""), values).strip()
+    return jsonify({"prompt": prompt})
 
 
 # ─── NEW: Fetch Models API ────────────────────────────────────────────────────

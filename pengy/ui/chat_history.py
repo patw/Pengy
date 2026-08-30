@@ -136,6 +136,7 @@ class ChatHistoryWidget(QWidget):
         self.model_hint_label = QLabel("")
         self.model_hint_label.setWordWrap(True)
         self.model_hint_label.setStyleSheet(f"color: {self._theme['muted']}; font-size: 9pt;")
+        self.model_hint_label.hide()  # shown only when set_models() has no cached list
         qs_layout.addWidget(self.model_hint_label)
 
         self.confirm_label = QLabel("Tool Confirm: None")
@@ -230,6 +231,22 @@ class ChatHistoryWidget(QWidget):
             self.chat_list.addItem(item)
             self.chat_list.setItemWidget(item, widget)
 
+    def add_chat(self, chat_id: str, title: str):
+        """Insert one new row at the top, without touching the other rows.
+
+        A freshly created chat is always the newest (chats sort newest-first),
+        so it always belongs at index 0 — no need to pay load_chats()'s full
+        clear-and-rebuild, which costs one QWidget (with icon-bearing buttons)
+        per *existing* row and was the dominant cost behind "New Chat feels
+        slow" once the sidebar has more than a handful of chats.
+        """
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, chat_id)
+        widget = self._make_item_widget(chat_id, title)
+        item.setSizeHint(widget.sizeHint())
+        self.chat_list.insertItem(0, item)
+        self.chat_list.setItemWidget(item, widget)
+
     def on_item_clicked(self, item: QListWidgetItem):
         """Handle chat selection."""
         chat_id = item.data(Qt.ItemDataRole.UserRole)
@@ -286,6 +303,23 @@ class ChatHistoryWidget(QWidget):
             item = self.chat_list.item(i)
             if item.data(Qt.ItemDataRole.UserRole) == chat_id:
                 self._delete_item(item)
+                return
+
+    def remove_chat(self, chat_id: str):
+        """Remove one row by ID, without confirmation or touching storage.
+
+        For callers that already deleted the chat from disk themselves (e.g.
+        MainWindow._close_tab() discarding an empty "New Chat" tab) and just
+        need the sidebar to stop showing a row for it. A no-op if the chat
+        was never shown here (add_chat() wasn't called for it, or it's
+        already been removed).
+        """
+        for i in range(self.chat_list.count()):
+            item = self.chat_list.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == chat_id:
+                self.chat_list.takeItem(i)
+                if self.current_chat_id == chat_id:
+                    self.current_chat_id = None
                 return
 
     def _item_title(self, item: QListWidgetItem) -> str:
@@ -391,13 +425,18 @@ class ChatHistoryWidget(QWidget):
         if current:
             self.model_combo.setCurrentText(current)
         self._current_model = current or self.model_combo.currentText()
-        # Nudge the user toward Fetch when there's no cached list to pick from.
+        # Nudge the user toward Fetch when there's no cached list to pick
+        # from. An empty QLabel still claims a line of layout height, so hide
+        # it outright once populated instead of just clearing its text --
+        # otherwise it leaves a permanent gap above "Tool Confirm:".
         if models:
             self.model_hint_label.setText("")
+            self.model_hint_label.hide()
         else:
             self.model_hint_label.setText(
                 "No cached model list — use Settings → Fetch to populate."
             )
+            self.model_hint_label.show()
 
     def _on_model_commit(self):
         """Emit model_changed when the user commits a (possibly typed) model."""
@@ -417,7 +456,7 @@ class ChatHistoryWidget(QWidget):
         )
 
     def update_token_usage(self, prompt: int, completion: int):
-        """Show the last turn's token usage."""
+        """Show the chat's cumulative token usage (summed across all turns)."""
         if prompt or completion:
             self.tokens_label.setText(f"Tokens: {prompt:,} in / {completion:,} out")
         else:

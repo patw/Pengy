@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QSplitter, QWidget, QVBoxLayout, QHBoxLayout,
     QDialog, QPushButton, QDialogButtonBox, QLabel, QInputDialog, QLineEdit,
     QApplication, QPlainTextEdit, QTabWidget, QToolButton, QRadioButton,
-    QButtonGroup, QScrollArea, QGroupBox, QTabBar,
+    QButtonGroup, QScrollArea, QGroupBox, QTabBar, QMessageBox,
 )
 from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QTextOption
@@ -15,7 +15,8 @@ from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.model_cache import cached_models_for
 from pengy.core.chat_manager import (
     load_index, create_chat, save_chat, get_chat, delete_chat,
-    clean_dangling_tool_calls, elide_old_tool_results,
+    clean_dangling_tool_calls, elide_old_tool_results, redact_last_message,
+    add_usage,
 )
 from pengy.core.llm_client import LLMClient
 from pengy.core.image_utils import preprocess as preprocess_image
@@ -140,6 +141,19 @@ class MainWindow(QMainWindow):
         self.chat_input.message_sent.connect(self.send_message)
         input_layout.addWidget(self.chat_input)
 
+        self._redact_btn = QPushButton("Redact")
+        apply_button_icon(self._redact_btn, "delete", self._theme, size=16,
+                          color_role="muted", active_role="danger")
+        self._redact_btn.setFixedHeight(scaled_size(32, self._theme))
+        self._redact_btn.setToolTip(
+            "Delete the last message from the active chat. Repeatable up to "
+            "the top — a way to prune context after the model goes down a "
+            "wrong path. Wrecks prompt caching for this chat."
+        )
+        self._redact_btn.setAccessibleName("Redact last message")
+        self._redact_btn.clicked.connect(self._redact_last)
+        input_layout.addWidget(self._redact_btn)
+
         self._stop_btn = QPushButton("Stop")
         apply_button_icon(self._stop_btn, "stop", self._theme, size=16,
                           color_role="primary_fg", active_role="primary_fg")
@@ -167,6 +181,11 @@ class MainWindow(QMainWindow):
         """Create a TabSession and add its ChatView as a new tab."""
         chat_view = ChatView()
         session = _TabSession(chat=chat, chat_view=chat_view)
+        # Seed the cumulative token display from what's already on disk, so
+        # reopening a chat shows its running total instead of resetting to 0.
+        usage = chat.get("usage") or {}
+        session.prompt_tokens = usage.get("prompt_tokens", 0)
+        session.completion_tokens = usage.get("completion_tokens", 0)
 
         # Apply theme FIRST so render_now() uses the correct colours
         chat_view.apply_theme(self._theme)
@@ -240,6 +259,14 @@ class MainWindow(QMainWindow):
         if session and session.chat:
             if is_empty_new:
                 delete_chat(session.chat["id"])
+                # add_chat() put a row in the sidebar for this chat when it
+                # was created; deleting it from disk without also dropping
+                # that row left a phantom "New Chat" entry that a later
+                # create_new_chat() would never recognize as already gone
+                # (its dedup check only looks at *open* tabs), so every
+                # close-then-reopen added another ghost row — endless "New
+                # Chat" entries piling up in the sidebar.
+                self.chat_history.remove_chat(session.chat["id"])
             else:
                 save_chat(session.chat)
 
@@ -305,8 +332,11 @@ class MainWindow(QMainWindow):
             only_session = self.open_tabs[only_id]
             if (only_session.chat.get("title") == "New Chat"
                     and not only_session.chat.get("messages")):
-                # Delete the empty chat and remove its tab
+                # Delete the empty chat, remove its tab, and drop its sidebar
+                # row (added by create_new_chat()'s add_chat() call) — same
+                # ghost-row leak as _close_tab() if skipped.
                 delete_chat(only_session.chat["id"])
+                self.chat_history.remove_chat(only_session.chat["id"])
                 for i in range(self.tab_widget.count()):
                     if self.tab_widget.widget(i) is only_session.chat_view:
                         self.tab_widget.removeTab(i)
@@ -334,6 +364,9 @@ class MainWindow(QMainWindow):
             app.setStyleSheet(qt_app_stylesheet(self._theme))
         self.chat_input.apply_theme(self._theme)
         self.chat_history.apply_theme(self._theme)
+        self._redact_btn.setFixedHeight(scaled_size(32, self._theme))
+        apply_button_icon(self._redact_btn, "delete", self._theme, size=16,
+                          color_role="muted", active_role="danger")
         self._stop_btn.setFixedHeight(scaled_size(32, self._theme))
         apply_button_icon(self._stop_btn, "stop", self._theme, size=16,
                           color_role="primary_fg", active_role="primary_fg")
@@ -426,9 +459,14 @@ class MainWindow(QMainWindow):
                         return
 
         chat = create_chat()
-        self.load_chat_list()
         session = self._add_tab(chat, switch_to=True)
         self.active_chat_id = chat["id"]
+        # A single insert, not a full load_chat_list() rebuild: that rebuilds
+        # every row in the sidebar (one QWidget with icon-bearing buttons per
+        # *existing* chat) and was the dominant cost behind "New Chat feels
+        # slow" once the sidebar has more than a handful of chats. The new
+        # chat is always the newest, so it always belongs at the top.
+        self.chat_history.add_chat(chat["id"], chat.get("title", "New Chat"))
         self.chat_history.select_chat_by_id(chat["id"])
         self._update_quick_settings_for(session)
 
@@ -774,6 +812,34 @@ class MainWindow(QMainWindow):
             session.chat_view.append_message("assistant", "⏹ *Stopped*")
             save_chat(session.chat)
 
+    def _redact_last(self):
+        """User pressed Redact Last — drop the last raw message from the
+        active tab's chat and rebuild the view from what remains.
+
+        Refused while a turn is in flight: popping messages out from under a
+        running generator (which holds its own in-memory snapshot for the
+        whole run) would race with the worker's own saves.
+        """
+        session = self._tab_for_chat(self.active_chat_id) if self.active_chat_id else None
+        if not session or not session.chat:
+            return
+        if session.worker is not None:
+            QMessageBox.information(
+                self, "Redact Last",
+                "Cannot redact while a response is in progress. Press Stop first."
+            )
+            return
+        if not session.chat.get("messages"):
+            return
+
+        session.chat["messages"] = redact_last_message(session.chat["messages"])
+        save_chat(session.chat)
+
+        session.chat_view.clear()
+        for msg in session.chat["messages"]:
+            self._render_message(session.chat_view, msg)
+        session.chat_view.render_now()
+
     # ── Tool confirmation ─────────────────────────────────────────
 
     def _handle_tool_confirm(self, chat_id: str, session: _TabSession, tool_info: dict):
@@ -869,20 +935,26 @@ class MainWindow(QMainWindow):
         """Handle the final text response from the LLM."""
         content = response.get("content", "")
 
+        # Accumulate into chat["usage"] rather than overwrite: LLMClient.chat()
+        # reports usage per turn, and this label is more useful as "how much
+        # context has this whole chat burned through" than "last turn only" —
+        # it's the same signal that tells you when it's time to /compact or
+        # redact. Stored on the chat dict (not just session state) so it
+        # persists across reloads. Done *before* the save below so both land
+        # in the same write instead of the usage total lagging a turn behind.
+        totals = add_usage(session.chat, response.get("usage"))
+        session.prompt_tokens = totals["prompt_tokens"]
+        session.completion_tokens = totals["completion_tokens"]
+
         if content:
             assistant_msg = response.get("message") or {"role": "assistant", "content": content}
             session.chat["messages"].append(assistant_msg)
             reasoning = assistant_msg.get("reasoning_content") or assistant_msg.get("reasoning")
             session.chat_view.append_message("assistant", content, reasoning_content=reasoning)
             save_chat(session.chat)
-
-        usage = response.get("usage", {})
-        if usage:
-            session.prompt_tokens = usage.get("prompt_tokens", 0)
-            session.completion_tokens = usage.get("completion_tokens", 0)
-            if session is self._tab_for_chat(self.active_chat_id):
-                self.chat_history.update_token_usage(
-                    session.prompt_tokens, session.completion_tokens)
+        if session is self._tab_for_chat(self.active_chat_id):
+            self.chat_history.update_token_usage(
+                session.prompt_tokens, session.completion_tokens)
 
     def _update_quick_settings_for(self, session: _TabSession):
         """Update the sidebar quick-settings panel for a given tab."""

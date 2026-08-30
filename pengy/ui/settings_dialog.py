@@ -49,7 +49,7 @@ class SettingsDialog(QDialog):
         ui_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.scale_combo = QComboBox()
-        self._scale_values = [75, 100, 125, 150, 175, 200]
+        self._scale_values = [75, 100, 110, 125, 135, 150, 175, 200]
         for v in self._scale_values:
             self.scale_combo.addItem(f"{v}%", v)
         current_scale = config.get("ui_scale", 100)

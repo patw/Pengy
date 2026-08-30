@@ -243,6 +243,93 @@ class TestChatManager:
         cleaned = clean_dangling_tool_calls(messages)
         assert cleaned == messages
 
+    def test_redact_last_message(self):
+        from pengy.core.chat_manager import redact_last_message
+
+        # Empty list is a no-op
+        assert redact_last_message([]) == []
+
+        # Popping a plain final assistant response just drops it
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+        ]
+        redacted = redact_last_message(messages)
+        assert redacted == [{"role": "user", "content": "hello"}]
+
+        # Popping the last (and only) tool result of a round strikes it from
+        # its assistant's tool_calls list; since nothing is left of that
+        # assistant message, it's dropped too rather than left as a dangling
+        # stub that redaction could never get past.
+        messages = [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant", "content": "",
+                "tool_calls": [
+                    {"id": "tc1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+                ]
+            },
+            {"role": "tool", "tool_call_id": "tc1", "content": "file contents"},
+        ]
+        redacted = redact_last_message(messages)
+        assert redacted == [{"role": "user", "content": "hello"}]
+
+        # One tool call out of two: popping its result just strikes that one
+        # id from tool_calls and keeps the sibling result intact.
+        messages = [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant", "content": "",
+                "tool_calls": [
+                    {"id": "tc1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}},
+                    {"id": "tc2", "type": "function", "function": {"name": "read_file", "arguments": "{}"}},
+                ]
+            },
+            {"role": "tool", "tool_call_id": "tc1", "content": "result1"},
+            {"role": "tool", "tool_call_id": "tc2", "content": "result2"},
+        ]
+        redacted = redact_last_message(messages)
+        assert len(redacted) == 3
+        assert [tc["id"] for tc in redacted[1]["tool_calls"]] == ["tc1"]
+        assert redacted[2] == {"role": "tool", "tool_call_id": "tc1", "content": "result1"}
+
+        # Repeated calls walk all the way back to empty
+        step2 = redact_last_message(redacted)
+        assert step2 == [{"role": "user", "content": "hello"}]
+        step3 = redact_last_message(step2)
+        assert step3 == []
+
+        # Input is not mutated
+        original = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+        ]
+        original_copy = [dict(m) for m in original]
+        redact_last_message(original)
+        assert original == original_copy
+
+    def test_add_usage(self):
+        from pengy.core.chat_manager import add_usage
+
+        chat = {"id": "c1", "messages": []}
+
+        # First turn creates the running total.
+        totals = add_usage(chat, {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+        assert totals == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        assert chat["usage"] == totals
+
+        # Second turn accumulates rather than overwrites.
+        totals = add_usage(chat, {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28})
+        assert totals == {"prompt_tokens": 30, "completion_tokens": 13, "total_tokens": 43}
+
+        # A falsy usage (None or {}) leaves the total unchanged but still
+        # returns/creates it, so callers never have to null-check.
+        assert add_usage(chat, None) == totals
+        assert add_usage(chat, {}) == totals
+
+        fresh = {"id": "c2", "messages": []}
+        assert add_usage(fresh, None) == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
     def test_elide_old_tool_results(self):
         from pengy.core.chat_manager import elide_old_tool_results
 
@@ -621,6 +708,47 @@ class TestTools:
             assert "snipped" in out
         finally:
             tools.set_tool_output_max_chars(original)
+
+    def test_binary_guard_blocks_null_bytes(self):
+        """Text with embedded NULs (e.g. a UTF-16 file decoded as UTF-8) is
+        blocked outright rather than truncated into context."""
+        from pengy.core import tools
+        text = "a\x00b\x00c\x00" * 100
+        out = tools._snip_tool_output(text)
+        assert out.startswith("[Binary output blocked:")
+        assert "non-printable" in out
+
+    def test_binary_guard_blocks_high_control_char_ratio(self):
+        """Output that is mostly control/non-printable characters, even
+        without NULs, is still classified as binary."""
+        from pengy.core import tools
+        text = "".join(chr(i % 31 + 1) for i in range(500))
+        out = tools._snip_tool_output(text)
+        assert out.startswith("[Binary output blocked:")
+
+    def test_binary_guard_leaves_normal_text_alone(self):
+        """Ordinary command output — including code with punctuation and
+        occasional tabs/newlines — must not trip the binary guard."""
+        from pengy.core import tools
+        text = "def foo():\n\treturn 'hello world!' # comment\n" * 50
+        out = tools._snip_tool_output(text)
+        assert out == text
+
+    def test_run_bash_blocks_binary_output(self):
+        """A command that emits binary bytes (not just invalid UTF-8) must not
+        leak them into the tool result."""
+        from pengy.core import tools
+        result = tools._run_bash("head -c 4000 /dev/urandom")
+        assert result.startswith("[Binary output blocked:")
+
+    def test_run_bash_survives_invalid_utf8(self):
+        """A command whose output isn't valid UTF-8 in the current locale must
+        not blow up with a raw UnicodeDecodeError — it decodes leniently and
+        goes through the same binary guard as everything else."""
+        from pengy.core import tools
+        result = tools._run_bash(r"printf '\xff\xfe\xfd\xfc'")
+        assert "UnicodeDecodeError" not in result
+        assert "codec can't decode" not in result
 
     def test_truncation_never_splits_a_line(self, tmp_path):
         """Character-index cuts left a broken half-line at each seam, which on

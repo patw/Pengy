@@ -503,3 +503,77 @@ def elide_old_tool_results(messages: list[dict], keep_turns: int) -> list[dict]:
         else:
             result.append(msg)
     return result
+
+
+def redact_last_message(messages: list[dict]) -> list[dict]:
+    """Drop the last message and repair any dangling tool_calls it leaves behind.
+
+    One click of "redact" in a frontend maps to one call: it pops exactly one
+    raw message off the end -- a tool result, an assistant tool_calls request,
+    or a final response.
+
+    Popping a tool result can't just fall through to
+    :func:`clean_dangling_tool_calls`: that function *synthesizes* a
+    "cancelled" placeholder for any tool_calls entry left unsatisfied, so a
+    naive pop-then-repair would regenerate an equivalent stub every time and
+    redaction could never advance past it. Instead the popped tool_call_id is
+    struck directly from its assistant message's ``tool_calls`` list; if that
+    empties the list (and the assistant left no other text), the now-empty
+    assistant message is dropped too, so redacting a single-tool-call round
+    fully removes it in one click. clean_dangling_tool_calls still runs at the
+    end as a defensive pass over whatever repair didn't touch.
+
+    Safe to call repeatedly down to an empty list. Returns a *new* list —
+    does not mutate the input.
+    """
+    if not messages:
+        return []
+    messages = list(messages)
+    last = messages.pop()
+
+    if last.get("role") == "tool":
+        # Find the assistant message that declared this tool_call_id — not
+        # necessarily the immediately preceding message, since a multi-tool
+        # round has several tool results trailing one assistant message.
+        for i in range(len(messages) - 1, -1, -1):
+            candidate = messages[i]
+            if candidate.get("role") != "assistant":
+                continue
+            ids = {tc.get("id") for tc in candidate.get("tool_calls") or []}
+            if last.get("tool_call_id") in ids:
+                assistant = dict(candidate)
+                remaining = [tc for tc in assistant["tool_calls"]
+                             if tc.get("id") != last.get("tool_call_id")]
+                if remaining:
+                    assistant["tool_calls"] = remaining
+                    messages[i] = assistant
+                elif assistant.get("content"):
+                    assistant = {k: v for k, v in assistant.items() if k != "tool_calls"}
+                    messages[i] = assistant
+                else:
+                    messages.pop(i)
+            break
+
+    return clean_dangling_tool_calls(messages)
+
+
+def add_usage(chat: dict, usage: dict | None) -> dict:
+    """Accumulate one turn's token usage into the chat's running total.
+
+    LLMClient.chat() reports usage per turn (reset every call), so without
+    this each frontend only ever showed the *last* turn's numbers — no signal
+    for how much context a long-running chat has actually burned through.
+    Stored on ``chat["usage"]`` (not session/tab state) so the running total
+    persists across reloads and is visible from any frontend, not just the
+    process that made the call. Mutates and returns ``chat["usage"]``; a
+    missing or empty *usage* leaves it unchanged (and creates it, zeroed, if
+    absent, so callers always get a dict back).
+    """
+    totals = chat.setdefault(
+        "usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    )
+    if usage:
+        totals["prompt_tokens"] += usage.get("prompt_tokens", 0)
+        totals["completion_tokens"] += usage.get("completion_tokens", 0)
+        totals["total_tokens"] += usage.get("total_tokens", 0)
+    return totals

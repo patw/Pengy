@@ -335,6 +335,204 @@ class TestDeleteConfirmation:
 
 
 # ────────────────────────────────────────────────────────────────────
+# /redact
+# ────────────────────────────────────────────────────────────────────
+
+class TestRedact:
+    def _cli_with_chat(self, messages):
+        from pengy.core.chat_manager import create_chat, save_chat
+
+        cli = PengyCLI(no_save=True)
+        chat = create_chat()
+        chat["messages"] = messages
+        save_chat(chat)
+        cli.current_chat = chat
+        return cli
+
+    def test_redact_default_removes_one_message(self, tmp_cfg):
+        from pengy.core.chat_manager import get_chat
+
+        cli = self._cli_with_chat([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        cli._cmd_redact([])
+
+        assert cli.current_chat["messages"] == [{"role": "user", "content": "hi"}]
+        assert get_chat(cli.current_chat["id"])["messages"] == cli.current_chat["messages"]
+
+    def test_redact_n_removes_n_messages(self, tmp_cfg):
+        cli = self._cli_with_chat([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "one"},
+            {"role": "user", "content": "again"},
+            {"role": "assistant", "content": "two"},
+        ])
+        cli._cmd_redact(["3"])
+        assert cli.current_chat["messages"] == [{"role": "user", "content": "hi"}]
+
+    def test_redact_more_than_available_empties_without_erroring(self, tmp_cfg):
+        cli = self._cli_with_chat([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        cli._cmd_redact(["50"])
+        assert cli.current_chat["messages"] == []
+
+    def test_redact_repeatable_to_empty(self, tmp_cfg):
+        cli = self._cli_with_chat([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        cli._cmd_redact([])
+        cli._cmd_redact([])
+        assert cli.current_chat["messages"] == []
+        # A third redact on an already-empty chat must not raise.
+        cli._cmd_redact([])
+        assert cli.current_chat["messages"] == []
+
+    def test_redact_no_active_chat(self, tmp_cfg):
+        cli = PengyCLI(no_save=True)
+        cli.current_chat = None
+        cli._cmd_redact([])  # must not raise
+
+    @pytest.mark.parametrize("args", [["0"], ["-1"], ["abc"]])
+    def test_redact_invalid_n_rejected(self, tmp_cfg, args):
+        cli = self._cli_with_chat([{"role": "user", "content": "hi"}])
+        cli._cmd_redact(args)
+        # Nothing removed on bad input.
+        assert cli.current_chat["messages"] == [{"role": "user", "content": "hi"}]
+
+
+# ────────────────────────────────────────────────────────────────────
+# /tasks and /task
+# ────────────────────────────────────────────────────────────────────
+
+class TestTasks:
+    def _cli(self):
+        from pengy.core.chat_manager import create_chat
+
+        cli = PengyCLI(no_save=True)
+        cli.current_chat = create_chat()
+        # _send_text drives a real LLM generator — stub it out so these tests
+        # only exercise task lookup/placeholder-filling/rendering.
+        cli._drive_generator = lambda messages, chat: None
+        return cli
+
+    def test_tasks_empty_shows_hint(self, tmp_cfg, capsys):
+        cli = self._cli()
+        cli._cmd_tasks()
+        assert "No tasks defined" in capsys.readouterr().out
+
+    def test_tasks_lists_saved_templates(self, tmp_cfg, capsys):
+        from pengy.core.task_manager import create_task
+
+        create_task("Greet", "Say hello to %name%")
+        cli = self._cli()
+        cli._cmd_tasks()
+        out = capsys.readouterr().out
+        assert "Greet" in out
+        assert "%name%" in out
+
+    def test_task_no_args_lists_tasks(self, tmp_cfg, capsys):
+        from pengy.core.task_manager import create_task
+
+        create_task("Greet", "Say hello to %name%")
+        cli = self._cli()
+        cli._cmd_task([])
+        assert "Greet" in capsys.readouterr().out
+
+    def test_task_fills_placeholders_and_sends(self, tmp_cfg):
+        from pengy.core.task_manager import create_task
+
+        create_task("Greet", "Say hello to %name% in %language%")
+        cli = self._cli()
+
+        with patch.object(cli_main, "Prompt") as prompt:
+            prompt.ask.side_effect = ["Ada", "French"]
+            cli._cmd_task(["1"])
+
+        assert cli.current_chat["messages"][-1] == {
+            "role": "user", "content": "Say hello to Ada in French",
+        }
+
+    def test_task_with_no_placeholders_never_prompts(self, tmp_cfg):
+        from pengy.core.task_manager import create_task
+
+        create_task("Static", "Summarize the last file I read.")
+        cli = self._cli()
+
+        with patch.object(cli_main, "Prompt") as prompt:
+            cli._cmd_task(["1"])
+
+        assert not prompt.ask.called
+        assert cli.current_chat["messages"][-1]["content"] == "Summarize the last file I read."
+
+    def test_task_empty_render_is_not_sent(self, tmp_cfg):
+        from pengy.core.task_manager import create_task
+
+        create_task("Blank", "   ")
+        cli = self._cli()
+        before = len(cli.current_chat["messages"])
+        cli._cmd_task(["1"])
+        assert len(cli.current_chat["messages"]) == before
+
+    @pytest.mark.parametrize("args", [["0"], ["99"], ["abc"]])
+    def test_task_invalid_index(self, tmp_cfg, args, capsys):
+        from pengy.core.task_manager import create_task
+
+        create_task("Greet", "hi %name%")
+        cli = self._cli()
+        before = len(cli.current_chat["messages"])
+        cli._cmd_task(args)
+        assert len(cli.current_chat["messages"]) == before
+        assert "Usage" in capsys.readouterr().out
+
+    def test_task_no_active_chat(self, tmp_cfg):
+        cli = PengyCLI(no_save=True)
+        cli.current_chat = None
+        cli._cmd_task(["1"])  # must not raise
+
+
+# ────────────────────────────────────────────────────────────────────
+# Cumulative token usage
+# ────────────────────────────────────────────────────────────────────
+
+class TestCumulativeUsage:
+    def _cli(self, mode="pretty"):
+        cli = PengyCLI(no_save=True)
+        cli._output_mode = mode
+        return cli
+
+    def test_render_final_accumulates_across_turns(self, capsys):
+        cli = self._cli()
+        chat = {"id": "c1", "messages": []}
+
+        cli._render_final({
+            "content": "hi", "message": {"role": "assistant", "content": "hi"},
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }, chat)
+        assert chat["usage"] == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        out = capsys.readouterr().out
+        assert "total this turn" in out
+        assert "15 total this chat" in out
+
+        cli._render_final({
+            "content": "hi again", "message": {"role": "assistant", "content": "hi again"},
+            "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+        }, chat)
+        assert chat["usage"] == {"prompt_tokens": 30, "completion_tokens": 13, "total_tokens": 43}
+        out = capsys.readouterr().out
+        assert "43 total this chat" in out
+
+    def test_render_final_no_usage_creates_zeroed_total(self):
+        cli = self._cli()
+        chat = {"id": "c1", "messages": []}
+        cli._render_final({"content": "hi", "message": {"role": "assistant", "content": "hi"}}, chat)
+        assert chat["usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+# ────────────────────────────────────────────────────────────────────
 # Mid-turn assistant narration
 # ────────────────────────────────────────────────────────────────────
 

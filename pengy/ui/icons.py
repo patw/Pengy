@@ -47,6 +47,26 @@ def _pixmap(name: str, color: str, size: int) -> QPixmap:
     return pixmap
 
 
+@lru_cache(maxsize=256)
+def _build_themed_icon(name: str, color: str, active_color: str, disabled_color: str) -> QIcon:
+    """The actual multi-size (5 sizes x 3 states = 15 QPixmap renders) build.
+
+    Cached because callers like the chat-history sidebar call themed_icon()
+    with the *same* (name, color) for every row's Save/Delete button and
+    rebuild the whole list on every chat create/delete/rename — without this
+    cache that's 15 fresh QSvgRenderer + QPainter passes per icon per row,
+    every time, which is the actual cost behind "New Chat feels slow" once a
+    sidebar has more than a handful of chats. A QIcon is safe to share: after
+    construction nothing else in this module (or its callers) mutates one.
+    """
+    icon = QIcon()
+    for size in _RENDER_SIZES:
+        icon.addPixmap(_pixmap(name, color, size), QIcon.Mode.Normal, QIcon.State.Off)
+        icon.addPixmap(_pixmap(name, active_color, size), QIcon.Mode.Active, QIcon.State.Off)
+        icon.addPixmap(_pixmap(name, disabled_color, size), QIcon.Mode.Disabled, QIcon.State.Off)
+    return icon
+
+
 def themed_icon(
     name: str,
     color: str,
@@ -57,12 +77,7 @@ def themed_icon(
     """Build a multi-size QIcon with normal, active, and disabled colors."""
     active_color = active_color or color
     disabled_color = disabled_color or QColor(color).lighter(135).name()
-    icon = QIcon()
-    for size in _RENDER_SIZES:
-        icon.addPixmap(_pixmap(name, color, size), QIcon.Mode.Normal, QIcon.State.Off)
-        icon.addPixmap(_pixmap(name, active_color, size), QIcon.Mode.Active, QIcon.State.Off)
-        icon.addPixmap(_pixmap(name, disabled_color, size), QIcon.Mode.Disabled, QIcon.State.Off)
-    return icon
+    return _build_themed_icon(name, color, active_color, disabled_color)
 
 
 def apply_button_icon(

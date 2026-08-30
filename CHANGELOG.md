@@ -1,6 +1,61 @@
 # Changelog
 
-## v1.7.0 (current)
+## v1.7.2 (current)
+
+- **Binary output guard.** `_snip_tool_output()` — the shared truncation point
+  for `run_bash`, `run_python`, `directory_tree`, `search_content`, and
+  `glob` — now runs a `_looks_binary()` heuristic first: a NUL byte anywhere
+  in the first 4KB, or a non-printable/control-char ratio over ~25%, blocks
+  the output outright with a short diagnostic instead of loading a binary
+  blob into context. `run_bash`/`run_python` decode command output leniently
+  (`errors="replace"`) instead of strictly, so output that isn't valid UTF-8
+  reaches the guard as text instead of raising.
+- **Redact last message.** `chat_manager.redact_last_message()` pops exactly
+  one raw message off the end of a chat per call, repeatable all the way to
+  an empty chat. A popped tool result strikes its id directly from the
+  assistant's `tool_calls` rather than falling through to
+  `clean_dangling_tool_calls()`'s "cancelled" synthesis, which would
+  regenerate an identical stub forever and never let redaction advance.
+  Wired as `/redact [N]` in the CLI, a redact button in the Web navbar
+  (`POST /chat/<id>/redact`, 409 while a turn is in flight), and a "Redact"
+  button in the GUI input row.
+- **Tasks in the CLI and Web UI.** Previously GUI-only; `/tasks` and
+  `/task <#>` in the CLI, and a Tasks modal (`GET /tasks`, `POST
+  /tasks/render`) in the Web UI, both routing the rendered prompt through the
+  normal send path.
+- **Cumulative token usage.** `chat_manager.add_usage()` accumulates each
+  turn's token counts into `chat["usage"]` (persisted, not session-only
+  state), so the running total for a chat survives reloads and tab switches
+  instead of only ever showing the last turn's numbers. All three frontends
+  show it next to the model/tool-confirmation status.
+- **GUI: "New Chat" sidebar performance.** Two stacked costs scaling with
+  total chat count made "New Chat" visibly slow with more than a couple dozen
+  chats: `themed_icon()` rebuilt a 15-pixmap `QIcon` from scratch on every
+  call even though every sidebar row requests the same `(name, color)` (fixed
+  with an `lru_cache`), and `create_new_chat()` called `load_chat_list()`'s
+  full clear-and-rebuild on every click (fixed with
+  `ChatHistoryWidget.add_chat()`, a single-row insert). Fixing the full
+  rebuild uncovered a real regression: `_close_tab()`/`_load_into_new_tab()`
+  delete an abandoned empty "New Chat" from disk but never removed its
+  sidebar row, previously masked by the full rebuild that ran right after —
+  without it, closing an empty chat and clicking New Chat again left a
+  permanent ghost row each time. Fixed with the matching
+  `ChatHistoryWidget.remove_chat()`.
+- **GUI: fixed a crash on `ask_user_question` and on any cancel.**
+  `ChatWorker.__init__` never initialized `_question_event` /
+  `_pending_question_response`, even though `run()`, `cancel()`, and
+  `send_question_response()` all reference them — any model call to
+  `ask_user_question`, or any worker cancellation at all (Stop, closing a tab
+  mid-run, sending a new message while one's in flight), crashed with
+  `AttributeError: 'ChatWorker' object has no attribute '_question_event'`.
+- **GUI: quick-settings whitespace gap.** The "no cached model list" hint
+  label was only text-cleared once populated, not hidden — an empty `QLabel`
+  still claims a line of layout height, leaving a permanent gap above "Tool
+  Confirm:". Now hidden outright when a model list exists.
+- **Settings: two more UI scale options.** 110% and 135% added alongside the
+  existing 75/100/125/150/175/200% steps.
+
+## v1.7.0
 
 - **Ask the user a question, interactively.** The web UI now surfaces
   `ask_user_question` in an interactive modal showing the model's options and a

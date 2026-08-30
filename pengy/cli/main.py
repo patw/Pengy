@@ -21,8 +21,10 @@ from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
     load_index, get_chat, create_chat, save_chat, delete_chat,
-    clean_dangling_tool_calls, elide_old_tool_results,
+    clean_dangling_tool_calls, elide_old_tool_results, redact_last_message,
+    add_usage,
 )
+from pengy.core import task_manager
 from pengy.core.image_utils import preprocess as preprocess_image
 from pengy.core import tools
 
@@ -36,7 +38,8 @@ SLASH_COMMANDS = (
     "/help", "/new", "/show", "/tail", "/rename", "/clear", "/export",
     "/yolo", "/config", "/model", "/models", "/list", "/load", "/baseurl",
     "/apikey", "/llm-timeout", "/timeout", "/download-max", "/agent", "/context-keep",
-    "/system", "/delete", "/attach", "/compact", "/quit", "/exit", "/q",
+    "/system", "/delete", "/attach", "/compact", "/redact",
+    "/tasks", "/task", "/quit", "/exit", "/q",
 )
 
 # Sub-arguments worth completing once the command is typed.
@@ -383,13 +386,24 @@ class PengyCLI:
                 display_content = "\n".join(img_placeholders + ([text] if text else []))
 
             # Normal message
-            self.current_chat["messages"].append({"role": "user", "content": display_content})
-            if self.current_chat["title"] == "New Chat":
-                self.current_chat["title"] = _truncate(display_content, 50)
+            self._send_text(display_content, image_paths=image_paths if image_paths else None)
 
-            messages = self._build_messages(self.current_chat, display_content,
-                                            image_paths=image_paths if image_paths else None)
-            self._drive_generator(messages, self.current_chat)
+    def _send_text(self, display_content: str, image_paths: list[Path] | None = None):
+        """Append a user message to the active chat and drive the generator.
+
+        This is the REPL's normal send path, factored out so /task can feed a
+        rendered template through the exact same flow instead of duplicating
+        it.
+        """
+        if not display_content or not self.current_chat:
+            return
+        self.current_chat["messages"].append({"role": "user", "content": display_content})
+        if self.current_chat["title"] == "New Chat":
+            self.current_chat["title"] = _truncate(display_content, 50)
+
+        messages = self._build_messages(self.current_chat, display_content,
+                                        image_paths=image_paths)
+        self._drive_generator(messages, self.current_chat)
 
     # ------------------------------------------------------------------
     # slash commands
@@ -477,6 +491,15 @@ class PengyCLI:
         elif cmd == "/compact":
             self._cmd_compact()
 
+        elif cmd == "/redact":
+            self._cmd_redact(args)
+
+        elif cmd == "/tasks":
+            self._cmd_tasks()
+
+        elif cmd == "/task":
+            self._cmd_task(args)
+
         else:
             self.console.print(f"[red]Unknown command:[/red] {cmd}  (try /help)")
 
@@ -506,6 +529,9 @@ class PengyCLI:
         table.add_row("/yolo [all|safe|none]", "Set tool confirmation: all (YOLO), safe (read-only), none")
         table.add_row("/system [message...]", "Show or set the system message template")
         table.add_row("/compact", "Compact context by eliding old tool results")
+        table.add_row("/redact [N]", "Delete the last N messages (default 1) — repeatable up to the top")
+        table.add_row("/tasks", "List saved prompt-template Tasks")
+        table.add_row("/task <#>", "Run a Task by its /tasks index, prompting for any %placeholders%")
         table.add_row("/list", "List recent chats")
         table.add_row("/load <index>", "Load a chat by its /list index")
         table.add_row("/delete <index>", "Delete a chat by its /list index")
@@ -1070,6 +1096,94 @@ class PengyCLI:
         )
         save_chat(self.current_chat)
 
+    def _cmd_redact(self, args: list[str]):
+        """Delete the last N raw messages (default 1) from the current chat.
+
+        This is the "undo the model's last step" button: repeatable all the
+        way to an empty chat. It edits chats.json directly, so it wrecks
+        prompt caching on most backends — that's the expected trade-off for
+        pruning a wrong path out of context.
+        """
+        if not self.current_chat:
+            self.console.print("[dim]No active chat.[/dim]")
+            return
+        try:
+            n = int(args[0]) if args else 1
+        except ValueError:
+            self.console.print("[red]Usage: /redact [N]  — delete the last N messages (default 1)[/red]")
+            return
+        if n < 1:
+            self.console.print("[red]N must be at least 1.[/red]")
+            return
+
+        messages = self.current_chat["messages"]
+        if not messages:
+            self.console.print("[dim]Chat is already empty.[/dim]")
+            return
+
+        before = len(messages)
+        for _ in range(min(n, before)):
+            messages = redact_last_message(messages)
+        self.current_chat["messages"] = messages
+        save_chat(self.current_chat)
+
+        removed = before - len(messages)
+        self.console.print(f"[green]✓ Redacted {removed} message(s).[/green] ({before} → {len(messages)})")
+        if messages:
+            self._cmd_show(["3"])
+
+    def _cmd_tasks(self):
+        """List saved prompt-template Tasks (shared with the GUI's Tasks dialog)."""
+        tasks = task_manager.load_tasks()
+        if not tasks:
+            self.console.print(
+                "[dim]No tasks defined yet. Create one in the GUI's Tasks dialog "
+                "(or add one to tasks.json), then run it here with /task <#>.[/dim]"
+            )
+            return
+        table = Table(title="Tasks", border_style="dim")
+        table.add_column("#", style="bold cyan", no_wrap=True)
+        table.add_column("Title")
+        table.add_column("Template")
+        for i, task in enumerate(tasks, 1):
+            preview = (task.get("template") or "").replace("\n", " ").strip()
+            if len(preview) > 60:
+                preview = preview[:57] + "..."
+            table.add_row(str(i), task.get("title", "Untitled Task"), preview)
+        self.console.print(table)
+        self.console.print("[dim]Run one with /task <#>[/dim]")
+
+    def _cmd_task(self, args: list[str]):
+        """Run a Task: fill in its %placeholders%, then send it like a normal message."""
+        if not self.current_chat:
+            self.console.print("[dim]No active chat.[/dim]")
+            return
+        if not args:
+            self._cmd_tasks()
+            return
+
+        tasks = task_manager.load_tasks()
+        try:
+            index = int(args[0])
+            if index < 1:
+                raise ValueError
+            task = tasks[index - 1]
+        except (ValueError, IndexError):
+            self.console.print("[red]Usage: /task <#>  (use /tasks to see indices)[/red]")
+            return
+
+        template = task.get("template", "") or ""
+        placeholders = task_manager.extract_placeholders(template)
+        values: dict[str, str] = {}
+        for name in placeholders:
+            values[name] = Prompt.ask(f"  [cyan]{name}[/cyan]")
+
+        prompt = task_manager.render_template(template, values).strip()
+        if not prompt:
+            self.console.print("[yellow]This task produced an empty prompt.[/yellow]")
+            return
+        self._send_text(prompt)
+
     # ------------------------------------------------------------------
     # attachment helper
     # ------------------------------------------------------------------
@@ -1408,14 +1522,16 @@ class PengyCLI:
         else:
             self.console.print("[dim](empty response)[/dim]")
 
-        # Show token usage
+        # Show token usage: this turn, and the chat's running total
         usage = response.get("usage", {})
+        totals = add_usage(chat, usage)
         if usage:
             prompt = usage.get("prompt_tokens", 0)
             completion = usage.get("completion_tokens", 0)
             self.console.print(
                 f"[dim]Tokens: {prompt:,} in / {completion:,} out "
-                f"({prompt + completion:,} total)[/dim]"
+                f"({prompt + completion:,} total this turn, "
+                f"{totals['total_tokens']:,} total this chat)[/dim]"
             )
 
     def _render_assistant_preamble(self, message: dict):

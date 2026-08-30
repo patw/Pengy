@@ -3,6 +3,7 @@ import base64
 import concurrent.futures
 import difflib
 import fnmatch
+import locale
 import os
 import re
 import shutil
@@ -228,6 +229,33 @@ def _cut_at_line_start(text: str, chars: int) -> str:
     return text[nl + 1:] if nl != -1 else text[start:]
 
 
+_BINARY_SAMPLE_CHARS = 4096
+_BINARY_NONPRINTABLE_RATIO = 0.25
+
+
+def _looks_binary(text: str) -> tuple[bool, float]:
+    """Heuristically detect binary blobs that decoded as text without erroring.
+
+    A hard-invalid byte sequence already raises ``UnicodeDecodeError`` well
+    before this point in most tool paths. The case this catches is the one
+    that *doesn't* raise: bytes that happen to form valid text (a UTF-16 file
+    decoded as UTF-8 leaves a NUL between every ASCII byte; a core dump or
+    compiled binary can have long printable-looking runs) but are not
+    meaningful for the model to read and can blow out the context window.
+
+    Returns ``(is_binary, nonprintable_ratio)`` computed over a leading
+    sample — good enough to classify without scanning huge outputs.
+    """
+    if not text:
+        return False, 0.0
+    sample = text[:_BINARY_SAMPLE_CHARS]
+    if "\x00" in sample:
+        return True, sum(1 for c in sample if not (c.isprintable() or c in "\n\r\t")) / len(sample)
+    nonprintable = sum(1 for c in sample if not (c.isprintable() or c in "\n\r\t"))
+    ratio = nonprintable / len(sample)
+    return ratio > _BINARY_NONPRINTABLE_RATIO, ratio
+
+
 def _snip_tool_output(text: str) -> str:
     """Tail-biased truncation for *command* output (run_bash, run_python).
 
@@ -236,7 +264,21 @@ def _snip_tool_output(text: str) -> str:
     the middle of a build log is the disposable part.  File reads want
     :func:`_truncate_head_lines` instead — a gap in the middle of a source file
     is not disposable, and unlike a log it can be paged around.
+
+    Runs the binary guard first: output that looks like a binary blob rather
+    than text is blocked outright rather than truncated, since truncating a
+    binary dump still floods the context with useless bytes.
     """
+    is_binary, ratio = _looks_binary(text)
+    if is_binary:
+        return (
+            f"[Binary output blocked: {len(text):,} chars, "
+            f"~{ratio:.0%} non-printable/control characters. Refusing to load "
+            "this into context. If you need the data, redirect it to a file "
+            "and use read_file/search_content on it, or use download_file "
+            "for URLs.]"
+        )
+
     limit = _MAX_TOOL_OUTPUT_CHARS
     if limit <= 0 or len(text) <= limit:
         return text
@@ -1210,16 +1252,24 @@ def _run_bash(command: str, ctx: "ToolContext" = None, cwd: str | None = None) -
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             start_new_session=True,
             env=env,
             cwd=run_cwd,
         )
         ctx.register_process(proc)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            stdout_b, stderr_b = proc.communicate(timeout=timeout)
         finally:
             ctx.unregister_process(proc)
+
+        # Decode manually with errors="replace" instead of Popen(text=True)'s
+        # strict decoding: a command that emits invalid-UTF-8 or binary bytes
+        # (e.g. `cat` on a UTF-16 file or a compiled binary) should reach the
+        # binary guard in _snip_tool_output() as text to classify, not blow up
+        # communicate() with a raw UnicodeDecodeError.
+        encoding = locale.getpreferredencoding(False)
+        stdout = (stdout_b or b"").decode(encoding, errors="replace")
+        stderr = (stderr_b or b"").decode(encoding, errors="replace")
 
         output = stdout or ""
         if used_sudo:
@@ -1429,15 +1479,20 @@ def _run_python(code: str, ctx: "ToolContext" = None, cwd: str | None = None) ->
             [_sys_module.executable, temp_file],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             start_new_session=True,
             cwd=run_cwd,
         )
         ctx.register_process(proc)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            stdout_b, stderr_b = proc.communicate(timeout=timeout)
         finally:
             ctx.unregister_process(proc)
+
+        # See _run_bash: decode leniently so binary/invalid-UTF-8 output
+        # reaches the binary guard in _snip_tool_output() instead of raising.
+        encoding = locale.getpreferredencoding(False)
+        stdout = (stdout_b or b"").decode(encoding, errors="replace")
+        stderr = (stderr_b or b"").decode(encoding, errors="replace")
 
         output = stdout or ""
         if stderr:

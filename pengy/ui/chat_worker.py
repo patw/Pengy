@@ -30,6 +30,8 @@ class ChatWorker(QObject):
         self._pending_confirmation = None
         self._sudo_event = threading.Event()
         self._pending_sudo_password = None
+        self._question_event = threading.Event()
+        self._pending_question_response = None
         # Per-run tool state so concurrent tabs don't share a sudo provider
         # or kill each other's subprocesses.
         self._tool_context = tools.ToolContext(

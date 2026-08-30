@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -208,6 +209,21 @@ class TestPortableIcons:
         assert chat_input._attach_btn.text() == ""
         assert chat_input._attach_btn.property("pengyIcon") == "attach"
         sidebar.deleteLater()
+
+    def test_themed_icon_is_cached_per_name_and_color(self, qapp):
+        """themed_icon() is called with the same (name, color) for every row's
+        Save/Delete button whenever a chat-list widget is built — rebuilding
+        the full 5-size x 3-state QIcon from scratch per row (rather than
+        reusing one built object) was the dominant cost behind "New Chat
+        feels slow" on a sidebar with many chats."""
+        from pengy.ui.icons import themed_icon, _build_themed_icon
+
+        _build_themed_icon.cache_clear()
+        a = themed_icon("save", "#123456")
+        b = themed_icon("save", "#123456")
+        assert a is b
+        info = _build_themed_icon.cache_info()
+        assert info.hits >= 1
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -673,3 +689,428 @@ class TestAssistantPreambleRendering:
     def test_plain_assistant_message_still_renders(self):
         calls = self._render({"role": "assistant", "content": "done"})
         assert [role for role, _ in calls] == ["assistant"]
+
+
+# ────────────────────────────────────────────────────────────────────
+# Redact Last button
+# ────────────────────────────────────────────────────────────────────
+
+class TestRedactLast:
+    """MainWindow._redact_last drops the active tab's last message and
+    rebuilds the ChatView from what remains — the GUI's context-pruning undo.
+
+    Uses the same unbound-call trick as TestAssistantPreambleRendering:
+    _redact_last only touches attributes it's handed, so a lightweight stand-in
+    avoids constructing a whole MainWindow (config, LLM client, tabs, ...).
+    """
+
+    class _RecordingView:
+        def __init__(self):
+            self.calls = []
+
+        def clear(self):
+            self.calls.append(("clear",))
+
+        def append_message(self, role, content, **kwargs):
+            self.calls.append(("append", role))
+
+        def render_now(self):
+            self.calls.append(("render_now",))
+
+    class _Session:
+        def __init__(self, chat, chat_view, worker=None):
+            self.chat = chat
+            self.chat_view = chat_view
+            self.worker = worker
+
+    class _FakeWindow:
+        def __init__(self, session):
+            from pengy.ui.main_window import MainWindow
+            import types
+            self.active_chat_id = session.chat["id"]
+            self._session = session
+            self._render_message = types.MethodType(MainWindow._render_message, self)
+
+        def _tab_for_chat(self, chat_id):
+            return self._session if chat_id == self.active_chat_id else None
+
+    def _run(self, messages, worker=None):
+        from pengy.core.chat_manager import create_chat, save_chat
+        from pengy.ui.main_window import MainWindow
+
+        chat = create_chat()
+        chat["messages"] = messages
+        save_chat(chat)
+        view = self._RecordingView()
+        session = self._Session(chat, view, worker=worker)
+        window = self._FakeWindow(session)
+        MainWindow._redact_last(window)
+        return chat, view
+
+    def test_redact_removes_last_and_rerenders(self, tmp_cfg):
+        from pengy.core.chat_manager import get_chat
+
+        chat, view = self._run([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        assert chat["messages"] == [{"role": "user", "content": "hi"}]
+        assert get_chat(chat["id"])["messages"] == chat["messages"]
+        assert ("clear",) in view.calls
+        assert ("render_now",) in view.calls
+
+    def test_redact_repeatable_to_empty(self, tmp_cfg):
+        chat, _ = self._run([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        chat2, _ = self._run(chat["messages"])
+        assert chat2["messages"] == []
+        # Redacting an already-empty chat must not raise.
+        chat3, view3 = self._run([])
+        assert chat3["messages"] == []
+        assert view3.calls == []
+
+    def test_redact_blocked_while_worker_active(self, tmp_cfg, monkeypatch):
+        from pengy.ui import main_window as main_window_mod
+
+        informed = []
+        monkeypatch.setattr(
+            main_window_mod.QMessageBox, "information",
+            lambda *a, **k: informed.append(a) or QMessageBox.StandardButton.Ok,
+        )
+        chat, view = self._run([{"role": "user", "content": "hi"}], worker=object())
+
+        assert chat["messages"] == [{"role": "user", "content": "hi"}]
+        assert view.calls == []
+        assert informed, "must warn the user instead of silently doing nothing"
+
+
+# ────────────────────────────────────────────────────────────────────
+# Cumulative token usage
+# ────────────────────────────────────────────────────────────────────
+
+class TestCumulativeTokens:
+    """MainWindow._handle_final_response must accumulate chat['usage'] across
+    turns rather than overwrite it with the last turn's numbers, and reflect
+    that running total in the sidebar label — the same "how much context has
+    this chat burned" signal that tells you when to /compact or redact.
+    """
+
+    class _RecordingView:
+        def append_message(self, *a, **k):
+            pass
+
+    class _RecordingHistory:
+        def __init__(self):
+            self.calls = []
+
+        def update_token_usage(self, prompt, completion):
+            self.calls.append((prompt, completion))
+
+    class _Session:
+        def __init__(self, chat):
+            self.chat = chat
+            self.chat_view = TestCumulativeTokens._RecordingView()
+            self.prompt_tokens = 0
+            self.completion_tokens = 0
+
+    class _FakeWindow:
+        def __init__(self, session):
+            self.active_chat_id = session.chat["id"]
+            self.chat_history = TestCumulativeTokens._RecordingHistory()
+            self._session = session
+
+        def _tab_for_chat(self, chat_id):
+            return self._session if chat_id == self.active_chat_id else None
+
+    def test_accumulates_across_turns_and_updates_sidebar(self, tmp_cfg):
+        from pengy.core.chat_manager import create_chat, save_chat, get_chat
+        from pengy.ui.main_window import MainWindow
+
+        chat = create_chat()
+        save_chat(chat)
+        session = self._Session(chat)
+        window = self._FakeWindow(session)
+
+        MainWindow._handle_final_response(window, session, {
+            "content": "hi", "message": {"role": "assistant", "content": "hi"},
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        })
+        assert session.chat["usage"] == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        assert window.chat_history.calls[-1] == (10, 5)
+        assert get_chat(chat["id"])["usage"]["total_tokens"] == 15
+
+        MainWindow._handle_final_response(window, session, {
+            "content": "again", "message": {"role": "assistant", "content": "again"},
+            "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+        })
+        assert session.chat["usage"] == {"prompt_tokens": 30, "completion_tokens": 13, "total_tokens": 43}
+        assert window.chat_history.calls[-1] == (30, 13)
+
+    def test_reopening_a_chat_seeds_cumulative_display(self, tmp_cfg, qapp):
+        """_add_tab must read chat['usage'] back in, not reset the tab to 0."""
+        from pengy.core.chat_manager import create_chat, save_chat
+        from pengy.ui.main_window import MainWindow
+
+        chat = create_chat()
+        chat["usage"] = {"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140}
+        save_chat(chat)
+
+        # _add_tab needs enough of a real MainWindow to build a ChatView and a
+        # QTabWidget; construct just those pieces rather than the whole app.
+        from PySide6.QtWidgets import QTabWidget
+        from pengy.ui.theme import get_theme
+
+        class _MinimalWindow:
+            _theme = get_theme()
+            tab_widget = QTabWidget()
+            open_tabs = {}
+            _render_message = MainWindow._render_message
+            _install_tab_close_button = MainWindow._install_tab_close_button
+            _save_open_tabs = lambda self: None
+
+        window = _MinimalWindow()
+        session = MainWindow._add_tab(window, chat, switch_to=False)
+        assert session.prompt_tokens == 100
+        assert session.completion_tokens == 40
+
+
+# ────────────────────────────────────────────────────────────────────
+# New Chat sidebar performance
+# ────────────────────────────────────────────────────────────────────
+
+class TestNewChatSidebarPerf:
+    """create_new_chat() must not pay for a full sidebar rebuild.
+
+    ChatHistoryWidget.load_chats() tears down and rebuilds every row (one
+    QWidget with icon-bearing Save/Delete buttons per *existing* chat), which
+    was previously called on every single "New Chat" click — the visible
+    delay scaled with total chat count. add_chat() inserts just the one new
+    row instead.
+    """
+
+    def test_add_chat_inserts_without_touching_existing_rows(self, qapp):
+        sidebar = ChatHistoryWidget()
+        try:
+            sidebar.load_chats([
+                {"id": "old1", "title": "Old One", "created_at": "", "msg_count": 0, "preview": ""},
+                {"id": "old2", "title": "Old Two", "created_at": "", "msg_count": 0, "preview": ""},
+            ])
+            existing_widgets = [
+                sidebar.chat_list.itemWidget(sidebar.chat_list.item(i))
+                for i in range(sidebar.chat_list.count())
+            ]
+
+            sidebar.add_chat("new1", "Brand New Chat")
+
+            assert sidebar.chat_list.count() == 3
+            # The new chat lands at the top (chats sort newest-first)...
+            assert sidebar.chat_list.item(0).data(Qt.ItemDataRole.UserRole) == "new1"
+            # ...and the two pre-existing rows were never rebuilt.
+            assert [
+                sidebar.chat_list.itemWidget(sidebar.chat_list.item(i))
+                for i in (1, 2)
+            ] == existing_widgets
+        finally:
+            sidebar.deleteLater()
+
+    def test_create_new_chat_uses_add_chat_not_full_reload(self, tmp_cfg, monkeypatch):
+        """Locks in the fix: create_new_chat must call add_chat(), and must
+        NOT call the full-rebuild load_chat_list() on this path."""
+        from pengy.core.chat_manager import create_chat
+        from pengy.ui.main_window import MainWindow
+
+        add_chat_calls = []
+        reload_calls = []
+
+        class _FakeChatHistory:
+            def add_chat(self, chat_id, title):
+                add_chat_calls.append((chat_id, title))
+
+            def select_chat_by_id(self, chat_id):
+                pass
+
+        class _FakeWindow:
+            open_tabs = {}
+            active_chat_id = None
+            chat_history = _FakeChatHistory()
+
+            def _add_tab(self, chat, switch_to=True):
+                class _Session:
+                    pass
+                s = _Session()
+                s.chat = chat
+                return s
+
+            def _update_quick_settings_for(self, session):
+                pass
+
+            def load_chat_list(self):
+                reload_calls.append(True)
+
+        monkeypatch.setattr("pengy.ui.main_window.create_chat", create_chat)
+        window = _FakeWindow()
+        MainWindow.create_new_chat(window)
+
+        assert len(add_chat_calls) == 1
+        assert reload_calls == []
+
+
+# ────────────────────────────────────────────────────────────────────
+# Closing an empty "New Chat" tab must drop its sidebar row too
+# ────────────────────────────────────────────────────────────────────
+
+class TestCloseEmptyNewChatSidebarSync:
+    """Regression test for a real incident: create_new_chat() switched from a
+    full sidebar rebuild (load_chat_list()) to an incremental add_chat() row
+    insert. _close_tab() and _load_into_new_tab() were both already deleting
+    an abandoned empty "New Chat" from disk without ever removing its sidebar
+    row -- previously masked because the *next* create_new_chat() click
+    happened to do a full disk-synced rebuild anyway. Once that rebuild was
+    replaced with a targeted insert, the masking stopped: closing an empty
+    "New Chat" tab and clicking New Chat again left a permanent ghost row
+    behind, once per repeat -- "endless New Chats in history".
+    """
+
+    class _FakeWindow:
+        """Just enough of MainWindow for _close_tab() to run for real."""
+
+        def __init__(self, tab_widget, open_tabs, chat_history):
+            self.tab_widget = tab_widget
+            self.open_tabs = open_tabs
+            self.chat_history = chat_history
+
+        def _abandon_worker_for(self, session):
+            pass
+
+        def _save_open_tabs(self):
+            pass
+
+        def create_new_chat(self):
+            pass  # only reached if the last tab closes; not exercised here
+
+    def test_closing_empty_new_chat_removes_its_sidebar_row(self, tmp_cfg, qapp):
+        from PySide6.QtWidgets import QTabWidget, QWidget
+        from pengy.core.chat_manager import create_chat, get_chat
+        from pengy.ui.main_window import MainWindow, _TabSession
+
+        sidebar = ChatHistoryWidget()
+        tab_widget = QTabWidget()
+
+        # A real chat (stays open) plus a never-typed-into "New Chat" (about
+        # to be closed) -- exactly create_new_chat()'s output shape.
+        real_chat = create_chat()
+        real_chat["title"] = "Real Chat"
+        real_chat["messages"] = [{"role": "user", "content": "hi"}]
+        blank_chat = create_chat()  # title defaults to "New Chat", no messages
+
+        sidebar.add_chat(real_chat["id"], real_chat["title"])
+        sidebar.add_chat(blank_chat["id"], blank_chat["title"])
+
+        real_session = _TabSession(chat=real_chat, chat_view=QWidget())
+        blank_session = _TabSession(chat=blank_chat, chat_view=QWidget())
+        tab_widget.addTab(real_session.chat_view, "Real Chat")
+        blank_index = tab_widget.addTab(blank_session.chat_view, "New Chat")
+
+        open_tabs = {real_chat["id"]: real_session, blank_chat["id"]: blank_session}
+        window = self._FakeWindow(tab_widget, open_tabs, sidebar)
+
+        MainWindow._close_tab(window, blank_index)
+
+        # Sidebar row for the closed blank chat is gone; the real chat's stays.
+        assert sidebar.chat_list.count() == 1
+        assert sidebar.chat_list.item(0).data(Qt.ItemDataRole.UserRole) == real_chat["id"]
+        # And the underlying file is actually deleted, not just hidden.
+        assert get_chat(blank_chat["id"]) is None
+
+        sidebar.deleteLater()
+
+    def test_repeated_close_and_recreate_does_not_accumulate_ghost_rows(self, tmp_cfg, qapp):
+        """The literal reported symptom: close a blank New Chat, click New
+        Chat again, repeat -- the sidebar must stay at one row, not grow."""
+        from PySide6.QtWidgets import QTabWidget, QWidget
+        from pengy.core.chat_manager import create_chat
+        from pengy.ui.main_window import MainWindow, _TabSession
+
+        sidebar = ChatHistoryWidget()
+        tab_widget = QTabWidget()
+        open_tabs = {}
+        window = self._FakeWindow(tab_widget, open_tabs, sidebar)
+
+        for _ in range(4):
+            chat = create_chat()  # what create_new_chat() does
+            sidebar.add_chat(chat["id"], chat.get("title", "New Chat"))
+            session = _TabSession(chat=chat, chat_view=QWidget())
+            index = tab_widget.addTab(session.chat_view, "New Chat")
+            open_tabs[chat["id"]] = session
+
+            MainWindow._close_tab(window, index)  # "click off it" (close)
+
+        assert sidebar.chat_list.count() == 0
+        assert open_tabs == {}
+
+        sidebar.deleteLater()
+
+
+# ────────────────────────────────────────────────────────────────────
+# ChatWorker question-request plumbing
+# ────────────────────────────────────────────────────────────────────
+
+class TestChatWorkerQuestionEvent:
+    """Regression test: ChatWorker.__init__ never set self._question_event
+    (or self._pending_question_response), even though run(), cancel(), and
+    send_question_response() all reference them. cancel() unconditionally
+    calls self._question_event.set(), so this crashed on every worker
+    cancellation; a model call to the ask_user_question tool crashed run()
+    itself at self._question_event.clear(), which run()'s except Exception
+    handler turned into exactly the reported 'Assistant: Error: ChatWorker
+    object has no attribute _question_event' message.
+    """
+
+    class _FakeLLMClient:
+        """A .chat() that mimics LLMClient's generator protocol just enough
+        to drive ChatWorker.run() through a question_request round trip."""
+
+        def chat(self, messages, tool_confirmation, **kwargs):
+            answer = yield {"type": "question_request", "tool_call_id": "q1"}
+            yield {"type": "final_response", "content": f"got:{answer}", "usage": {}}
+
+    def test_worker_initializes_question_event(self, qapp):
+        from pengy.ui.chat_worker import ChatWorker
+
+        worker = ChatWorker(object(), messages=[])
+        assert isinstance(worker._question_event, threading.Event)
+        assert worker._pending_question_response is None
+
+    def test_cancel_before_run_does_not_raise(self, qapp):
+        """cancel() (Stop button, tab close, sending a new message mid-run)
+        unconditionally touches _question_event even if no question was ever
+        asked this turn."""
+        from pengy.ui.chat_worker import ChatWorker
+
+        worker = ChatWorker(object(), messages=[])
+        worker.cancel()  # must not raise AttributeError
+
+    def test_question_request_round_trip(self, qapp):
+        """Runs synchronously (no background QThread) so the signal/slot
+        connections are direct calls on this thread, exercising the exact
+        clear()/wait()/set() sequence that crashed before the fix."""
+        from pengy.ui.chat_worker import ChatWorker
+
+        worker = ChatWorker(self._FakeLLMClient(), messages=[{"role": "user", "content": "hi"}])
+        errors = []
+        finals = []
+        worker.error.connect(errors.append)
+        worker.question_requested.connect(lambda q: worker.send_question_response({
+            "answered": True, "tool_call_id": q["tool_call_id"], "answers": {"x": "y"},
+        }))
+        worker.response.connect(
+            lambda r: finals.append(r) if r.get("type") == "final_response" else None
+        )
+
+        worker.run()
+
+        assert errors == []
+        assert len(finals) == 1
+        assert "answered" in finals[0]["content"]
