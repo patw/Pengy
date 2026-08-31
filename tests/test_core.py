@@ -493,7 +493,7 @@ class TestSplitStorage:
         assert cm.get_chat("old-1")["messages"][0]["content"] == "q"
         assert (tmp_cfg_dir / "chats" / "old-1.json").exists()
 
-    def test_legacy_file_is_never_modified(self, tmp_cfg_dir):
+    def test_legacy_file_is_never_modified_except_by_delete(self, tmp_cfg_dir):
         from pengy.core import chat_manager as cm
         legacy = tmp_cfg_dir / "chats.json"
         legacy.write_text(json.dumps([
@@ -504,9 +504,35 @@ class TestSplitStorage:
         c = cm.get_chat("old-1")
         c["title"] = "RENAMED"
         cm.save_chat(c)
-        cm.delete_chat("old-1")
         cm.load_chats()
+        # Load/rename/save never touch the legacy seed.
         assert legacy.read_bytes() == before
+        # delete_chat trims the deleted chat out so it can't resurrect.
+        cm.delete_chat("old-1")
+        remaining = json.loads(legacy.read_text())
+        assert remaining == []
+
+    def test_deleted_chat_does_not_resurrect_from_legacy(self, tmp_cfg_dir):
+        # The failure mode: a deleted chat's per-chat file is gone, so it looks
+        # exactly like "never imported yet" — a later legacy re-import (index
+        # lost/rewritten, or chats.json rewritten by another edition) must not
+        # bring it back.
+        from pengy.core import chat_manager as cm
+        (tmp_cfg_dir / "chats.json").write_text(json.dumps([
+            {"id": "old-1", "title": "OLD", "messages": [], "created_at": "2020-01-01T00:00:00"},
+            {"id": "old-2", "title": "KEEP", "messages": [], "created_at": "2020-01-02T00:00:00"},
+        ]))
+        assert "OLD" in [e["title"] for e in cm.load_index()]
+        cm.delete_chat("old-1")
+        assert cm.get_chat("old-1") is None
+
+        # Simulate index loss: rebuilding the index must re-run the legacy
+        # import, but old-1 was trimmed out of chats.json, so it stays gone.
+        (tmp_cfg_dir / "chats" / "index.json").unlink()
+        titles = [e["title"] for e in cm.load_index()]
+        assert "OLD" not in titles
+        assert "KEEP" in titles
+        assert cm.get_chat("old-1") is None
 
     def test_rewritten_legacy_is_reimported(self, tmp_cfg_dir):
         # Another edition (Rust/C++) wrote chats.json on the same machine.
@@ -733,6 +759,26 @@ class TestTools:
         text = "def foo():\n\treturn 'hello world!' # comment\n" * 50
         out = tools._snip_tool_output(text)
         assert out == text
+
+    def test_read_file_blocks_binary_that_decodes_as_utf8(self, tmp_path):
+        """UTF-16 text decodes as *valid* UTF-8 (ASCII interleaved with NULs),
+        so the strict decode alone misses it — read_file needs the guard too."""
+        from pengy.core import tools
+        p = tmp_path / "utf16.txt"
+        p.write_bytes("hello".encode("utf-16-le"))
+        result = tools._read_file(str(p))
+        assert "binary" in result
+        assert "hello" not in result
+
+    def test_read_multiple_files_blocks_binary_that_decodes_as_utf8(self, tmp_path):
+        from pengy.core import tools
+        binary = tmp_path / "utf16.txt"
+        binary.write_bytes("hello".encode("utf-16-le"))
+        good = tmp_path / "good.txt"
+        good.write_text("plain text")
+        result = tools._read_multiple_files([str(binary), str(good)])
+        assert "binary" in result.lower()
+        assert "plain text" in result
 
     def test_run_bash_blocks_binary_output(self):
         """A command that emits binary bytes (not just invalid UTF-8) must not
@@ -1122,6 +1168,19 @@ class TestTools:
         assert "Error" in result
         assert "http" in result.lower()
 
+    def test_fetch_url_blocks_binary_body(self):
+        """A 200 response whose bytes are valid UTF-8 but not text (NULs) must
+        be blocked, not decoded into context."""
+        from pengy.core import tools
+        server, thread, url = self._start_server("a\x00b\x00c\x00" * 200)
+        try:
+            result = tools.execute_tool("fetch_url", {"url": url})
+            assert "binary" in result
+            assert "a\x00" not in result
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
     def _start_server(self, body: str):
         import http.server
         import threading
@@ -1496,6 +1555,7 @@ class TestToolContext:
         from pengy.core.tools import execute_tool, ToolContext
 
         # Stub sudo: only succeeds when invoked with -A and a working askpass.
+        # Also proves the password is NOT smuggled through the environment.
         fake_bin = tmp_path / "bin"
         fake_bin.mkdir()
         (fake_bin / "sudo").write_text(
@@ -1503,6 +1563,7 @@ class TestToolContext:
             'if [ "$1" != "-A" ]; then echo "sudo: no tty present" >&2; exit 1; fi\n'
             'shift\n'
             'pw="$("$SUDO_ASKPASS")"\n'
+            'if [ -n "${PENGY_SUDO_PASSWORD:-}" ]; then echo "LEAK:${PENGY_SUDO_PASSWORD}"; fi\n'
             'echo "pw=$pw"\n'
             'exec "$@"\n'
         )
@@ -1522,18 +1583,24 @@ class TestToolContext:
                 result = execute_tool("run_bash", {"command": command}, ctx)
                 assert "pw=s3cret" in result, f"{command!r} -> {result!r}"
                 assert "no tty present" not in result, f"{command!r} -> {result!r}"
+                assert "LEAK:" not in result, f"sudo password leaked into env: {command!r} -> {result!r}"
         finally:
             os.environ["PATH"] = old_path
 
-    def test_askpass_never_writes_password_to_disk(self, tmp_path):
-        """The askpass helper reads the password from the env, not from a file."""
+    def test_askpass_never_leaks_password_via_env_or_script(self, tmp_path):
+        """The password lives in a private 0600 file, not the script body or env."""
         from pengy.core.tools import _AskpassHelper
-        helper = _AskpassHelper()
+        helper = _AskpassHelper("s3cret")
         try:
-            contents = Path(helper.path).read_text()
-            assert "PENGY_SUDO_PASSWORD" in contents
-            # 0700: readable only by the owner.
+            script = Path(helper.path).read_text()
+            # The script must not embed the password itself.
+            assert "s3cret" not in script
+            # The script reads the password from a separate file.
+            pw_file = script.split("cat '")[1].split("'")[0]
+            assert Path(pw_file).read_text() == "s3cret"
+            # Script 0700, password file 0600.
             assert oct(os.stat(helper.path).st_mode & 0o777) == "0o700"
+            assert oct(os.stat(pw_file).st_mode & 0o777) == "0o600"
         finally:
             helper.cleanup()
         assert not Path(helper.path).exists()

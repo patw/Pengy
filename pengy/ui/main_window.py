@@ -654,6 +654,16 @@ class MainWindow(QMainWindow):
 
         if response["type"] == "final_response":
             self._handle_final_response(session, response)
+        elif response["type"] == "retrying":
+            # 429/529 backoff: surface it instead of hanging silently.
+            if session is self._tab_for_chat(self.active_chat_id):
+                self.chat_history.set_retrying(
+                    "Overloaded — retrying in {:.1f}s ({}/{})".format(
+                        response.get("delay_secs", 0),
+                        response.get("attempt", 0),
+                        response.get("max_attempts", 0),
+                    )
+                )
         elif response["type"] == "tool_request":
             session.thinking = True
             session.tool_running = True

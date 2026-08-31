@@ -402,6 +402,17 @@ class ChatHistoryWidget(QWidget):
             self.status_text.setText("Thinking…")
             self._blink_timer.start()
 
+    def set_retrying(self, text: str):
+        """Transient status while the LLM backs off and retries (429/529).
+
+        Deliberately not blinking and not "Running Tool…": this is a network
+        backoff pause, not local work. The next tool_request/tool_result/
+        final_response event overwrites it via the normal status setters.
+        """
+        self._blink_timer.stop()
+        self.status_dot.setStyleSheet(f"color: {self._theme['muted']}; font-size: 14px;")
+        self.status_text.setText(text)
+
     def _blink_dot(self):
         self._dot_phase = not self._dot_phase
         color = self._theme['danger'] if self._dot_phase else "transparent"

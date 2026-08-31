@@ -1188,11 +1188,13 @@ class PengyCLI:
     # attachment helper
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _resolve_attachments(text: str) -> tuple[str, str, list[Path]]:
+    def _resolve_attachments(self, text: str) -> tuple[str, str, list[Path]]:
         """Scan *text* for @path references.
 
-        Returns ``(cleaned_text, fenced_blocks, image_paths)``.
+        Returns ``(cleaned_text, fenced_blocks, image_paths)``. A token that
+        looks like a path (contains ``/`` or a known extension) but doesn't
+        resolve prints a warning rather than silently staying literal — the
+        user should know the attachment didn't happen.
         """
         resolved = text
         blocks = []
@@ -1210,6 +1212,10 @@ class PengyCLI:
                 elif _is_text_file(p):
                     blocks.append(_inject_file_content(p))
                     resolved = resolved.replace(match.group(0), "", 1)
+            elif "/" in path_str or p.suffix.lower() in (_TEXT_EXTENSIONS | _IMAGE_EXTENSIONS):
+                self.console.print(
+                    f"[yellow]Warning: attachment not found:[/yellow] {match.group(0)}"
+                )
         resolved = resolved.strip()
         return resolved, "\n\n".join(blocks), image_paths
 
@@ -1351,6 +1357,18 @@ class PengyCLI:
                     self._render_assistant_preamble(response["message"])
                     chat["messages"].append(response["message"])
                     self._save_progress(chat)
+
+                elif rtype == "retrying":
+                    # 429/529 backoff — surface it instead of hanging silently.
+                    expecting_api_call = True
+                    self.console.print(
+                        "[yellow]Overloaded (HTTP {}) — retrying in {:.1f}s ({}/{})[/yellow]".format(
+                            response.get("status_code", "?"),
+                            response.get("delay_secs", 0),
+                            response.get("attempt", 0),
+                            response.get("max_attempts", 0),
+                        )
+                    )
 
                 elif rtype == "tool_request":
                     expecting_api_call = False

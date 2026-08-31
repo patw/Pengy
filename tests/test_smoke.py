@@ -171,11 +171,11 @@ class TestCliEntryPoint:
         assert "Unknown command" in captured.out
 
     def test_resolve_attachments_no_files(self):
-        """@path to non-existent files are left untouched."""
+        """@path to non-existent files are left untouched (with a warning)."""
         from pengy.cli.main import PengyCLI
 
         text = "hello @/definitely/not/a/file.txt world"
-        cleaned, blocks, images = PengyCLI._resolve_attachments(text)
+        cleaned, blocks, images = PengyCLI(no_save=True)._resolve_attachments(text)
         # Non-existent paths are left as-is (could be @mentions, etc.)
         assert cleaned == text
         assert blocks == ""
@@ -189,7 +189,7 @@ class TestCliEntryPoint:
         f.write_text("print('hello')")
 
         text = f"look at @{f} and tell me"
-        cleaned, blocks, images = PengyCLI._resolve_attachments(text)
+        cleaned, blocks, images = PengyCLI(no_save=True)._resolve_attachments(text)
         assert cleaned == "look at  and tell me"
         assert "demo.py" in blocks
         assert "print('hello')" in blocks

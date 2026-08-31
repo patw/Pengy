@@ -577,3 +577,39 @@ class TestAssistantPreamble:
         """json builds one object from the final response; stray text breaks it."""
         cli = self._cli(mode)
         assert self._capture(cli, {"role": "assistant", "content": "chatter"}) == []
+
+
+class TestAttachments:
+    """@path attachment resolution, including the silent-failure warning."""
+
+    @staticmethod
+    def _cli():
+        return PengyCLI(no_save=True)
+
+    def test_real_file_attaches_silently(self, tmp_path):
+        cli = self._cli()
+        real = tmp_path / "note.txt"
+        real.write_text("hello from note")
+        with patch.object(cli.console, "print") as mock_print:
+            cleaned, blocks, images = cli._resolve_attachments(f"read @{real}")
+        assert blocks and "hello from note" in blocks
+        assert images == []
+        assert not mock_print.called, "a real attachment must not warn"
+
+    def test_missing_path_warns_and_stays_literal(self):
+        cli = self._cli()
+        with patch.object(cli.console, "print") as mock_print:
+            cleaned, blocks, images = cli._resolve_attachments("read @missing.txt")
+        assert blocks == ""
+        assert images == []
+        assert "@missing.txt" in cleaned  # left as literal text
+        assert mock_print.called, "a path-looking token that fails to resolve must warn"
+
+    def test_plain_at_mention_does_not_warn(self):
+        cli = self._cli()
+        with patch.object(cli.console, "print") as mock_print:
+            cleaned, blocks, images = cli._resolve_attachments("mention @someone here")
+        assert blocks == ""
+        assert images == []
+        assert "@someone" in cleaned
+        assert not mock_print.called, "an @mention with no path shape is not an attachment"

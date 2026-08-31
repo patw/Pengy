@@ -30,8 +30,9 @@ from pengy.core.config import get_config_dir
 #
 # The legacy chats.json is still read, so a machine that switches between the
 # Python, Rust and C++ editions doesn't appear to lose history. It is never
-# written and never deleted -- it stays as a backup of everything that existed
-# before migration.
+# appended to -- it stays as a one-time seed of everything that existed before
+# migration. The single exception: delete_chat() removes a deleted chat's
+# entry from it too, so a later legacy re-import can't silently resurrect it.
 
 _INDEX_NAME = "index.json"
 _INDEX_VERSION = 1
@@ -56,7 +57,8 @@ def _index_path() -> Path:
 
 
 def _legacy_path() -> Path:
-    """The pre-split single-file store. Read-only; never written or removed."""
+    """The pre-split single-file store. Read-only seed; only delete_chat()
+    trims entries out of it (so they can't resurrect on a later import)."""
     return get_config_dir() / "chats.json"
 
 
@@ -352,13 +354,32 @@ def create_chat() -> dict:
 
 
 def delete_chat(chat_id: str) -> None:
-    """Delete a chat session."""
+    """Delete a chat session.
+
+    Also trims the chat's entry out of the legacy ``chats.json`` seed (if it is
+    still there) so a later legacy re-import — triggered by an index rebuild or
+    an externally rewritten ``chats.json`` — can't silently resurrect it.
+    """
     _ensure_current()
     try:
         _chat_file(chat_id).unlink()
     except OSError:
         pass
     _drop_index_entry(chat_id)
+    _remove_from_legacy(chat_id)
+
+
+def _remove_from_legacy(chat_id: str) -> None:
+    """Drop *chat_id* from the legacy ``chats.json`` seed, if present."""
+    legacy = _safe_json_load(_legacy_path(), expect=list)
+    if not legacy:
+        return
+    filtered = [
+        c for c in legacy
+        if not (isinstance(c, dict) and c.get("id") == chat_id)
+    ]
+    if len(filtered) != len(legacy):
+        _atomic_write(_legacy_path(), filtered)
 
 
 def save_chat(chat: dict) -> None:
