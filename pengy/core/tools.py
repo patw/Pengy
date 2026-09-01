@@ -460,7 +460,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run a command with bash. The command is non-interactive: stdin is closed, so anything that prompts or waits for input (a password prompt, an editor, `read`) will fail rather than wait — pass non-interactive flags instead. Set cwd to run the command in a specific working directory (defaults to the current directory). sudo is supported and prompts the user for their password separately. Commands are killed once the configured tool timeout elapses.",
+            "description": "Run a command with bash. The command is non-interactive: stdin is closed, so anything that prompts or waits for input (a password prompt, an editor, `read`) will fail rather than wait — pass non-interactive flags instead. Set cwd to run the command in a specific working directory (defaults to the current directory). To invoke sudo, set elevated=true; Pengy then prompts for the user's password separately. Do not set elevated merely because the text or arguments mention the word sudo. Commands are killed once the configured tool timeout elapses.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -471,6 +471,10 @@ TOOLS = [
                     "cwd": {
                         "type": "string",
                         "description": "Optional working directory to run the command in",
+                    },
+                    "elevated": {
+                        "type": "boolean",
+                        "description": "Set true only when this command intentionally invokes sudo. Omit or set false for ordinary commands, including commands that merely print, search, or otherwise mention the word sudo.",
                     },
                 },
                 "required": ["command"],
@@ -781,7 +785,10 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
             arguments.get("postconditions", []),
         )
     elif name == "run_bash":
-        return _run_bash(arguments["command"], ctx, arguments.get("cwd"))
+        return _run_bash(
+            arguments["command"], ctx, arguments.get("cwd"),
+            bool(arguments.get("elevated", False)),
+        )
     elif name == "web_search":
         return _web_search(arguments["query"], arguments.get("max_results", 5))
     elif name == "download_file":
@@ -1169,12 +1176,122 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
     return f"Applied changes to {len(prepared)} file(s).\n\n{diff}".rstrip()
 
 
-_SUDO_ANY_RE = re.compile(r'\bsudo\b')
-# `sudo -S` reads the password from stdin, which we no longer feed; drop the
-# flag so the askpass rewrite below applies to it too.
 _SUDO_STDIN_RE = re.compile(r'\bsudo\s+-S\b')
-# Matches a `sudo` word that isn't already carrying an askpass flag.
-_SUDO_RE = re.compile(r'\bsudo\b(?!\s+-A\b)')
+
+
+def _sudo_invocation_spans(command: str) -> list[tuple[int, int]]:
+    """Return source spans for unquoted ``sudo`` command words.
+
+    This deliberately performs a small shell lexical pass rather than searching
+    for the word ``sudo``. It understands quotes, escapes, comments, and the
+    command-list operators that matter here. It is not a shell parser, but it
+    gives this privilege boundary a conservative meaning: a mention such as
+    ``echo sudo``, a comment, or a quoted string is not an invocation and must
+    never cause a password prompt or source rewrite.
+    """
+    words: list[str] = []
+    spans: list[tuple[int, int]] = []
+    heredoc_delimiters: list[str] = []
+    i, n = 0, len(command)
+    separators = ";|&()\n"
+
+    def is_sudo_command(raw: str) -> bool:
+        if raw not in ("sudo", "/usr/bin/sudo", "/bin/sudo"):
+            return False
+        if not words:
+            return True
+        if words[0] == "command":
+            return all(word.startswith("-") for word in words[1:])
+        if words[0] == "env":
+            return all(word.startswith("-") or "=" in word for word in words[1:])
+        return False
+
+    while i < n:
+        # Here-document bodies are data, not shell commands. Skip them before
+        # looking for words so an example containing ``sudo`` stays inert.
+        if heredoc_delimiters and (i == 0 or command[i - 1] == "\n"):
+            delimiter = heredoc_delimiters.pop(0)
+            line_end = command.find("\n", i)
+            line_end = n if line_end < 0 else line_end
+            if command[i:line_end].strip() != delimiter:
+                heredoc_delimiters.insert(0, delimiter)
+            i = line_end + 1 if line_end < n else n
+            words.clear()
+            continue
+        c = command[i]
+        if c.isspace():
+            if c == "\n":
+                words.clear()
+            i += 1
+            continue
+        if c == "#" and (i == 0 or command[i - 1].isspace() or command[i - 1] in separators):
+            newline = command.find("\n", i)
+            i = n if newline < 0 else newline + 1
+            words.clear()
+            continue
+        if command.startswith("&&", i) or command.startswith("||", i) or command.startswith(";;", i):
+            words.clear()
+            i += 2
+            continue
+        if c in separators:
+            words.clear()
+            i += 1
+            continue
+
+        start = i
+        quoted = False
+        while i < n:
+            c = command[i]
+            if c.isspace() or c in separators:
+                break
+            if c == "\\":
+                i += 2
+                continue
+            if c in "'\"":
+                quoted = True
+                quote = c
+                i += 1
+                while i < n and command[i] != quote:
+                    if quote == '"' and command[i] == "\\":
+                        i += 2
+                    else:
+                        i += 1
+                if i < n:
+                    i += 1
+                continue
+            i += 1
+        raw = command[start:i]
+        if raw.startswith("<<") and len(raw) > 2:
+            delimiter = raw[2:]
+            if ((delimiter.startswith("'") and delimiter.endswith("'"))
+                    or (delimiter.startswith('"') and delimiter.endswith('"'))):
+                delimiter = delimiter[1:-1]
+            heredoc_delimiters.append(delimiter)
+        if not quoted and is_sudo_command(raw):
+            spans.append((start, i))
+        words.append(raw)
+    return spans
+
+
+def _rewrite_sudo_for_askpass(command: str, spans: list[tuple[int, int]]) -> str:
+    """Apply ``-A`` only to parsed sudo command words, preserving other text."""
+    pieces: list[str] = []
+    last = 0
+    for start, end in spans:
+        pieces.append(command[last:start])
+        following = re.match(r"\s+-([AS])\b", command[end:])
+        if following and following.group(1) == "A":
+            pieces.append(command[start:end])
+            last = end
+        elif following and following.group(1) == "S":
+            # ``sudo -S`` must be normalised because Pengy does not feed stdin.
+            pieces.append(command[start:end] + " -A")
+            last = end + following.end()
+        else:
+            pieces.append(command[start:end] + " -A")
+            last = end
+    pieces.append(command[last:])
+    return "".join(pieces)
 
 class _AskpassHelper:
     """Temporary ``SUDO_ASKPASS`` helper script.
@@ -1231,7 +1348,8 @@ def _resolve_cwd(cwd: str | None) -> "tuple[str | None, str | None]":
     return str(p), None
 
 
-def _run_bash(command: str, ctx: "ToolContext" = None, cwd: str | None = None) -> str:
+def _run_bash(command: str, ctx: "ToolContext" = None, cwd: str | None = None,
+              elevated: bool = False) -> str:
     """Run a bash command."""
     ctx = ctx or _default_context
     run_cwd, cwd_err = _resolve_cwd(cwd)
@@ -1242,9 +1360,15 @@ def _run_bash(command: str, ctx: "ToolContext" = None, cwd: str | None = None) -
     env = None
     used_sudo = False
     try:
-        if _SUDO_ANY_RE.search(command):
+        sudo_spans = _sudo_invocation_spans(command)
+        if sudo_spans and not elevated:
+            return (
+                "Elevation required: this command invokes sudo. Retry run_bash "
+                "with elevated=true to request sudo access."
+            )
+        if sudo_spans:
             if ctx.sudo_provider is None:
-                return "Error: sudo detected but no password provider is configured."
+                return "Error: sudo requested but no password provider is configured."
             password = ctx.cached_sudo_password
             if password is None:
                 password = ctx.sudo_provider()
@@ -1252,9 +1376,9 @@ def _run_bash(command: str, ctx: "ToolContext" = None, cwd: str | None = None) -
                     return "Cancelled: sudo password not provided."
                 ctx.cached_sudo_password = password
             used_sudo = True
-            # Every sudo in the command gets -A, not just the first one.
-            command = _SUDO_STDIN_RE.sub('sudo', command)
-            command = _SUDO_RE.sub('sudo -A', command)
+            # Only parsed command words get -A — never a mention in data,
+            # documentation, a comment, or a quoted string.
+            command = _rewrite_sudo_for_askpass(command, sudo_spans)
             askpass = _AskpassHelper(password)
             env = os.environ.copy()
             env["SUDO_ASKPASS"] = askpass.path

@@ -367,12 +367,16 @@ class WebWorker:
         self._cancelled = False
         self._yolo_this_turn = False
         self._thread = threading.Thread(target=self._run, daemon=True)
+        # Scope sudo credentials and active processes to this worker; web
+        # sessions must not overwrite one another's provider or cache.
+        self._tool_context = tools.ToolContext(sudo_provider=self._get_sudo_password)
 
     def start(self):
         self._thread.start()
 
     def cancel(self):
         self._cancelled = True
+        self._tool_context.kill_all()
         self._confirm_event.set()
         self._sudo_event.set()
 
@@ -455,7 +459,6 @@ class WebWorker:
         config = self._config
         chat = self._chat
         try:
-            tools.set_sudo_password_provider(self._get_sudo_password)
             tools.set_user_agent(config.get("user_agent", "PengyAgent/1.0"))
             tools.set_tool_timeout(config.get("tool_timeout", 300))
             tools.set_tool_output_max_chars(config.get("tool_output_max_chars", 250000))
@@ -481,6 +484,7 @@ class WebWorker:
                 reasoning_effort=config.get("reasoning_effort", ""),
                 preserve_reasoning=bool(config.get("preserve_reasoning", False)),
                 cancel_fn=lambda: self._cancelled,
+                tool_context=self._tool_context,
             )
             send_value = None
 
@@ -628,7 +632,7 @@ class WebWorker:
             self._put_event({"type": "error", "message": str(e)})
         finally:
             self._done = True
-            tools.set_sudo_password_provider(None)
+            self._tool_context.clear_sudo()
             # Cancel and errors both leave the loop mid-turn, where the last
             # assistant message can hold tool_calls with no result behind them
             # (the API 400s on that next request).  Repair, then persist what

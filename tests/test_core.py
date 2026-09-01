@@ -1542,8 +1542,52 @@ class TestToolContext:
         # A context with no provider must refuse sudo regardless of any global.
         from pengy.core.tools import execute_tool, ToolContext
         ctx = ToolContext(sudo_provider=None)
-        result = execute_tool("run_bash", {"command": "sudo true"}, ctx)
+        result = execute_tool("run_bash", {"command": "sudo true", "elevated": True}, ctx)
         assert "no password provider" in result
+
+    def test_sudo_invocation_requires_explicit_elevation(self):
+        from pengy.core.tools import execute_tool, ToolContext
+        calls = []
+        ctx = ToolContext(sudo_provider=lambda: calls.append(True) or "secret")
+        result = execute_tool("run_bash", {"command": "sudo true"}, ctx)
+        assert "Elevation required" in result
+        assert calls == []
+
+    def test_sudo_mentions_do_not_prompt_or_change_command(self):
+        from pengy.core.tools import execute_tool, ToolContext
+        commands = (
+            "printf '%s\\n' sudo",
+            "echo 'use sudo apt update'",
+            "printf '%s\\n' /tmp/sudo.log",
+            "# sudo should not run\\necho ok",
+            "cat <<'EOF'\\nsudo is documentation\\nEOF",
+        )
+        for command in commands:
+            calls = []
+            ctx = ToolContext(sudo_provider=lambda: calls.append(True) or "secret")
+            result = execute_tool("run_bash", {"command": command}, ctx)
+            assert calls == [], f"false sudo prompt for {command!r}"
+            assert "Elevation required" not in result
+            assert "sudo -A" not in result
+
+    def test_sudo_parser_recognises_command_boundaries_and_wrappers(self):
+        from pengy.core.tools import _sudo_invocation_spans
+        for command in (
+            "sudo true",
+            "echo x | sudo tee /tmp/x",
+            "true && sudo true",
+            "(sudo true)",
+            "command sudo true",
+            "env LANG=C sudo true",
+            "/usr/bin/sudo true",
+        ):
+            assert _sudo_invocation_spans(command), command
+
+    def test_sudo_rewrite_only_changes_invocations(self):
+        from pengy.core.tools import _rewrite_sudo_for_askpass, _sudo_invocation_spans
+        command = "sudo -S true; echo sudo; sudo -A id; cat <<'EOF'\nsudo text\nEOF"
+        rewritten = _rewrite_sudo_for_askpass(command, _sudo_invocation_spans(command))
+        assert rewritten == "sudo -A true; echo sudo; sudo -A id; cat <<'EOF'\nsudo text\nEOF"
 
     def test_sudo_uses_askpass_not_stdin(self, tmp_path):
         """sudo must authenticate via SUDO_ASKPASS so the shell's stdin stays free.
@@ -1580,7 +1624,7 @@ class TestToolContext:
                 "sudo echo hi < /dev/null",                  # stdin redirected
                 "sudo -S echo hi",                           # -S normalised to -A
             ):
-                result = execute_tool("run_bash", {"command": command}, ctx)
+                result = execute_tool("run_bash", {"command": command, "elevated": True}, ctx)
                 assert "pw=s3cret" in result, f"{command!r} -> {result!r}"
                 assert "no tty present" not in result, f"{command!r} -> {result!r}"
                 assert "LEAK:" not in result, f"sudo password leaked into env: {command!r} -> {result!r}"

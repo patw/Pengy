@@ -98,7 +98,10 @@ def _setup_readline() -> Path | None:
 
     try:
         readline.read_history_file(str(hist_file))
-    except (FileNotFoundError, PermissionError):
+    except (FileNotFoundError, PermissionError, FileExistsError):
+        # macOS libedit can report EEXIST while loading a concurrently
+        # initialized history file; an empty/current in-memory history is
+        # still valid and setup must remain idempotent.
         pass
     readline.set_history_length(1000)
 
