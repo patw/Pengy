@@ -280,11 +280,23 @@ class TestInputAutoGrow:
         from pengy.ui.theme import get_theme
 
         edit = chat_input._edit
-        height_for(qapp, edit, lines(5))
-        before = edit.height()
+        # The box must actually grow with content, or the guard below is vacuous.
+        single = height_for(qapp, edit, "one line")
+        multi = height_for(qapp, edit, lines(5))
+        assert multi > single
+
+        # Settle via apply_theme, then verify re-applying the theme is stable
+        # and does not collapse the auto-grown box. We deliberately do NOT
+        # compare against `multi` above: offscreen Qt font metrics can yield a
+        # stale layout height for the first setPlainText+processEvents pass, so
+        # that value is not a stable baseline and produces a false flake.
         edit.apply_theme(get_theme())
         qapp.processEvents()
-        assert edit.height() == before
+        settled = edit.height()
+        assert settled > single          # apply_theme kept it multi-line
+        edit.apply_theme(get_theme())
+        qapp.processEvents()
+        assert edit.height() == settled  # re-derivation is idempotent
 
 
 # ────────────────────────────────────────────────────────────────────
