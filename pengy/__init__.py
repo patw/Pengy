@@ -7,4 +7,4 @@
 # left behind by an earlier "pip install -e .", so we always prefer the
 # hardcoded source version.
 
-__version__ = "1.7.3"
+__version__ = "1.8.0"

@@ -1,4 +1,6 @@
 """Configuration management for Pengy."""
+from __future__ import annotations
+
 import getpass
 import json
 import os
@@ -65,6 +67,7 @@ DEFAULTS = {
     "image_max_dimension": 4096,   # px — Anthropic limit is 8000, 4096 is safe
     "image_max_mb": 4.5,            # MB — Anthropic limit is 5
     "image_quality": 85,             # JPEG quality 0–100
+    "attachment_context_keep_turns": 4, # recent user turns whose media is sent again
 }
 
 

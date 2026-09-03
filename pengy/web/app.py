@@ -8,6 +8,9 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import base64
+import io
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +26,7 @@ from pengy.core.chat_manager import (
     clean_dangling_tool_calls, elide_old_tool_results, redact_last_message, add_usage,
 )
 from pengy.core.image_utils import preprocess as preprocess_image
+from pengy.core.attachments import derivative_path, import_image_bytes, resolve_history, attachment_label
 from pengy.core import tools
 from pengy.core import task_manager
 
@@ -273,7 +277,7 @@ def _build_messages(chat: dict, config: dict) -> list[dict]:
         messages.append({"role": "system", "content": render_system_message(system_msg)})
     raw = clean_dangling_tool_calls(list(chat.get("messages", [])))
     raw = elide_old_tool_results(raw, config.get("context_keep_turns", 0))
-    messages.extend(raw)
+    messages.extend(resolve_history(raw, attachment_keep_turns=int(config.get("attachment_context_keep_turns", 4) or 0), max_dimension=config.get("image_max_dimension", 4096), max_mb=config.get("image_max_mb", 4.5), quality=config.get("image_quality", 85)))
     return messages
 
 
@@ -710,6 +714,7 @@ def chat_send(chat_id: str):
     attached_files = data.get("files") or []
     text_blocks = []
     image_parts = []
+    attachment_refs = []
 
     if attached_files:
         import base64
@@ -730,28 +735,13 @@ def chat_send(chat_id: str):
             )
 
             if is_image:
-                # Write to temp file for preprocessing
-                suffix = Path(fname).suffix or ".png"
-                fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="pengy_web_")
-                os.close(fd)
                 try:
-                    Path(tmp_path).write_bytes(fdata)
-                    img_bytes, img_mime = preprocess_image(
-                        Path(tmp_path),
-                        max_dimension=max_dim, max_mb=max_mb, quality=quality,
-                    )
-                    b64 = base64.b64encode(img_bytes).decode()
-                    image_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{img_mime};base64,{b64}"},
-                    })
+                    ref = import_image_bytes(fdata, fname, max_dimension=max_dim, max_mb=max_mb, quality=quality)
+                    attachment_refs.append(ref)
+                    resolved = resolve_history([{"role": "user", "content": "", "attachments": [ref]}], attachment_keep_turns=1, max_dimension=max_dim, max_mb=max_mb, quality=quality)[0].get("content", [])
+                    image_parts.extend(p for p in resolved if isinstance(p, dict) and p.get("type") == "image_url")
                 except Exception:
                     pass
-                finally:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
             else:
                 try:
                     fcontent = fdata.decode("utf-8", errors="replace")
@@ -800,7 +790,7 @@ def chat_send(chat_id: str):
         existing.cancel()
 
     # Store the display version in chat history (no base64 bloat)
-    chat["messages"].append({"role": "user", "content": display_content})
+    chat["messages"].append({"role": "user", "content": display_content, **({"attachments": attachment_refs} if attachment_refs else {})})
     if chat.get("title") == "New Chat":
         chat["title"] = display_content[:50] + ("…" if len(display_content) > 50 else "")
     save_chat(chat)
@@ -808,15 +798,8 @@ def chat_send(chat_id: str):
     # The worker will build the proper API message from chat history
     # Build the real API messages (with actual image data) for the worker
     api_messages = None
-    if image_parts:
+    if attachment_refs:
         api_messages = _build_messages(chat, config)
-        # Replace the last user message with the multimodal version
-        # The last message in api_messages should be the user message
-        # Find and replace it
-        for i in range(len(api_messages) - 1, -1, -1):
-            if api_messages[i].get("role") == "user":
-                api_messages[i]["content"] = user_content  # multimodal array
-                break
 
     worker = WebWorker(chat, config, messages_override=api_messages)
     with _workers_lock:
@@ -955,6 +938,20 @@ def chat_delete(chat_id: str):
 
 
 # ─── File serving for local images ────────────────────────────────────────────
+@app.route("/attachments/<digest>/<derivative>")
+def serve_attachment(digest: str, derivative: str):
+    if not re.fullmatch(r"[0-9a-f]{64}", digest) or derivative not in ("thumbnail", "display"):
+        return jsonify({"error": "Invalid attachment"}), 400
+    name = "thumbnail-256-v1.jpg" if derivative == "thumbnail" else "image-display-v1.jpg"
+    path = derivative_path("sha256:" + digest, name)
+    if not path.is_file():
+        return jsonify({"error": "Attachment not found"}), 404
+    response = send_file(str(path), mimetype="image/jpeg", max_age=0)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
 
 @app.route("/files")
 def serve_file():
@@ -1001,70 +998,120 @@ def serve_file():
 
 @app.route("/chat/<chat_id>/export")
 def chat_export(chat_id: str):
+    """Export the current chat as Markdown."""
     chat = get_chat(chat_id)
     if not chat:
         return jsonify({"error": "Chat not found"}), 404
 
-    msgs = chat.get("messages", [])
-    lines = []
-    lines.append(f"# {chat.get('title', 'Chat')}")
-    lines.append(f"*Exported {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
-    lines.append("")
-
-    for msg in msgs:
+    lines = [
+        f"# {chat.get('title', 'Chat')}",
+        f"*Exported {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
+        "",
+    ]
+    for msg in chat.get("messages", []):
         role = msg.get("role", "?")
         content = msg.get("content", "")
         if isinstance(content, list):
-            parts = []
-            for p in content:
-                if isinstance(p, dict) and p.get("type") == "text":
-                    parts.append(p.get("text", ""))
-                elif isinstance(p, dict) and p.get("type") == "image_url":
-                    parts.append("[image]")
-            content = " ".join(parts)
-        content = str(content) if content else ""
-
+            content = " ".join(
+                str(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
         if role == "user":
-            lines.append("### 🧑 You")
-            lines.append(content)
-            lines.append("")
+            lines.extend(["### 🧑 You"])
+            lines.extend(
+                attachment_label(ref)
+                for ref in msg.get("attachments", [])
+                if isinstance(ref, dict)
+            )
+            lines.extend([str(content or ""), ""])
         elif role == "assistant":
-            tool_calls = msg.get("tool_calls")
+            tool_calls = msg.get("tool_calls") or []
             if tool_calls:
-                lines.append("### 🤖 Assistant (tool calls)")
-                for tc in tool_calls:
-                    fn = tc.get("function", {})
-                    lines.append(f"- **{fn.get('name', '?')}**")
-                    try:
-                        args_json = json.loads(fn.get("arguments", "{}"))
-                        lines.append(f"  ```json\n  {json.dumps(args_json, indent=2)}\n  ```")
-                    except Exception:
-                        lines.append(f"  `{fn.get('arguments', '')}`")
+                lines.extend(["### 🤖 Assistant (tool calls)"])
+                for tool_call in tool_calls:
+                    function = tool_call.get("function", {})
+                    lines.append(f"- **{function.get('name', '?')}**")
                 lines.append("")
             if content:
-                lines.append("### 🤖 Assistant")
-                lines.append(content)
-                lines.append("")
+                lines.extend(["### 🤖 Assistant", str(content), ""])
         elif role == "tool":
-            tc_id = msg.get("tool_call_id", "?")
-            lines.append(f"#### 🔧 Tool result (`{tc_id}`)")
-            lines.append("```")
-            lines.append(content)
-            lines.append("```")
-            lines.append("")
-        elif role == "system":
-            lines.append(f"*System: {content[:200]}*")
-            lines.append("")
+            lines.extend([
+                f"#### 🔧 Tool result (`{msg.get('tool_call_id', '?')}`)",
+                "```", str(content or ""), "```", "",
+            ])
 
-    safe_title = re.sub(r'[^a-zA-Z0-9 _-]', '', chat.get("title", "chat"))
-    safe_title = safe_title.strip()[:50] or "chat"
-    filename = f"{safe_title}.md"
-
+    safe_title = re.sub(
+        r"[^a-zA-Z0-9 _-]", "", chat.get("title", "chat")
+    ).strip()[:50] or "chat"
     return Response(
         "\n".join(lines),
         mimetype="text/markdown",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{safe_title}.md"'},
     )
+
+
+@app.route("/chat/<chat_id>/export/<fmt>")
+def chat_export_bundle(chat_id: str, fmt: str):
+    """Export a chat as self-contained HTML or ZIP without external paths."""
+    chat = get_chat(chat_id)
+    if not chat:
+        return jsonify({"error": "Chat not found"}), 404
+    if fmt not in {"html", "zip"}:
+        return jsonify({"error": "format must be html or zip"}), 400
+    title = chat.get("title", "Chat")
+    safe = re.sub(r"[^a-zA-Z0-9 _-]", "", title).strip()[:50] or "chat"
+    assets: dict[str, bytes] = {}
+    rendered = []
+    for msg in chat.get("messages", []):
+        role, content = msg.get("role", "?"), msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        images = []
+        if role == "user":
+            for ref in msg.get("attachments", []) or []:
+                if not isinstance(ref, dict) or ref.get("kind") != "image":
+                    continue
+                try:
+                    data = derivative_path(
+                        str(ref["id"]), "image-display-v1.jpg"
+                    ).read_bytes()
+                    name = f"assets/image-{len(assets) + 1}.jpg"
+                    assets[name] = data
+                    src = "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+                    images.append(
+                        f"<p><img src='{__import__('html').escape(src, quote=True)}' "
+                        f"alt='{__import__('html').escape(str(ref.get('name', 'Image')), quote=True)}'></p>"
+                    )
+                except (OSError, ValueError, KeyError):
+                    images.append(
+                        f"<p>[Attachment unavailable: "
+                        f"{__import__('html').escape(str(ref.get('name', 'Image')))}]</p>"
+                    )
+        rendered.append(
+            f"<section><h3>{__import__('html').escape(role.title())}</h3>"
+            f"{''.join(images)}<pre>{__import__('html').escape(str(content or ''))}</pre></section>"
+        )
+    html = (
+        "<!doctype html><meta charset='utf-8'><title>"
+        + __import__('html').escape(title)
+        + "</title><style>body{font:16px system-ui;max-width:900px;margin:2rem auto}"
+        "section{border-bottom:1px solid #ddd;padding:1rem}pre{white-space:pre-wrap}"
+        "img{max-width:100%;max-height:600px}</style><h1>"
+        + __import__('html').escape(title) + "</h1>" + "".join(rendered)
+    )
+    if fmt == "html":
+        return Response(html, mimetype="text/html", headers={"Content-Disposition": f'attachment; filename="{safe}.html"'})
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("index.html", html)
+        for name, data in assets.items():
+            archive.writestr(name, data)
+    return Response(mem.getvalue(), mimetype="application/zip", headers={"Content-Disposition": f'attachment; filename="{safe}.zip"'})
 
 
 # ─── NEW: Rename ──────────────────────────────────────────────────────────────

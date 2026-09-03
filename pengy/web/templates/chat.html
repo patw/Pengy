@@ -65,7 +65,10 @@
 
   {% if turn.type == "user" %}
   <div class="msg-user">
-    <div class="bubble-user">{{ turn.content }}</div>
+    <div class="bubble-user">
+      {% if turn.attachments %}<div class="attachment-grid">{% for attachment in turn.attachments %}{% if attachment.kind == 'image' and attachment.id.startswith('sha256:') %}<img class="attachment-thumb" src="/attachments/{{ attachment.id[7:] }}/thumbnail" alt="{{ attachment.name }}" loading="lazy">{% else %}<div class="attachment-unavailable">Attachment unavailable: {{ attachment.name }}</div>{% endif %}{% endfor %}</div>{% endif %}
+      {{ turn.content }}
+    </div>
   </div>
 
   {% elif turn.type == "assistant" %}

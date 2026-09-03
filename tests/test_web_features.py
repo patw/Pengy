@@ -114,6 +114,17 @@ class TestExport:
         assert "/" not in cd.split("filename=")[1]
         assert "<" not in cd
 
+    def test_markdown_html_and_zip_exports(self, client):
+        chat = make_chat([{ "role": "user", "content": "hello" }])
+        markdown = client.get(f"/chat/{chat['id']}/export")
+        html = client.get(f"/chat/{chat['id']}/export/html")
+        bundle = client.get(f"/chat/{chat['id']}/export/zip")
+        assert markdown.status_code == 200
+        assert html.status_code == 200
+        assert html.mimetype == "text/html"
+        assert bundle.status_code == 200
+        assert bundle.mimetype == "application/zip"
+
 
 # ── Rename ─────────────────────────────────────────────────────────────────────
 

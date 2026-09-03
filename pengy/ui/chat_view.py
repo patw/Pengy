@@ -43,6 +43,9 @@ th {{
     font-weight: bold;
 }}
 img {{ max-width: 600px; }}
+.attachment-gallery {{ display:flex; flex-wrap:wrap; gap:6px; margin:4px 0; }}
+.attachment-card {{ width:96px; height:96px; object-fit:cover; border-radius:6px; }}
+.attachment-unavailable {{ color:{theme['muted']}; font-size:0.85em; padding:6px; border:1px dashed {theme['border']}; }}
 .role-user {{ color:{theme['user_label']}; font-weight:bold; font-size:0.9em; margin:8px 0 2px 0; }}
 .role-assistant {{ color:{theme['assistant_label']}; font-weight:bold; font-size:0.9em; margin:8px 0 2px 0; }}
 .tool-card {{ border:1px solid {theme['border_soft']}; padding:4px 8px; margin:6px 0; background-color:{theme['tool_bg']}; }}
@@ -249,7 +252,11 @@ class ChatView(QTextBrowser):
 
     def append_message(self, role: str, content, *, reasoning_content: str = None, render: bool = True):
         if role == "user":
-            self._messages.append({"role": "user", "content": content})
+            attachments = []
+            if isinstance(content, dict):
+                attachments = content.get("attachments") or []
+                content = content.get("content", "")
+            self._messages.append({"role": "user", "content": content, "attachments": attachments})
             self._html_cache.append(None)
         elif role == "assistant":
             if content:
@@ -367,10 +374,28 @@ class ChatView(QTextBrowser):
     def _render_msg(self, msg: dict, idx: int = 0) -> str:
         role = msg["role"]
         if role == "user":
-            body = self._escape_html(msg["content"]).replace("\n", "<br>")
+            body = self._escape_html(str(msg.get("content", ""))).replace("\n", "<br>")
+            cards = []
+            for ref in msg.get("attachments", []) or []:
+                if not isinstance(ref, dict):
+                    continue
+                aid = str(ref.get("id", ""))
+                if ref.get("kind") == "image" and aid.startswith("sha256:"):
+                    from pengy.core.attachments import derivative_path
+                    try:
+                        thumb = derivative_path(aid, "thumbnail-256-v1.jpg")
+                        if thumb.is_file():
+                            cards.append(f'<a href="{QUrl.fromLocalFile(str(thumb)).toString()}" title="{self._escape_html(str(ref.get("name", "Image")))}"><img class="attachment-card" src="{QUrl.fromLocalFile(str(thumb)).toString()}" alt="{self._escape_html(str(ref.get("name", "Image")))}"></a>')
+                        else:
+                            cards.append(f'<span class="attachment-unavailable">Attachment unavailable: {self._escape_html(str(ref.get("name", "Image")))}</span>')
+                    except Exception:
+                        cards.append('<span class="attachment-unavailable">Attachment unavailable</span>')
+                else:
+                    cards.append(f'<span class="attachment-unavailable">Unsupported attachment: {self._escape_html(str(ref.get("name", "Attachment")))}</span>')
+            gallery = f'<div class="attachment-gallery">{"".join(cards)}</div>' if cards else ""
             return (
                 '<p class="role-user">You &#x1F9D1;</p>'
-                f'<p style="margin:2px 0 10px 0;">{body}</p>'
+                f'{gallery}<p style="margin:2px 0 10px 0;">{body}</p>'
             )
         if role == "assistant":
             parts = []

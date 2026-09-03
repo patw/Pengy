@@ -19,7 +19,7 @@ from pengy.core.chat_manager import (
     add_usage,
 )
 from pengy.core.llm_client import LLMClient
-from pengy.core.image_utils import preprocess as preprocess_image
+from pengy.core.attachments import attachment_label, import_image, resolve_history
 from pengy.core import tools
 from pengy.ui.chat_history import ChatHistoryWidget
 from pengy.ui.chat_view import ChatView
@@ -498,7 +498,9 @@ class MainWindow(QMainWindow):
         """Render a single message into a ChatView (used when loading a tab)."""
         role = msg.get("role")
         if role == "user":
-            chat_view.append_message("user", msg.get("content", ""), render=False)
+            labels = "\n".join(attachment_label(ref) for ref in msg.get("attachments", []) if isinstance(ref, dict))
+            content = msg.get("content", "")
+            chat_view.append_message("user", {"content": content, "attachments": msg.get("attachments", [])}, render=False)
         elif role == "assistant":
             # Narration comes first: the model wrote it *before* deciding on the
             # tool calls in the same message, and that is the order the live
@@ -543,47 +545,34 @@ class MainWindow(QMainWindow):
 
         session.yolo_this_turn = False
 
-        placeholder_parts = [f"[Image: {img.name}]" for img in images]
-        if text:
-            placeholder_parts.append(text)
-        display_content = "\n".join(placeholder_parts)
-
-        user_msg = {"role": "user", "content": display_content}
+        refs = []
+        for image_path in images:
+            try:
+                refs.append(import_image(image_path, image_path.name,
+                    max_dimension=self.config.get("image_max_dimension", 4096),
+                    max_mb=self.config.get("image_max_mb", 4.5),
+                    quality=self.config.get("image_quality", 85)))
+            except Exception as exc:
+                QMessageBox.warning(self, "Image unavailable", f"Could not import {image_path.name}: {exc}")
+        user_msg = {"role": "user", "content": text, **({"attachments": refs} if refs else {})}
         session.chat["messages"].append(user_msg)
-        session.chat_view.append_message("user", display_content)
+        display_content = "\n".join([*(attachment_label(ref) for ref in refs), text]).strip()
+        session.chat_view.append_message("user", {"content": text, "attachments": refs})
+        # Persist before request construction: pasted/temp images are now durable.
+        save_chat(session.chat)
 
         # Build message history
         messages = []
         system_msg = self.config.get("system_message", "")
         if system_msg:
             messages.append({"role": "system", "content": render_system_message(system_msg)})
-        prior = list(session.chat["messages"][:-1])
-        prior = clean_dangling_tool_calls(prior)
-        prior = elide_old_tool_results(prior, self.config.get("context_keep_turns", 0))
-        messages.extend(prior)
-
-        if images:
-            content_parts = []
-            max_dim = self.config.get("image_max_dimension", 4096)
-            max_mb = self.config.get("image_max_mb", 4.5)
-            quality = self.config.get("image_quality", 85)
-            for img_path in images:
-                try:
-                    img_bytes, mime = preprocess_image(
-                        img_path, max_dimension=max_dim, max_mb=max_mb, quality=quality
-                    )
-                    b64 = base64.b64encode(img_bytes).decode()
-                    content_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{b64}"},
-                    })
-                except Exception:
-                    pass
-            if text:
-                content_parts.append({"type": "text", "text": text})
-            messages.append({"role": "user", "content": content_parts})
-        else:
-            messages.append({"role": "user", "content": display_content})
+        raw = clean_dangling_tool_calls(list(session.chat["messages"]))
+        raw = elide_old_tool_results(raw, self.config.get("context_keep_turns", 0))
+        messages.extend(resolve_history(raw,
+            attachment_keep_turns=self.config.get("attachment_context_keep_turns", 4),
+            max_dimension=self.config.get("image_max_dimension", 4096),
+            max_mb=self.config.get("image_max_mb", 4.5),
+            quality=self.config.get("image_quality", 85)))
 
         # Update chat title from first message
         if session.chat["title"] == "New Chat":

@@ -26,6 +26,7 @@ from pengy.core.chat_manager import (
 )
 from pengy.core import task_manager
 from pengy.core.image_utils import preprocess as preprocess_image
+from pengy.core.attachments import attachment_label, import_image, resolve_history
 from pengy.core import tools
 
 # ── readline history + completion (Unix only, graceful fallback) ──
@@ -38,7 +39,7 @@ SLASH_COMMANDS = (
     "/help", "/new", "/show", "/tail", "/rename", "/clear", "/export",
     "/yolo", "/config", "/model", "/models", "/list", "/load", "/baseurl",
     "/apikey", "/llm-timeout", "/timeout", "/download-max", "/agent", "/context-keep",
-    "/system", "/delete", "/attach", "/compact", "/redact",
+    "/system", "/delete", "/attach", "/attachments", "/compact", "/redact",
     "/tasks", "/task", "/quit", "/exit", "/q",
 )
 
@@ -337,7 +338,8 @@ class PengyCLI:
             else:
                 chat = create_chat()
                 chat["title"] = _truncate(display_content, 50)
-                chat["messages"].append({"role": "user", "content": display_content})
+                refs = [import_image(p, p.name, max_dimension=self.config.get("image_max_dimension", 4096), max_mb=self.config.get("image_max_mb", 4.5), quality=self.config.get("image_quality", 85)) for p in image_paths]
+                chat["messages"].append({"role": "user", "content": prompt_text, **({"attachments": refs} if refs else {})})
                 save_chat(chat)
 
             messages = self._build_messages(chat, prompt_text,
@@ -400,7 +402,14 @@ class PengyCLI:
         """
         if not display_content or not self.current_chat:
             return
-        self.current_chat["messages"].append({"role": "user", "content": display_content})
+        refs = []
+        if image_paths:
+            for path in image_paths:
+                try:
+                    refs.append(import_image(path, path.name, max_dimension=self.config.get("image_max_dimension", 4096), max_mb=self.config.get("image_max_mb", 4.5), quality=self.config.get("image_quality", 85)))
+                except Exception as exc:
+                    self.console.print(f"[yellow]Warning: could not import {path.name}: {exc}[/yellow]")
+        self.current_chat["messages"].append({"role": "user", "content": display_content, **({"attachments": refs} if refs else {})})
         if self.current_chat["title"] == "New Chat":
             self.current_chat["title"] = _truncate(display_content, 50)
 
@@ -488,6 +497,9 @@ class PengyCLI:
         elif cmd == "/delete":
             self._cmd_delete(args)
 
+        elif cmd == "/attachments":
+            self._cmd_attachments()
+
         elif cmd == "/attach":
             self._cmd_attach(args)
 
@@ -539,6 +551,7 @@ class PengyCLI:
         table.add_row("/load <index>", "Load a chat by its /list index")
         table.add_row("/delete <index>", "Delete a chat by its /list index")
         table.add_row("/attach", "Show file attachment help")
+        table.add_row("/attachments", "Show durable attachment storage usage (read-only)")
         table.add_row("/quit, /exit", "Exit Pengy CLI")
 
         self.console.print(table)
@@ -671,6 +684,9 @@ class PengyCLI:
 
             if role == "user":
                 lines.append(f"### 🧑 You")
+                for ref in msg.get("attachments", []) or []:
+                    if isinstance(ref, dict):
+                        lines.append(attachment_label(ref))
                 lines.append(content)
                 lines.append("")
             elif role == "assistant":
@@ -1071,6 +1087,13 @@ class PengyCLI:
             border_style="dim",
         ))
 
+    def _cmd_attachments(self):
+        """Show durable attachment storage usage; never deletes objects."""
+        from pengy.core.chat_manager import load_index, get_chat
+        from pengy.core.attachments import storage_report
+        report = storage_report([get_chat(item["id"]) for item in load_index() if get_chat(item["id"])])
+        self.console.print_json(data=report)
+
     def _cmd_attach(self, args: list[str]):
         """Show how to use attachment; the @path syntax is demonstrated."""
         self.console.print(
@@ -1268,7 +1291,7 @@ class PengyCLI:
         raw = list(chat.get("messages", []))
         raw = clean_dangling_tool_calls(raw)
         raw = elide_old_tool_results(raw, config.get("context_keep_turns", 0))
-        messages.extend(raw)
+        messages.extend(resolve_history(raw, attachment_keep_turns=int(config.get("attachment_context_keep_turns", 4) or 0), max_dimension=config.get("image_max_dimension", 4096), max_mb=config.get("image_max_mb", 4.5), quality=config.get("image_quality", 85)))
 
         # If the last message is a user message with image attachments,
         # replace its content with the multimodal array.

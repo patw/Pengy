@@ -142,6 +142,8 @@ def _preview_of(chat: dict) -> str:
                  if isinstance(p, dict) and p.get("type") == "text"),
                 "",
             )
+        if not content and m.get("attachments"):
+            return "[Image]" if any(isinstance(a, dict) and a.get("kind") == "image" for a in m["attachments"]) else "[Attachment]"
         return str(content)[:_PREVIEW_CHARS]
     return ""
 
