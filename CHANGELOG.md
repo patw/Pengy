@@ -1,14 +1,51 @@
 # Changelog
 
-## v1.8.0 (current)
+## v1.8.1
 
-- Attachment storage and rendering support across the CLI, desktop GUI, and web UI.
-- Provider message handling improvements and expanded attachment tests.
+- **CLI: escape rich markup and sanitize ANSI/control in tool & error display.**
+  Untrusted tool/compiler output was interpolated directly into rich markup, so a
+  bracketed path (e.g. `tests/test_mediainfo.cpp(125)`) raised a `MarkupError`
+  and stripped `[bracketed]` text from tool-result Panels. The error handler now
+  escapes `{exc}`, the tool-request panel escapes the name/args, and tool output
+  is rendered as literal `Text`. A new `_sanitize_display()` strips ANSI escape
+  sequences (CSI/OSC/DCS/single-byte) and non-`\n`/`\t` C0/DEL control chars
+  from what's shown on the tty, so injected terminal control sequences can't move
+  the cursor or clear the screen — raw bytes sent to the model are unchanged, and
+  emoji/wide glyphs pass through untouched. Covered by
+  `tests/test_cli.py::TestMarkupSafety`.
 
-## v1.7.3 (current)
+## v1.8.0
+
+- **Durable, content-addressed attachment storage** (attachment schema v1):
+  chat JSON now stores small `sha256:` references; validated source bytes and
+  bounded image derivatives live under `<config>/attachments/objects|derivatives`,
+  written atomically and never stored as base64/data URLs.
+- **Attachment rendering across the CLI, desktop GUI, and web UI.** CLI shows
+  `[image: …]`/`[attachment: …]` labels and a read-only `/attachments` storage
+  report; GUI and web render image thumbnails from a new
+  `/attachments/<digest>/<derivative>` route, with an "attachment unavailable"
+  placeholder for missing or unknown kinds.
+- **Provider message handling improvements.** Provider data URLs are derived
+  transiently only during request assembly, and only for the most recent
+  `attachment_context_keep_turns` user turns (new config option, default 4).
+  Legacy `[Image: filename]` strings remain plain text and are never inferred as
+  attachment records.
+- **Web chat export** now supports self-contained HTML and ZIP bundles
+  (`/chat/<id>/export/html`, `/export/zip`) in addition to Markdown; both embed
+  attachment images instead of referencing external paths.
+- **Expanded attachment tests** (storage layout, missing/unknown kinds, legacy
+  placeholders, markdown/html/zip exports).
+
+## v1.7.3
 
 - **Safer sudo handling.** `run_bash` now requires explicit `elevated=true` before invoking sudo, ignores sudo mentions in quotes/comments/data, and scopes cached sudo credentials to each web worker. Rust and C++ editions flush tool output before the hidden-password prompt for reliable terminal ordering.
+- **Sudo password no longer sits in the child environment.** The `SUDO_ASKPASS` helper no longer receives the password through the environment; it's written to a private `0600` file that only the `0700` askpass script reads, so grandchildren / `printenv` can't observe it. Single-use and cleaned up on exit.
+- **Binary guard for file/URL tool reads.** `read_file`, `read_multiple_files`, and `fetch_url` now reject content that decodes as UTF-8 but is actually binary (e.g. UTF-16 NUL-interleaved text) that would flood context, on top of the v1.7.2 command-output guard.
+- **The LLM "retrying" (429/529) backoff event is now surfaced.** The CLI, Qt GUI, and web UI show it instead of hanging silently.
+- **Delete-chat hygiene.** Deleting a chat now also trims it out of the legacy `chats.json` seed, so a later legacy re-import can't silently resurrect it.
+- Tests added/updated for all of the above (including the resolve-attachments missing-path warning).
 
+## v1.7.2
 
 - **Binary output guard.** `_snip_tool_output()` — the shared truncation point
   for `run_bash`, `run_python`, `directory_tree`, `search_content`, and
