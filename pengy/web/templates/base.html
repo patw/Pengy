@@ -363,7 +363,7 @@
       <div class="chat-list px-2 pb-2">
         {% block sidebar_chats %}{% endblock %}
       </div>
-      <div class="mt-auto border-top p-2">
+      <div class="mt-auto border-top p-2 d-md-none">
         <a href="{{ url_for('settings_view') }}" class="btn btn-outline-secondary w-100"
            onclick="dismissSidebar(event)">
           <i class="bi bi-gear me-1"></i> Settings

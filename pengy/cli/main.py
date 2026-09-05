@@ -25,6 +25,10 @@ from pengy.core.chat_manager import (
     add_usage,
 )
 from pengy.core import task_manager
+from pengy.core.about import (
+    CATBEE_BLURB, CATBEE_URL, DESCRIPTION, GITHUB_URL, LICENSE_NAME, LICENSE_URL,
+    WEBSITE_URL, copyright_line, edition_line,
+)
 from pengy.core.image_utils import preprocess as preprocess_image
 from pengy.core.attachments import attachment_label, import_image, resolve_history
 from pengy.core import tools
@@ -60,7 +64,7 @@ SLASH_COMMANDS = (
     "/yolo", "/config", "/model", "/models", "/list", "/load", "/baseurl",
     "/apikey", "/llm-timeout", "/timeout", "/download-max", "/agent", "/context-keep",
     "/system", "/delete", "/attach", "/attachments", "/compact", "/redact",
-    "/tasks", "/task", "/quit", "/exit", "/q",
+    "/tasks", "/task", "/about", "/quit", "/exit", "/q",
 )
 
 # Sub-arguments worth completing once the command is typed.
@@ -536,6 +540,9 @@ class PengyCLI:
         elif cmd == "/task":
             self._cmd_task(args)
 
+        elif cmd == "/about":
+            self._cmd_about()
+
         else:
             self.console.print(f"[red]Unknown command:[/red] {cmd}  (try /help)")
 
@@ -573,6 +580,7 @@ class PengyCLI:
         table.add_row("/delete <index>", "Delete a chat by its /list index")
         table.add_row("/attach", "Show file attachment help")
         table.add_row("/attachments", "Show durable attachment storage usage (read-only)")
+        table.add_row("/about", "Show version, repo link, and license info")
         table.add_row("/quit, /exit", "Exit Pengy CLI")
 
         self.console.print(table)
@@ -780,6 +788,18 @@ class PengyCLI:
         table.add_row("User Agent", self.config.get("user_agent", "—"))
 
         self.console.print(table)
+
+    def _cmd_about(self):
+        self.console.print(f"[bold]{edition_line('Python')}[/bold]")
+        self.console.print(f"[link={GITHUB_URL}]{GITHUB_URL}[/link]")
+        self.console.print(f"[link={WEBSITE_URL}]{WEBSITE_URL}[/link]")
+        self.console.print()
+        self.console.print(DESCRIPTION)
+        self.console.print()
+        self.console.print(f"{CATBEE_BLURB} [link={CATBEE_URL}]{CATBEE_URL}[/link]")
+        self.console.print()
+        self.console.print(copyright_line())
+        self.console.print(f"[link={LICENSE_URL}]{LICENSE_NAME}[/link]")
 
     def _cmd_model(self, args: list[str]):
         if not args:

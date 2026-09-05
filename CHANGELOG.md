@@ -13,6 +13,10 @@
   the cursor or clear the screen — raw bytes sent to the model are unchanged, and
   emoji/wide glyphs pass through untouched. Covered by
   `tests/test_cli.py::TestMarkupSafety`.
+- **About window & page.** A new `About` tab in the desktop Settings dialog and an
+  `/about` web page — backed by a shared `pengy/core/about.py` — show the edition
+  name + version, a short description, the project repo/website/license links, and
+  a Catbee attribution, consistent across the CLI, GUI, and web.
 
 ## v1.8.0
 

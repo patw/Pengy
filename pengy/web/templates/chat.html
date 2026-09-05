@@ -20,16 +20,35 @@
       {% if not chat.usage or not chat.usage.total_tokens %}hidden{% endif %}>
   {{ '{:,}'.format(chat.usage.total_tokens) if chat.usage else 0 }} tokens
 </span>
-<button class="btn btn-outline-secondary btn-sm ms-1" onclick="openTasks()" title="Run a saved prompt template">
-  <i class="bi bi-list-task"></i>
-</button>
-<button class="btn btn-outline-secondary btn-sm ms-1" onclick="exportChat()" title="Export chat as Markdown">
-  <i class="bi bi-download"></i>
-</button>
-<button class="btn btn-outline-secondary btn-sm ms-1" onclick="redactLast()"
-        title="Redact last message — delete the last message from context (repeatable)">
-  <i class="bi bi-eraser"></i>
-</button>
+<!-- Desktop: three separate action buttons -->
+<div class="d-none d-md-flex align-items-center gap-1">
+  <button class="btn btn-outline-secondary btn-sm" onclick="openTasks()" title="Run a saved prompt template">
+    <i class="bi bi-list-task"></i>
+  </button>
+  <button class="btn btn-outline-secondary btn-sm" onclick="exportChat()" title="Export chat as Markdown">
+    <i class="bi bi-download"></i>
+  </button>
+  <button class="btn btn-outline-secondary btn-sm" onclick="redactLast()"
+          title="Redact last message — delete the last message from context (repeatable)">
+    <i class="bi bi-eraser"></i>
+  </button>
+</div>
+<!-- Mobile: collapse the same three actions into one dropdown so the navbar doesn't
+     get crowded with icon buttons on narrow screens. -->
+<div class="dropdown d-md-none">
+  <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button"
+          data-bs-toggle="dropdown" aria-expanded="false" title="More actions">
+    <i class="bi bi-three-dots-vertical"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><a class="dropdown-item" href="#" onclick="openTasks(); return false;">
+      <i class="bi bi-list-task me-2"></i>Tasks</a></li>
+    <li><a class="dropdown-item" href="#" onclick="exportChat(); return false;">
+      <i class="bi bi-download me-2"></i>Export</a></li>
+    <li><a class="dropdown-item" href="#" onclick="redactLast(); return false;">
+      <i class="bi bi-eraser me-2"></i>Redact Last</a></li>
+  </ul>
+</div>
 {% endblock %}
 
 {% block sidebar_chats %}

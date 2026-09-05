@@ -11,6 +11,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from datetime import datetime
 
+from pengy.core.about import (
+    CATBEE_BLURB, CATBEE_URL, DESCRIPTION, GITHUB_URL, LICENSE_NAME, LICENSE_URL,
+    WEBSITE_URL, copyright_line, edition_line,
+)
 from pengy.core.model_cache import cached_models_for, load_model_cache, save_model_cache
 from pengy.ui.theme import ACCENT_NAMES, THEME_MODES, get_theme, scaled_size
 from pengy.ui.icons import apply_button_icon
@@ -227,6 +231,44 @@ class SettingsDialog(QDialog):
         tools_layout.addRow(_label("User Agent:", "HTTP User-Agent header sent with LLM API requests and any HTTP-based tool calls."), self.user_agent_input)
 
         tabs.addTab(tools_tab, "Tools")
+
+        # ── About tab ─────────────────────────────────────────────
+        about_tab = QWidget()
+        about_layout = QVBoxLayout(about_tab)
+        about_layout.setSpacing(8)
+
+        version_label = QLabel(edition_line("Python"))
+        version_font = version_label.font()
+        version_font.setBold(True)
+        version_font.setPointSize(version_font.pointSize() + 2)
+        version_label.setFont(version_font)
+        about_layout.addWidget(version_label)
+
+        repo_label = QLabel(f'<a href="{GITHUB_URL}">{GITHUB_URL}</a>')
+        repo_label.setOpenExternalLinks(True)
+        about_layout.addWidget(repo_label)
+
+        website_label = QLabel(f'<a href="{WEBSITE_URL}">{WEBSITE_URL}</a>')
+        website_label.setOpenExternalLinks(True)
+        about_layout.addWidget(website_label)
+
+        description_label = QLabel(DESCRIPTION)
+        description_label.setWordWrap(True)
+        about_layout.addWidget(description_label)
+
+        catbee_label = QLabel(f'{CATBEE_BLURB} <a href="{CATBEE_URL}">{CATBEE_URL}</a>')
+        catbee_label.setWordWrap(True)
+        catbee_label.setOpenExternalLinks(True)
+        about_layout.addWidget(catbee_label)
+
+        copyright_label = QLabel(
+            f'{copyright_line()}<br><a href="{LICENSE_URL}">{LICENSE_NAME}</a>'
+        )
+        copyright_label.setOpenExternalLinks(True)
+        about_layout.addWidget(copyright_label)
+
+        about_layout.addStretch()
+        tabs.addTab(about_tab, "About")
 
         layout.addWidget(tabs)
         layout.addStretch()

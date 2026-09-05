@@ -18,6 +18,10 @@ import markdown as _md
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, url_for
 from pygments.formatters import HtmlFormatter
 
+from pengy.core.about import (
+    CATBEE_BLURB, CATBEE_URL, DESCRIPTION, GITHUB_URL, LICENSE_NAME, LICENSE_URL,
+    WEBSITE_URL, copyright_line, edition_line,
+)
 from pengy.core.config import load_config, save_config, render_system_message
 from pengy.core.model_cache import load_model_cache, save_model_cache
 from pengy.core.llm_client import LLMClient
@@ -1395,4 +1399,18 @@ def settings_view():
     return render_template(
         "settings.html", config=config, saved=saved, chats=chats,
         theme_mode=_theme_mode(config),
+    )
+
+
+@app.route("/about")
+def about_view():
+    config = load_config()
+    chats = load_index()
+    return render_template(
+        "about.html", chats=chats, theme_mode=_theme_mode(config),
+        edition_line=edition_line("Python"), github_url=GITHUB_URL,
+        website_url=WEBSITE_URL, description=DESCRIPTION,
+        catbee_blurb=CATBEE_BLURB, catbee_url=CATBEE_URL,
+        copyright=copyright_line(),
+        license_name=LICENSE_NAME, license_url=LICENSE_URL,
     )
