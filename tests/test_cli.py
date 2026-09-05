@@ -8,12 +8,15 @@ Run with:  python -m pytest tests/test_cli.py -v
 """
 from __future__ import annotations
 
+import io
 import re
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from rich.console import Console
+from rich.markup import escape
 
 from pengy.cli import main as cli_main
 from pengy.cli.main import PengyCLI, SLASH_COMMANDS, _complete_slash, _setup_readline
@@ -613,3 +616,75 @@ class TestAttachments:
         assert images == []
         assert "@someone" in cleaned
         assert not mock_print.called, "an @mention with no path shape is not an attachment"
+
+
+# ────────────────────────────────────────────────────────────────
+# Markup safety: the CLI must never crash or silently drop content
+# when rendering untrusted text containing rich markup characters.
+# Regression: a bracketed path (e.g. tests/test_mediainfo.cpp(125)) in
+# tool/compiler output used to crash console.print with a MarkupError and
+# strip '[bracketed]' text from tool-result Panels.
+# ────────────────────────────────────────────────────────────────
+
+class TestMarkupSafety:
+    """Render methods must not parse untrusted text as rich markup."""
+
+    @staticmethod
+    def _cli():
+        cli = PengyCLI(no_save=True)
+        cli.console = Console(file=io.StringIO(), force_terminal=False, width=160)
+        return cli
+
+    @staticmethod
+    def _out(cli):
+        return cli.console.file.getvalue()
+
+    def test_tool_result_preserves_bracketed_text(self):
+        cli = self._cli()
+        cli._render_tool_result({"content": "FAIL: [tests/test_mediainfo.cpp(125)] boom"})
+        out = self._out(cli)
+        # Bracketed text must be shown literally, not consumed as markup.
+        assert "[tests/test_mediainfo.cpp(125)]" in out
+
+    def test_tool_request_bracketed_argv_does_not_raise(self):
+        cli = self._cli()
+        cli._render_tool_request({"name": "run_bash", "args": {"command": "echo [abc] done"}})
+        out = self._out(cli)
+        assert "[abc]" in out
+
+    def test_error_message_with_markup_does_not_raise(self):
+        # The exception handler prints error text; a message carrying a
+        # closing-tag-like '[...]' must render as literal text, not throw.
+        cli = self._cli()
+        cli.console.print("\n[red]Error:[/red] " + escape("ValueError: [/home/x/file(3)] boom"))
+        out = self._out(cli)
+        assert "/home/x/file(3)" in out
+
+    def test_closing_tag_style_content_does_not_crash_panel(self):
+        cli = self._cli()
+        cli._render_tool_result({"content": "[/usr/bin/ffprobe] could not start"})
+        out = self._out(cli)
+        assert "/usr/bin/ffprobe" in out
+
+    def test_tool_result_strips_ansi_and_control(self):
+        # ANSI color + ESC title + a C0 control byte must not reach the terminal.
+        cli = self._cli()
+        cli._render_tool_result({"content": "\x1b[31mred\x1b[0m \x1b]0;evil\x07[end"})
+        out = self._out(cli)
+        assert "red" in out            # text survives
+        assert "\x1b" not in out       # escapes stripped
+
+    def test_tool_request_strips_ansi(self):
+        cli = self._cli()
+        cli._render_tool_request({"name": "run_bash", "args": {"command": "echo \x1b[32mgreen\x1b[0m"}})
+        out = self._out(cli)
+        assert "\x1b" not in out
+        assert "green" in out
+
+    def test_sanitize_display_unit(self):
+        from pengy.cli.main import _sanitize_display
+        assert _sanitize_display("\x1b[31mred\x1b[0m") == "red"
+        assert _sanitize_display("a\x00b\x07c\x1fd") == "abcd"
+        assert _sanitize_display("line1\nline2\tend") == "line1\nline2\tend"
+        assert _sanitize_display("FAIL: [tests/test.cpp(9)]") == "FAIL: [tests/test.cpp(9)]"
+        assert _sanitize_display("a\x1b]0;evil\x07b") == "ab"

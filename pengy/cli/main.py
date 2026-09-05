@@ -29,6 +29,26 @@ from pengy.core.image_utils import preprocess as preprocess_image
 from pengy.core.attachments import attachment_label, import_image, resolve_history
 from pengy.core import tools
 
+
+# ANSI escape-sequence / control-character sanitizer for terminal display.
+# Untrusted tool/compiler output is rendered literally, but it may carry escape
+# sequences (color, cursor moves, OSC title) or C0 control bytes. Strip those
+# from what we show the user so they can't move the cursor, clear the screen, or
+# confuse the box-width accounting. Display-only: the raw bytes still go to the
+# model untouched.
+_ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_OSC_DCS = re.compile(r"(?:\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))|(?:\x1b[PX^_][^\x1b]*(?:\x1b\\)?)")
+_ANSI_OTHER = re.compile(r"\x1b[@-_]")
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize_display(s):
+    """Strip ANSI escape sequences and non-\n/\t C0 control chars for display."""
+    s = _ANSI_OSC_DCS.sub("", s)
+    s = _ANSI_CSI.sub("", s)
+    s = _ANSI_OTHER.sub("", s)
+    return _CTRL.sub("", s)
+
 # ── readline history + completion (Unix only, graceful fallback) ──
 
 _HISTFILE: Path | None = None
@@ -138,6 +158,7 @@ def _require_rich():
 _rich = _require_rich()
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
@@ -1451,7 +1472,10 @@ class PengyCLI:
             pass
         except Exception as exc:
             self._clear_thinking()
-            self.console.print(f"\n[red]Error:[/red] {exc}")
+            # escape(): the exception text may contain literal '[...]' (e.g. a
+            # bracketed file path in a tool/compiler message) which rich would
+            # otherwise parse as markup and crash with a MarkupError.
+            self.console.print("\n[red]Error:[/red] " + escape(_sanitize_display(str(exc))))
         finally:
             gen.close()
             if not self._no_save:
@@ -1619,8 +1643,8 @@ class PengyCLI:
         self.console.print()
         self.console.print(
             Panel(
-                f"[bold]{name}[/bold]\n{args_json}",
-                title=f"🔧 Tool: {name} [{args_preview}]",
+                f"[bold]{escape(_sanitize_display(name))}[/bold]\n{escape(_sanitize_display(args_json))}",
+                title=f"🔧 Tool: {escape(_sanitize_display(name))} [{escape(_sanitize_display(args_preview))}]",
                 title_align="left",
                 border_style="yellow",
             )
@@ -1642,7 +1666,9 @@ class PengyCLI:
 
         title = "Tool output"
         self.console.print(
-            Panel(display, title=title, title_align="left", border_style="dim")
+            # Wrap in Text so raw tool output is rendered literally, not
+            # parsed as rich markup (which silently strips [bracketed] text).
+            Panel(Text(_sanitize_display(display)), title=title, title_align="left", border_style="dim")
         )
 
     # ------------------------------------------------------------------
