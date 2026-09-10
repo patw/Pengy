@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.8.2
+
+- **Version bump to keep all three Pengy editions in lockstep.** The C++ and
+  Rust AppImages were crashing on Wayland-only compositors (niri/sway/Hyprland)
+  because they shipped only the `xcb` Qt platform plugin; this release fixes
+  that by bundling the wayland plugin and requiring `qt6-wayland` at build time.
+  The Python edition ships as a pip package (no AppImage), so it is functionally
+  unchanged here — this is a coordinated version bump only.
+
 ## v1.8.1
 
 - **CLI: escape rich markup and sanitize ANSI/control in tool & error display.**
