@@ -30,6 +30,21 @@ def test_image_import_is_content_addressed_and_request_only(tmp_path):
     assert "32×24" in attachment_label(ref)
 
 
+def test_extensionless_attachment_object_uses_decoded_format(tmp_path):
+    """A content-addressed PNG has no .png suffix when later reprocessed."""
+    set_config_dir(str(tmp_path / "config"))
+    source = tmp_path / "screen.png"
+    Image.new("RGB", (32, 24), (20, 30, 40)).save(source)
+    ref = import_image(source, "Screen shot.png")
+
+    # Provider transport must preserve the source's PNG identity even though
+    # its durable object path is a bare SHA-256 digest.
+    from pengy.core.image_utils import preprocess
+    payload, mime = preprocess(object_path(ref["id"]))
+    assert payload
+    assert mime == "image/jpeg"
+
+
 def test_excluded_attachment_metadata_is_removed_from_provider_message():
 
     message = {

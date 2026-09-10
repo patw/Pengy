@@ -48,7 +48,10 @@ def preprocess(
         img.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
 
     # ── Step 2: format conversion (lossless → JPEG when possible) ─
-    mime = _guess_mime(path)
+    # Attachment objects are content-addressed filenames with no extension.
+    # The decoded format, not the filename, is authoritative for both those
+    # objects and ordinary user-selected files.
+    mime = _mime_for_format(original_format)
     should_convert = (
         mime not in _LOSSY_MIMES
         and original_format in ("PNG", "GIF", "BMP", "TIFF")
@@ -97,6 +100,17 @@ def preprocess(
 def _guess_mime(path: Path) -> str:
     mime, _ = mimetypes.guess_type(str(path))
     return mime or "image/jpeg"
+
+
+def _mime_for_format(image_format: str) -> str:
+    return {
+        "JPEG": "image/jpeg",
+        "PNG": "image/png",
+        "GIF": "image/gif",
+        "WEBP": "image/webp",
+        "BMP": "image/bmp",
+        "TIFF": "image/tiff",
+    }.get(image_format, "image/jpeg")
 
 
 def _to_rgb(img: Image.Image) -> Image.Image:

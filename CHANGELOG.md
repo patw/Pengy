@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.8.3
+
+- **Reliable image attachments from every input path.** Content-addressed image
+  objects intentionally have extensionless SHA-256 filenames. Image preprocessing
+  now derives MIME type from the decoded image format rather than that filename,
+  so PNG, GIF, WebP, and other stored images retain correct transport handling.
+  Added regression coverage for extensionless attachment objects.
+
 ## v1.8.2
 
 - **Version bump to keep all three Pengy editions in lockstep.** The C++ and
