@@ -460,7 +460,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run a command with bash. The command is non-interactive: stdin is closed, so anything that prompts or waits for input (a password prompt, an editor, `read`) will fail rather than wait — pass non-interactive flags instead. Set cwd to run the command in a specific working directory (defaults to the current directory). To invoke sudo, set elevated=true; Pengy then prompts for the user's password separately. Do not set elevated merely because the text or arguments mention the word sudo. Commands are killed once the configured tool timeout elapses.",
+            "description": "Run a command with bash. The command is non-interactive: stdin is closed, so anything that prompts or waits for input (a password prompt, an editor, `read`) will fail rather than wait — pass non-interactive flags instead. Set cwd to run the command in a specific working directory (defaults to the current directory). To run something as root, include an explicit `sudo ...` in the command AND set elevated=true; Pengy then prompts for the user's password separately. elevated=true does NOT elevate on its own — a command with elevated=true but no `sudo` is rejected, so every elevation stays an explicit, auditable sudo call. Do not set elevated merely because the text or arguments mention the word sudo. Commands are killed once the configured tool timeout elapses.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1365,6 +1365,16 @@ def _run_bash(command: str, ctx: "ToolContext" = None, cwd: str | None = None,
             return (
                 "Elevation required: this command invokes sudo. Retry run_bash "
                 "with elevated=true to request sudo access."
+            )
+        if elevated and not sudo_spans:
+            # Fail loudly instead of silently running unprivileged. A caller
+            # that asked for elevation must actually contain a `sudo`
+            # invocation, so the escalation is explicit and auditable.
+            return (
+                "Error: elevated=true was set, but the command does not invoke "
+                "sudo. Add an explicit `sudo ...` to the command (so the "
+                "elevation is an auditable sudo call), or omit elevated=true if "
+                "no root is needed."
             )
         if sudo_spans:
             if ctx.sudo_provider is None:

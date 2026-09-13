@@ -1553,6 +1553,35 @@ class TestToolContext:
         assert "Elevation required" in result
         assert calls == []
 
+    def test_elevated_without_sudo_is_rejected(self):
+        # elevated=true must not be a silent no-op: with no explicit `sudo`
+        # invocation it is an error and the command must NOT run.
+        from pengy.core.tools import execute_tool, ToolContext
+        ctx = ToolContext(sudo_provider=lambda: "secret")
+        result = execute_tool(
+            "run_bash", {"command": "echo should-not-run", "elevated": True}, ctx
+        )
+        assert "elevated=true" in result
+        assert "does not invoke sudo" in result
+        assert "should-not-run" not in result
+
+    def test_elevated_with_only_quoted_sudo_is_rejected(self):
+        # A quoted/comment mention of sudo is data, not an invocation: it must
+        # not satisfy elevated=true.
+        from pengy.core.tools import execute_tool, ToolContext
+        ctx = ToolContext(sudo_provider=lambda: "secret")
+        result = execute_tool(
+            "run_bash", {"command": "echo 'sudo apt update'", "elevated": True}, ctx
+        )
+        assert "does not invoke sudo" in result
+        assert "apt update" not in result
+
+    def test_plain_command_without_elevated_still_runs(self):
+        # Regression guard: ordinary (non-elevated) commands are unaffected.
+        from pengy.core.tools import execute_tool
+        result = execute_tool("run_bash", {"command": "echo hello-plain"})
+        assert "hello-plain" in result
+
     def test_sudo_mentions_do_not_prompt_or_change_command(self):
         from pengy.core.tools import execute_tool, ToolContext
         commands = (
