@@ -22,15 +22,19 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install package with test deps
+        # No extras: the default install is now the complete CLI + Web
+        # experience, so this exercises exactly what `pip install pengy` gives a
+        # user.  PySide6 is deliberately absent in this job (fast matrix) — the
+        # qt-extra job below covers the GUI.
         run: |
-          pip install -e ".[cli,web]" pytest
+          pip install -e . pytest
 
       - name: Verify dependency integrity
         run: pip check
 
       - name: Run tests
         run: |
-          python -m pytest tests/ -v 2>&1
+          PENGY_NO_NUDGE=1 python -m pytest tests/ -v 2>&1
 
       - name: Entry-point smoke tests
         run: |
@@ -39,3 +43,74 @@ jobs:
           pengy-web --version 2>&1 | grep -q "^Pengy v" || (echo "FAIL: pengy-web --version" && exit 1)
           pengy-web --help 2>&1 | grep -qiE "usage|options" || (echo "FAIL: pengy-web --help" && exit 1)
           echo "Entry-points OK"
+
+      - name: Default install is complete (CLI + Web need no extras)
+        run: |
+          python -c "import flask, rich, markdown, pygments" || (echo "FAIL: CLI/Web deps missing from the default install" && exit 1)
+          if python -c "import PySide6" 2>/dev/null; then echo "FAIL: Qt leaked into the base dependencies"; exit 1; fi
+          echo "OK: CLI+Web present, Qt absent from the default install"
+
+      - name: "pengy explains itself when Qt is missing (exit 1 + both desktop paths)"
+        run: |
+          set +e
+          out=$(pengy 2>&1)
+          code=$?
+          set -e
+          [ "$code" -eq 1 ] || (echo "FAIL: expected exit 1 from pengy without PySide6, got $code" && exit 1)
+          echo "$out" | grep -q 'pengy\[gui\]' || (echo "FAIL: notice does not mention pengy[gui]" && exit 1)
+          echo "$out" | grep -q 'github.com/patw/PengyR/releases' || (echo "FAIL: notice does not link the native builds" && exit 1)
+          echo "pengy no-Qt path OK"
+
+      - name: Launcher install is refused without the GUI extra
+        run: |
+          set +e
+          XDG_DATA_HOME="$(mktemp -d)" pengy --install-launcher >out.txt 2>&1
+          code=$?
+          set -e
+          [ "$code" -eq 1 ] || (echo "FAIL: expected exit 1, got $code" && cat out.txt && exit 1)
+          grep -q "Install the desktop GUI first" out.txt || (echo "FAIL: missing hint" && cat out.txt && exit 1)
+          echo "launcher gate OK"
+
+  qt-extra:
+    name: GUI extra (PySide6-Essentials, offscreen)
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PENGY_NO_NUDGE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Qt GUI deps
+        run: |
+          sudo apt-get update && sudo apt-get install -y libgl1 libegl1 libxkbcommon0 desktop-file-utils
+          pip install -e ".[gui]" pytest
+
+      - name: Qt tests + GUI smoke test
+        run: |
+          python -c "from PySide6 import QtCore; print('Qt', QtCore.__version__)"
+          python -m pytest tests/ -v 2>&1
+          python -c "import pengy.main; print('pengy.main imports with Qt present')"
+
+      - name: Console-less GUI launcher entry point exists (Windows shortcuts target it)
+        run: |
+          python -c "import importlib.metadata as m; names=[e.name for e in m.entry_points().select(group='gui_scripts')]; assert 'pengy-gui' in names, names; print('gui_scripts:', names)"
+
+      - name: Launcher integration, sandboxed XDG_DATA_HOME
+        run: |
+          export XDG_DATA_HOME="$(mktemp -d)"
+          pengy --install-launcher
+          test -f "$XDG_DATA_HOME/applications/pengy.desktop" || (echo "FAIL: no .desktop" && exit 1)
+          desktop-file-validate "$XDG_DATA_HOME/applications/pengy.desktop"
+          test -f "$XDG_DATA_HOME/icons/hicolor/256x256/apps/pengy.png" || (echo "FAIL: no icon" && exit 1)
+          grep -q -- '-m pengy.main' "$XDG_DATA_HOME/applications/pengy.desktop" || (echo "FAIL: Exec does not launch this env" && exit 1)
+          grep -q 'StartupWMClass=Pengy' "$XDG_DATA_HOME/applications/pengy.desktop" || (echo "FAIL: no StartupWMClass" && exit 1)
+          grep -q 'Categories=Network;Chat;' "$XDG_DATA_HOME/applications/pengy.desktop" || (echo "FAIL: categories" && exit 1)
+          python -c "from PIL import Image; im=Image.open('$XDG_DATA_HOME/icons/hicolor/256x256/apps/pengy.png'); assert max(im.size) <= 256, im.size; print('icon', im.size)"
+          pengy --uninstall-launcher
+          test ! -f "$XDG_DATA_HOME/applications/pengy.desktop" || (echo "FAIL: uninstall left the entry" && exit 1)
+          echo "launcher integration OK"

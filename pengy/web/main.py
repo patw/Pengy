@@ -46,6 +46,27 @@ def main():
         from pengy.core.config import set_config_dir
         set_config_dir(args.config_dir)
 
+    # ``flask`` is a base dependency, so this should not normally trigger — but
+    # a `--no-deps` install or a broken environment should get a clear message
+    # rather than a bare ModuleNotFoundError.  We probe flask specifically
+    # instead of wrapping the app import, so a real bug inside pengy/web/app.py
+    # is never misreported as a missing dependency.
+    try:
+        import flask  # noqa: F401
+    except ImportError:
+        print(
+            "❌ Pengy Web requires Flask, which is missing from this environment.\n"
+            '   Install it with:  pip install "pengy[web]"',
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    # One-time notice about the desktop options (stderr, TTY-only, once per
+    # machine) — a server operator should still learn the GUI exists.
+    from pengy.core.nudge import show_once
+
+    show_once()
+
     from pengy.web.app import app, set_bound_host, set_trusted_hosts
     set_bound_host(args.host)
     set_trusted_hosts(args.trusted_host)

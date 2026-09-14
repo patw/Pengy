@@ -1,5 +1,78 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: a failed turn reported success.** `pengy-cli` printed `Error: ...` to
+  *stdout* and exited **0**, so scripts, cron jobs and anything parsing
+  `--output json` saw a silent failure. A failed single-shot turn now writes the
+  human message to **stderr**, emits a valid `{"error": {"type", "message"}}`
+  document on stdout in json mode, and exits **2** for missing/invalid credentials
+  or **1** for any other error. Interactive mode is unchanged and still exits 0.
+- **Fixed: `--output json` stdout was not JSON.** The `⏳ Thinking…` spinner and the
+  tool-call / tool-result blocks were written to stdout even in `json`/`silent`
+  modes, which is why that output had to be *grepped* rather than parsed
+  (`skills/ralph/loop.sh` still does). Decorative output is now suppressed in
+  machine-readable modes, and the spinner is also skipped when stdout is not a
+  terminal.
+- **Missing/invalid credentials now explain Pengy's own configuration.** The raw SDK
+  message told users to set `OPENAI_API_KEY` — an environment variable Pengy never
+  reads, so following the advice changed nothing. Credential failures are detected
+  (401/403, `AuthenticationError`/`PermissionDeniedError`, response phrasings) and
+  replaced by instructions naming `pengy-cli /apikey`, `/baseurl`, `/model`,
+  `/config`, the shared `settings.json` and the Web UI Settings page, plus an
+  explicit note that env vars are not used. The translation lives in `llm_client`,
+  so the CLI, Web UI and GUI all benefit (`llm_client.CredentialError`).
+
+- **`pip install pengy` is now the complete CLI + Web experience.** `rich`,
+  `flask`, `markdown` and `pygments` moved into the default dependencies, so
+  `pengy-cli` and `pengy-web` work immediately with no extras — the same "it just
+  works" a user gets from the `.deb` on the other editions. The Qt desktop GUI is
+  now the *only* optional piece: `pip install "pengy[gui]"`. This keeps Qt off
+  servers, containers and musl-based images, where it previously either was ~80 MB
+  of dead weight or could not be installed at all (no PySide6 wheels for musl).
+  Rationale: pip has no "default extra" and dependency extras are additive-only,
+  so whatever is in `dependencies` is what *everyone* pays for.
+- **GUI extra is ~70% smaller.** `pengy[gui]` now depends on
+  `PySide6-Essentials` instead of the `PySide6` meta-package. The GUI imports only
+  `QtCore`/`QtGui`/`QtWidgets`/`QtSvg`, all of which ship in Essentials, so
+  `PySide6-Addons` (~175 MB Linux, ~332 MB macOS, ~168 MB Windows) is no longer
+  downloaded. Verified by installing `pengy[gui]` into a clean venv and building
+  the main window offscreen with Essentials alone.
+- **First-run desktop notice.** pip cannot print anything at install time (a wheel
+  install runs none of our code, and pip hides build-backend output unless `-v`),
+  so the notice is shown on first run instead: `pengy-cli`/`pengy-web` print it
+  once per machine and only on a TTY (cron/systemd stay silent), while `pengy`
+  always explains itself when PySide6 is missing and exits 1. It points at both
+  desktop paths: `pip install "pengy[gui]"` and the native build downloads.
+  Silence permanently with `PENGY_NO_NUDGE=1`.
+- `pengy[cli]` and `pengy[web]` are retained for compatibility but are now
+  no-ops; `pengy[all]` and the new `pengy[desktop]` both mean "add the GUI".
+- **New `pengy --install-launcher` / `--uninstall-launcher` (Linux).** pip only ever
+  creates console scripts, so desktop integration has to come from the program:
+  these write `~/.local/share/applications/pengy.desktop` (plus a 256x256 icon
+  derived from the packaged 1176x1176 artwork) and refresh the desktop/icon caches.
+  The `Exec` line is built from `sys.executable`, so it can never launch a different
+  Pengy edition that happens to be earlier on `PATH`. Explicit invocation only, and
+  it refuses to create an entry when PySide6 is missing (a menu icon that cannot open
+  a window is worse than no icon). The generated entry passes
+  `desktop-file-validate` with no hints — note `Network;Chat;`, not the two-main-
+  category `Utility;Development;` that makes an app list twice in the menu.
+- **`--install-launcher` will not silently replace someone else's entry.** If
+  `pengy.desktop` already exists with different content — e.g. a launcher for a
+  native AppImage build — installation fails and prints the existing `Exec=`/`Icon=`
+  lines, so you can see what you would have lost; `--install-launcher --force`
+  overwrites it deliberately. (Found the hard way: a hand-run install replaced the
+  AppImage launcher on beholaptop on 2026-09-14. The test-suite conftest now also
+  redirects `XDG_DATA_HOME` and aborts if it points at the real `~/.local/share`.)
+- **New `pengy-gui` entry point (gui_scripts).** On Windows, a `gui_scripts` entry
+  point is packaged with a console-less launcher, so shortcuts no longer show a black
+  console window behind the GUI. `pengy` deliberately stays a console script (moving
+  it would make `pengy --version` print nothing in a Windows terminal). When such a
+  shortcut is launched without PySide6 installed, Pengy now shows a native message
+  box instead of silently doing nothing.
+- New module `pengy/core/nudge.py` (notice text + marker handling) with
+  regression tests.
+
 ## v1.8.4
 
 - **Fix: `run_bash` `elevated=true` without a `sudo` invocation no longer runs

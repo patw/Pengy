@@ -38,11 +38,35 @@ _session_tmp_path = Path(_session_tmp.name)
 import os
 os.environ["PENGY_CONFIG_DIR"] = str(_session_tmp_path)
 
+# Same treatment for the XDG desktop directories.  ``pengy --install-launcher``
+# writes $XDG_DATA_HOME/applications/pengy.desktop plus an icon — that is *real*
+# desktop state (a live application-menu entry), not test state.  Without this,
+# a test that forgets its ``xdg`` fixture would silently replace the developer's
+# own Pengy launcher.  (2026-09-14: a hand-run `pengy --install-launcher`
+# outside the suite overwrote the AppImage launcher on beholaptop; the guard
+# below now catches both cases.)
+_session_xdg = _session_tmp_path / "xdg-data"
+
+
+def real_xdg_data_home() -> Path:
+    """XDG_DATA_HOME a normal user would get (``~/.local/share``)."""
+    return (Path.home() / ".local" / "share").resolve()
+
+
+_caller_xdg = os.environ.get("XDG_DATA_HOME")
+if _caller_xdg and Path(_caller_xdg).expanduser().resolve() == real_xdg_data_home():
+    # Somebody explicitly pointed the suite at the live desktop directory.  Leave
+    # it exactly as asked so the collection-time guard below can refuse to run
+    # — silently redirecting would hide the mistake instead of failing on it.
+    pass
+else:
+    os.environ["XDG_DATA_HOME"] = str(_session_xdg)
+
 
 # ── 2.  Hard guard ─────────────────────────────────────────────────────────────
 
 def pytest_collection_finish(session: pytest.Session) -> None:
-    """Refuse to run if the config dir still points at the real user config."""
+    """Refuse to run if the config dir or XDG data dir point at real user state."""
     from pengy.core.config import get_config_dir
 
     resolved = get_config_dir()
@@ -58,12 +82,28 @@ def pytest_collection_finish(session: pytest.Session) -> None:
             returncode=1,
         )
 
+    # `pengy --install-launcher` writes a real application-menu entry under
+    # $XDG_DATA_HOME; running the suite against the live one would replace the
+    # developer's own launcher (e.g. one that starts a native AppImage build).
+    from pengy.core.launcher import _data_home
+
+    if _data_home().resolve() == real_xdg_data_home():
+        pytest.exit(
+            f"\n\033[91m*** FATAL: Refusing to run tests with XDG_DATA_HOME "
+            f"pointing at real user state ({real_xdg_data_home()}).\n"
+            f"*** Launcher tests would overwrite ~/.local/share/applications/"
+            f"pengy.desktop.\n"
+            f"*** Ensure conftest.py's XDG redirect is working.\033[0m\n",
+            returncode=1,
+        )
+
 
 # ── 3.  Teardown ───────────────────────────────────────────────────────────────
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Clean up the session temp dir and clear the env override."""
+    """Clean up the session temp dir and clear the env overrides."""
     os.environ.pop("PENGY_CONFIG_DIR", None)
+    os.environ.pop("XDG_DATA_HOME", None)
     from pengy.core.config import set_config_dir
     set_config_dir(None)  # clear any leftover programmatic override
     _session_tmp.cleanup()

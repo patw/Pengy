@@ -18,10 +18,60 @@ def _show_help(exit_code: int = 0):
     print("  -h, --help     Show this help message and exit.")
     print("  -v, --version  Show version information and exit.")
     print("  --config-dir PATH  Use a custom config directory.")
+    print("  --install-launcher    Add Pengy to your application menu (Linux,")
+    print("                        user-level only — nothing system-wide is touched).")
+    print("  --install-launcher --force  Replace an existing entry not written by Pengy")
+    print("                        (e.g. a launcher for a native AppImage build).")
+    print("  --uninstall-launcher  Remove that menu entry again.")
     print()
-    print("The desktop GUI launches a PySide6 window. No additional")
-    print("command-line options are supported.")
+    print("The desktop GUI launches a PySide6 window (pip install \"pengy[gui]\").")
+    print()
+    print("Without it, use the CLI and Web UI, which the default install includes:")
+    print("  pengy-cli    chat in the terminal")
+    print("  pengy-web    browser UI (http://127.0.0.1:5000)")
+    print()
+    print("Native desktop builds, no Python required:")
+    print("  https://github.com/patw/PengyR/releases")
+    print()
+    print("Windows: point shortcuts at `pengy-gui`, not `pengy` — it uses a")
+    print("console-less launcher, so no black window appears behind the GUI.")
     sys.exit(exit_code)
+
+
+def _handle_launcher(flag: str) -> None:
+    """Handle --install-launcher / --uninstall-launcher, then exit.
+
+    Explicit invocation only: Pengy never writes outside its own config
+    directory unless the user asks for it.
+    """
+    from pengy.core.launcher import LauncherError, install_launcher, uninstall_launcher
+
+    if flag == "--install-launcher":
+        from pengy.core.nudge import compact_desktop_hint, gui_available
+
+        if not gui_available():
+            # A menu entry that cannot open a window is worse than no entry.
+            print(
+                "❌ Install the desktop GUI first — a launcher entry would point at\n"
+                "   a program that cannot open a window yet.",
+                file=sys.stderr,
+            )
+            print(compact_desktop_hint(), file=sys.stderr)
+            sys.exit(1)
+        force = "--force" in sys.argv[1:]
+        try:
+            print(install_launcher(force=force))
+        except LauncherError as exc:
+            print(f"❌ {exc}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+
+    try:
+        print(uninstall_launcher())
+    except LauncherError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
 
 
 def main():
@@ -33,6 +83,12 @@ def main():
             sys.exit(0)
         if arg in ("-h", "--help"):
             _show_help(0)
+
+    # Launcher integration — explicit flags only, handled *before* the Qt guard
+    # so `pengy --uninstall-launcher` still works if the GUI was uninstalled.
+    for flag in ("--install-launcher", "--uninstall-launcher"):
+        if flag in sys.argv[1:]:
+            _handle_launcher(flag)
 
     # Check for --config-dir
     config_dir = None
@@ -53,17 +109,30 @@ def main():
         from pengy.core.config import set_config_dir
         set_config_dir(config_dir)
 
-    # Friendly import guard so ``pip install pengy`` (without [gui]) gives a
-    # clear message instead of an ugly traceback.
+    # ``pengy`` is the *desktop* entry point, so a missing Qt is never silently
+    # swallowed: say what is wrong, then show the two ways to get a window
+    # (add the [gui] extra, or use a native build with no Python at all).
     try:
         import PySide6  # noqa: F401
     except ImportError:
         print(
-            "❌ Pengy GUI requires PySide6.\n"
-            "   Install it with:  pip install pengy[gui]\n"
-            "   Or install everything:  pip install pengy[all]\n"
-            "   For the CLI-only version:  pip install pengy[cli]",
+            "❌ Pengy Desktop needs PySide6 (the Qt GUI), and it is not\n"
+            "   installed in this environment.",
             file=sys.stderr,
+        )
+        from pengy.core.nudge import show_always
+
+        show_always()
+
+        # A Windows shortcut can launch this through pythonw, where there is no
+        # console at all and printing is invisible — fall back to a real dialog
+        # so a double-clicked icon explains itself instead of doing nothing.
+        from pengy.core.nudge import notify_without_console
+
+        notify_without_console(
+            "Pengy Desktop needs PySide6 (the Qt GUI).\n\n"
+            'Add it to this install:  pip install "pengy[gui]"\n'
+            "Native builds (no Python): https://github.com/patw/PengyR/releases"
         )
         sys.exit(1)
 

@@ -48,7 +48,9 @@ twine check dist/*
 twine upload --repository testpypi dist/*
 
 # Install from test PyPI to verify
-pip install --index-url https://test.pypi.org/simple/ pengy[all]
+pip install --index-url https://test.pypi.org/simple/ pengy
+# and, to check the GUI extra resolves:
+pip install --index-url https://test.pypi.org/simple/ "pengy[gui]"
 ```
 
 ### Production PyPI
@@ -60,10 +62,17 @@ twine upload dist/*
 ## Verify
 
 ```bash
-# Create a fresh venv and test
+# Fresh venv, DEFAULT install — this is the experience most users get, so it is
+# the one that must work:
 python -m venv /tmp/pengy-test
-/tmp/pengy-test/bin/pip install pengy[all]
+/tmp/pengy-test/bin/pip install pengy
+/tmp/pengy-test/bin/pengy-cli --version            # → Pengy vX.Y.Z
+/tmp/pengy-test/bin/pengy-web --version            # → Pengy vX.Y.Z
 /tmp/pengy-test/bin/pengy-cli "Hello, what model are you?"
+
+# Then confirm the GUI extra still resolves (downloads PySide6-Essentials):
+/tmp/pengy-test/bin/pip install "pengy[gui]"
+/tmp/pengy-test/bin/pengy --version                # → Pengy vX.Y.Z
 ```
 
 ## Git tag (after successful release)

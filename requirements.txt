@@ -1,1 +1,4 @@
--e ".[all]"
+# CLI + Web UI — the default install (no Qt)
+-e .
+# For the Qt desktop GUI, use instead:
+# -e ".[gui]"

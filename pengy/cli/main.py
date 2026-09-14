@@ -270,6 +270,7 @@ class PengyCLI:
         self.current_chat: dict | None = None
         self._no_save = no_save
         self._output_mode = "pretty"  # pretty | raw | json | silent
+        self._turn_error = None  # set by _report_turn_error, read by single-shot mode
         self._update_llm_client()
 
         # "yes to all this turn" — resets each time the LLM returns a fresh
@@ -370,6 +371,10 @@ class PengyCLI:
             messages = self._build_messages(chat, prompt_text,
                                             image_paths=image_paths if image_paths else None)
             self._drive_generator(messages, chat)
+            if self._turn_error is not None:
+                # A failed turn must not be reported as success: scripts and cron
+                # jobs branch on this exit code (ralph's loop logs `agent rc=`).
+                sys.exit(getattr(self._turn_error, "exit_code", 1) or 1)
         except KeyboardInterrupt:
             self.console.print("\n[dim]Cancelled.[/dim]")
         finally:
@@ -1492,10 +1497,7 @@ class PengyCLI:
             pass
         except Exception as exc:
             self._clear_thinking()
-            # escape(): the exception text may contain literal '[...]' (e.g. a
-            # bracketed file path in a tool/compiler message) which rich would
-            # otherwise parse as markup and crash with a MarkupError.
-            self.console.print("\n[red]Error:[/red] " + escape(_sanitize_display(str(exc))))
+            self._report_turn_error(exc)
         finally:
             gen.close()
             if not self._no_save:
@@ -1505,18 +1507,84 @@ class PengyCLI:
                 chat["messages"] = clean_dangling_tool_calls(chat["messages"])
                 save_chat(chat)
 
+    def _report_turn_error(self, exc: BaseException) -> None:
+        """Report a failed turn without lying about it.
+
+        Before this existed, a failed turn printed ``Error: ...`` to **stdout** and
+        the process still exited **0** — so a cron job or script saw success while
+        nothing had happened, and ``--output json`` produced unparseable output.
+
+        Now: the human text goes to stderr, ``--output json`` gets a valid JSON
+        error document on stdout, and single-shot mode exits non-zero
+        (``CredentialError`` → 2, anything else → 1).
+        """
+        message = _sanitize_display(str(exc))
+        self._turn_error = exc
+
+        if self._output_mode == "json":
+            # Keep stdout machine-readable: a valid document, never prose.
+            self.console.print_json(
+                data={
+                    "error": {
+                        "type": getattr(exc, "kind", "error"),
+                        "message": message,
+                    }
+                }
+            )
+
+        if getattr(exc, "kind", "") == "credentials":
+            self._print_stderr("\n❌ " + message)
+        else:
+            self._print_stderr("\nError: " + message)
+
+    def _print_stderr(self, text: str) -> None:
+        """Write a message to stderr, colouring only when it is a terminal."""
+        is_tty = False
+        try:
+            is_tty = sys.stderr.isatty()
+        except (AttributeError, ValueError):
+            pass
+        red = "\033[31m" if is_tty else ""
+        reset = "\033[0m" if is_tty else ""
+        sys.stderr.write(red + text + reset + "\n")
+        sys.stderr.flush()
+
+    @property
+    def _machine_readable(self) -> bool:
+        """True when stdout belongs to a program, not a person.
+
+        In ``json``/``silent`` modes nothing decorative may reach stdout: the
+        spinner, tool blocks and retry notices were all written there, which is why
+        ``--output json`` output had to be *grepped* rather than parsed (ralph's
+        loop.sh still does that).
+        """
+        return self._output_mode in ("json", "silent")
+
     def _show_thinking(self):
         """Print the 'Thinking…' indicator using raw ANSI.
 
-        Uses \\r (carriage return) + \\033[K (clear-to-end-of-line)
-        so the indicator disappears cleanly on the next write, without
-        conflicting with readline's own terminal management.
+        Uses \\r (carriage return) + \\033[K (clear-to-end-of-line) so the
+        indicator disappears cleanly on the next write, without conflicting with
+        readline's own terminal management.  Suppressed in machine-readable output
+        modes and when stdout is not a terminal.
         """
+        if not self._progress_allowed():
+            return
         sys.stdout.write("\r\033[K⏳ Thinking…")
         sys.stdout.flush()
 
+    def _progress_allowed(self) -> bool:
+        if self._machine_readable:
+            return False
+        try:
+            return bool(sys.stdout.isatty())
+        except (AttributeError, ValueError):
+            return False
+
     def _clear_thinking(self):
         """Clear the 'Thinking…' line."""
+        if not self._progress_allowed():
+            return
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
 
@@ -1649,6 +1717,8 @@ class PengyCLI:
         )
 
     def _render_tool_request(self, response: dict):
+        if self._machine_readable:
+            return  # stdout is reserved for the single JSON document
         """Show the tool call that the model wants to make."""
         name = response.get("name", "?")
         args = response.get("args", {})
@@ -1671,6 +1741,8 @@ class PengyCLI:
         )
 
     def _render_tool_result(self, response: dict):
+        if self._machine_readable:
+            return  # stdout is reserved for the single JSON document
         """Show the result of a tool execution."""
         content = response.get("content", "")
         declined = response.get("declined", False)
@@ -1749,7 +1821,11 @@ class PengyCLI:
 def main():
     parser = argparse.ArgumentParser(
         description="Pengy CLI — Chat with LLMs from the command line",
-        epilog="Use -- to treat all remaining arguments as prompt text.",
+        epilog=(
+            "Use -- to treat all remaining arguments as prompt text. "
+            "Single-shot exit status: 0 success, 2 missing/invalid credentials, "
+            "1 other error (interactive mode always exits 0)."
+        ),
     )
     parser.add_argument(
         "prompt",
@@ -1801,6 +1877,13 @@ def main():
     if args.config_dir:
         from pengy.core.config import set_config_dir
         set_config_dir(args.config_dir)
+
+    # One-time notice about the desktop options (stderr, TTY-only, once per
+    # machine).  Skipped for --version/--help above so machine-readable output
+    # stays clean, and never written to stdout so `--output json` stays parseable.
+    from pengy.core.nudge import show_once
+
+    show_once()
 
     cli = PengyCLI(no_save=args.no_save)
 

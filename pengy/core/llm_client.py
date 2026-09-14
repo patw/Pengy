@@ -213,6 +213,87 @@ def _format_question_answers(questions: list[dict], answers: list[str]) -> str:
     return "\n".join(lines)
 
 
+class CredentialError(RuntimeError):
+    """The endpoint rejected us for missing or invalid credentials.
+
+    Exists so every frontend (CLI, Web UI, GUI) can show Pengy's own
+    configuration instructions instead of the raw SDK text — which tells users to
+    set ``OPENAI_API_KEY`` and friends, environment variables Pengy never reads.
+
+    ``kind``/``exit_code`` let callers classify it without string matching.
+    """
+
+    kind = "credentials"
+    exit_code = 2
+
+
+# Phrases the OpenAI SDK (and most OpenAI-compatible servers) use when a request
+# cannot be authenticated.  Matched case-insensitively on the message text, in
+# addition to status codes and exception class names, because SDK versions differ
+# in which exception type they raise.
+_CREDENTIAL_PHRASES = (
+    "missing credentials",
+    "no api key",
+    "api key is required",
+    "api_key is required",
+    "api key must be set",
+    "api_key client option must be set",
+    "invalid api key",
+    "invalid_api_key",
+    "incorrect api key",
+    "invalid authentication",
+    "authentication failed",
+    "unauthorized",
+    "credentials not found",
+    "you didn't provide an api key",
+)
+
+_CREDENTIAL_TYPE_NAMES = ("AuthenticationError", "PermissionDeniedError")
+
+
+def _looks_like_credential_problem(exc: BaseException) -> bool:
+    """Best-effort detection of an authentication/credential failure."""
+    if getattr(exc, "status_code", None) in (401, 403):
+        return True
+    for klass in type(exc).__mro__:
+        if klass.__name__ in _CREDENTIAL_TYPE_NAMES:
+            return True
+    text = str(exc).lower()
+    return any(phrase in text for phrase in _CREDENTIAL_PHRASES)
+
+
+def credential_help(base_url: str) -> str:
+    """The instructions a user actually needs when credentials are missing."""
+    try:
+        from pengy.core.config import get_config_dir
+
+        config_path = get_config_dir() / "settings.json"
+    except Exception:  # pragma: no cover - config is always importable
+        config_path = "~/.config/pengy/settings.json"
+
+    return (
+        f"No API credentials are configured for {base_url}.\n"
+        "\n"
+        f"Configure Pengy (the CLI, Web UI and GUI all share {config_path}):\n"
+        "    pengy-cli /apikey <your-key>    set the API key\n"
+        "    pengy-cli /baseurl <url>        change the endpoint "
+        "(a local Ollama/vLLM needs no key)\n"
+        "    pengy-cli /model <name>         choose a model\n"
+        "    pengy-cli /config               review the current settings\n"
+        "  Or run pengy-web and open Settings (http://127.0.0.1:5000/settings).\n"
+        "\n"
+        "Note: Pengy reads credentials from its own settings file. OPENAI_API_KEY\n"
+        "and similar environment variables are NOT used, whatever the API error says."
+    )
+
+
+def _translate_api_error(exc: BaseException, base_url: str) -> BaseException:
+    """Return a friendlier exception for credential failures, else ``exc``."""
+    if isinstance(exc, CredentialError) or not _looks_like_credential_problem(exc):
+        return exc
+    return CredentialError(credential_help(base_url))
+
+
 class LLMClient:
     """Client for interacting with OpenAI-compatible LLM APIs."""
 
@@ -295,7 +376,9 @@ class LLMClient:
 
                     if e.status_code not in _RETRYABLE_STATUSES or attempt >= _MAX_RETRIES:
                         self._reset_client()
-                        raise
+                        # 401/403 → tell the user how to configure Pengy instead
+                        # of surfacing the SDK's misleading env-var advice.
+                        raise _translate_api_error(e, self.base_url) from e
                     # 429 / 529 — backoff and retry
                     headers = getattr(e.response, "headers", {}) if e.response is not None else {}
                     ra = _retry_after_delay(e.status_code, headers)
@@ -319,9 +402,9 @@ class LLMClient:
                         }
                         return
                     self._reset_client()
-                except Exception:
+                except Exception as exc:
                     self._reset_client()
-                    raise
+                    raise _translate_api_error(exc, self.base_url) from exc
 
             # If images were stripped due to model not supporting vision,
             # restart the outer loop without them.

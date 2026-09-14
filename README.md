@@ -29,19 +29,68 @@ All three share the same core, tools, chat history, and config. Use whichever fi
 ```bash
 # Recommended — uv installs Pengy with a compatible Python automatically
 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv tool install "pengy[all]"
+uv tool install pengy
 
 # Or with pip (Python 3.10+)
-pip install "pengy[all]"
+pip install pengy
 ```
 
-You can install just the parts you need: `pengy[gui]`, `pengy[cli]`, or `pengy[web]`.
+That one command gives you the **complete headless experience** — agent core,
+terminal CLI and browser Web UI, no extra flags and no Qt download:
 
-### Desktop GUI
+| Command | What it does |
+|---|---|
+| `pengy-cli` | interactive REPL, or single-shot: `pengy-cli "What is the capital of France?"` |
+| `pengy-web` | browser UI on http://127.0.0.1:5000 |
+
+### Desktop GUI (optional)
+
+The Qt desktop app is the only piece that is not installed by default — it is a
+~80 MB download and needs a display:
 
 ```bash
+pip install "pengy[gui]"                     # or: uv tool install --force "pengy[gui]"
 pengy
 ```
+
+Prefer a **native** desktop app with no Python at all? The Rust and C++ editions
+ship AppImage, `.deb`, `.dmg` and Windows `.zip` builds:
+
+**https://github.com/patw/PengyR/releases**
+
+> `pengy[all]` and `pengy[desktop]` are aliases that add the GUI. `pengy[cli]` and
+> `pengy[web]` still work, but their dependencies are now part of the default
+> install — asking for them adds nothing.
+
+#### Add Pengy to your application menu (Linux)
+
+A pip/uv-tool install gives you commands, not a menu icon. Ask the program to add
+one — user-level only, no sudo, nothing installed system-wide:
+
+```bash
+pengy --install-launcher      # add a menu entry + icon
+pengy --uninstall-launcher    # remove it again
+```
+
+It writes `~/.local/share/applications/pengy.desktop` plus a 256×256 icon under
+`~/.local/share/icons/hicolor/`, and refreshes the desktop/icon caches. The entry
+launches *this* environment's interpreter, so it never picks up a different Pengy
+edition that happens to be earlier on your `PATH`.
+
+If a `pengy.desktop` already exists that Pengy did not write — for example a
+launcher for the native AppImage build — the command **refuses to replace it** and
+shows you the existing `Exec=` line. Add `--force` if you really mean to overwrite
+it.
+
+(On Linux, `sudo dpkg -i pengy_*.deb` already does all of this system-wide — the
+launcher command is for pip-style installs.)
+
+#### Windows: use `pengy-gui` for shortcuts
+
+`pengy` is a console program, so a shortcut to it shows a black console window
+behind the GUI. Point shortcuts at **`pengy-gui`** instead — it is packaged as a
+console-less launcher. `pengy` keeps its console so `pengy --version` still prints
+in a terminal.
 
 ### CLI (interactive or single-shot)
 
@@ -89,6 +138,16 @@ The web UI is for single-user personal use. For remote access, put it behind ngi
 **Desktop:** Click ⚙ Settings in the sidebar.  
 **CLI:** Run `/config` to view, `/model <name>` to switch models.  
 **Web:** Click ⚙ in the top-right navbar.
+
+> **First run? Configure before you chat.** Pengy keeps its credentials in its own
+> settings file (`~/.config/pengy/settings.json`, shared by the CLI, Web UI and GUI).
+> Environment variables like `OPENAI_API_KEY` are **not** read. From the CLI:
+> `/apikey <key>`, `/baseurl <url>`, `/model <name>`; or open `pengy-web` → Settings.
+>
+> If credentials are missing or wrong, Pengy tells you exactly that (and prints the
+> commands above) instead of relaying the API's own env-var advice — and exits **2**
+> so scripts can tell configuration failures apart from other errors (**1**;
+> interactive mode always exits 0).
 
 | Setting | Description |
 |---------|-------------|
@@ -194,13 +253,17 @@ pengy/
 ```bash
 git clone https://github.com/patw/pengy.git
 cd pengy
-uv sync --extra all
-```
+# CLI + Web UI (default install — no Qt needed)
+uv sync
+
+# Add the Qt desktop GUI
+uv sync --extra gui
 
 Or with pip:
 
 ```bash
-pip install -e ".[all]"
+pip install -e .            # CLI + Web UI
+pip install -e ".[gui]"     # + Qt desktop GUI
 ```
 
 ### Running tests
@@ -211,15 +274,20 @@ python -m pytest tests/ -v
 
 ### Dependencies
 
-| Package | Purpose |
-|---------|---------|
-| PySide6 | Qt6 GUI framework |
-| flask | Web UI framework |
-| openai | OpenAI-compatible API client |
-| markdown | Markdown rendering (GUI + Web) |
-| pygments | Syntax highlighting (GUI + Web) |
-| ddgs | DuckDuckGo web search |
-| rich | CLI formatting (tables, panels, markdown) |
+| Package | Purpose | Installed by default? |
+|---------|---------|:---------------------:|
+| openai | OpenAI-compatible API client | ✅ |
+| ddgs | DuckDuckGo web search | ✅ |
+| Pillow | Image attachments and processing | ✅ |
+| flask | Web UI framework | ✅ |
+| rich | CLI formatting (tables, panels, markdown) | ✅ |
+| markdown | Markdown rendering (Web) | ✅ |
+| pygments | Syntax highlighting (Web) | ✅ |
+| PySide6-Essentials | Qt6 desktop GUI (`pengy[gui]`) | ❌ optional |
+
+> The GUI depends on `PySide6-Essentials`, not the `PySide6` meta-package: the GUI
+> imports only QtCore/QtGui/QtWidgets/QtSvg, so `PySide6-Addons` (~175 MB Linux,
+> ~332 MB macOS) is never downloaded.
 
 ---
 
@@ -233,7 +301,7 @@ Pengy (Python) is the **reference implementation**. Two high-performance ports s
 | [**PengyR**](https://github.com/patw/PengyR) | Rust + Qt6 | High-performance native binary, statically-linked core |
 | [**PengyCPP**](https://github.com/patw/PengyCPP) | C++17 + Qt6 | Highest performance, smallest memory footprint |
 
-All three offer the same 15 tools, desktop theme controls, reusable task templates, three interfaces (GUI/CLI/Web), and full chat/task interop. PengyR and PengyCPP ship pre-built AppImage, `.deb`, `.dmg`, and `.zip` releases.
+All three offer the same 15 tools, desktop theme controls, reusable task templates, three interfaces (GUI/CLI/Web), and full chat/task interop. PengyR and PengyCPP ship pre-built AppImage, `.deb`, `.dmg`, and `.zip` releases; Pengy (this one) installs from PyPI with `pip install pengy`, which includes the CLI and Web UI, plus the Qt GUI via `pengy[gui]`.
 
 ---
 

@@ -114,20 +114,23 @@ class TestCliEntryPoint:
         assert cli.llm_client is not None
 
     def test_single_shot_mode_no_save(self):
-        """``pengy-cli "hello" --no-save`` should not crash even without API key.
+        """``pengy-cli "hello" --no-save`` fails in a *classified* way without a key.
 
-        It will fail with an LLM error (no key / server), but the code path to
-        that point must be solid.
+        There is no API key in the test environment, so this exercises the
+        credential path end to end: it must exit with the documented code for a
+        configuration problem (2), not report success and not raise a raw
+        AttributeError/TypeError/etc from the setup code.
         """
         from pengy.cli.main import PengyCLI
 
         cli = PengyCLI(no_save=True)
-        # _drive_generator will raise because there's no real endpoint, but the
-        # setup and argument parsing should complete fine.
         try:
             cli.run_single_shot("hello")
+        except SystemExit as exc:
+            # Documented contract: 2 = missing/invalid credentials, 1 = other error.
+            assert exc.code in (1, 2), exc.code
         except Exception as exc:
-            # Acceptable: missing API key, connection refused, etc.
+            # Acceptable: connection refused, timeouts, etc.
             # Not acceptable: AttributeError, ImportError, TypeError
             assert not isinstance(exc, (AttributeError, ImportError, TypeError, NameError)), (
                 f"Unexpected error type {type(exc).__name__}: {exc}"

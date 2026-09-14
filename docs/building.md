@@ -11,24 +11,29 @@
 git clone https://github.com/patw/Pengy.git
 cd Pengy
 
-# With uv (recommended)
-uv sync --extra all
+# CLI + Web UI (no Qt — this is all you need on a server)
+uv sync
+# or: pip install -e .
 
-# Or with pip
-pip install -e ".[all]"
+# Add the Qt desktop GUI
+uv sync --extra gui
+# or: pip install -e ".[gui]"
+
+# Everything (`all` is an alias for `gui`)
+uv sync --extra all
 ```
 
 ## Run after building
 
 ```bash
-# GUI
-pengy
-
 # CLI
 pengy-cli
 
 # Web
 pengy-web
+
+# GUI (requires the gui extra)
+pengy
 ```
 
 ## Running tests
@@ -47,6 +52,7 @@ python -m build
 
 ## Platform notes
 
-- **Linux:** Qt6 (PySide6) installs via pip. On headless systems, `pengy[cli]` or `pengy[web]` work without a display.
-- **macOS:** If your default `/usr/bin/python3` is older than 3.10, use `uv` — it installs a compatible Python automatically.
-- **Windows:** PySide6 wheels are available for Windows. The CLI and web UI work natively.
+- **Linux:** the default install has no Qt at all, so it works on a headless box out of the box. The desktop GUI needs the `gui` extra (PySide6-Essentials) and a display.
+- **macOS:** If your default `/usr/bin/python3` is older than 3.10, use `uv` — it installs a compatible Python automatically. PySide6-Essentials ships a `universal2` wheel.
+- **Windows:** PySide6-Essentials wheels are available for `win_amd64` and `win_arm64`. The CLI and web UI work natively.
+- **Containers / musl:** there are no PySide6 wheels for musl-based images (Alpine), which is one reason Qt is not in the default install — `pip install pengy` stays installable there.

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pengy"
 version = "1.8.4"
-description = "Local-first AI agent with tools — GUI and CLI"
+description = "Local-first AI agent with tools — CLI and Web UI, plus an optional Qt desktop GUI"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -32,18 +32,36 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+# A bare `pip install pengy` is the complete *headless* experience: the agent
+# core, the terminal CLI and the browser Web UI all work with no extra flags.
+# The Qt desktop GUI is the only optional piece (see the [gui] extra below).
+#
+# Why: pip has no "default extra", and these dependencies are additive-only,
+# so whatever is listed here is what every user pays for.  Qt is ~80 MB and
+# needs a display, which headless servers and containers do not have.
 dependencies = [
     "openai>=1.0.0",
     "ddgs>=9.0.0",
     "Pillow>=10.0.0",
-]
-
-[project.optional-dependencies]
-gui = [
-    "PySide6>=6.6.0",
+    "rich>=13.0.0",
+    "flask>=3.0.0",
     "markdown>=3.5",
     "pygments>=2.17.0",
 ]
+
+[project.optional-dependencies]
+# The desktop GUI is the only thing not in the default install.
+#
+# We depend on PySide6-Essentials, *not* the PySide6 meta-package: the GUI
+# imports only QtCore/QtGui/QtWidgets/QtSvg, all of which ship in Essentials.
+# The meta-package additionally pulls PySide6-Addons (~175 MB on Linux,
+# ~332 MB on macOS, ~168 MB on Windows) that Pengy never imports.
+gui = [
+    "PySide6-Essentials>=6.6.0",
+]
+# Kept for backwards compatibility (existing docs, scripts, muscle memory).
+# These dependencies are now part of the base install, so the extras below are
+# effectively no-ops — harmless to request, they just add nothing.
 cli = [
     "rich>=13.0.0",
 ]
@@ -53,17 +71,26 @@ web = [
     "pygments>=2.17.0",
 ]
 all = [
-    "PySide6>=6.6.0",
-    "flask>=3.0.0",
-    "markdown>=3.5",
-    "pygments>=2.17.0",
-    "rich>=13.0.0",
+    "PySide6-Essentials>=6.6.0",
+]
+# Alias for `all`, named for what it actually gets you.
+desktop = [
+    "PySide6-Essentials>=6.6.0",
 ]
 
 [project.scripts]
 pengy = "pengy.main:main"
 pengy-cli = "pengy.cli.main:main"
 pengy-web = "pengy.web.main:main"
+
+# Console-less GUI launcher for Windows shortcuts.  A gui_scripts entry is
+# packaged with a pythonw-based launcher (pip's vendored distlib:
+# `if options.get('gui') and self._is_nt: fn.replace('python', 'pythonw')`), so
+# no black console window appears behind the GUI.  `pengy` deliberately stays a
+# console script: moving it here would make `pengy --version` print nothing in a
+# Windows terminal.  On Linux/macOS this is simply another name for the GUI.
+[project.gui-scripts]
+pengy-gui = "pengy.main:main"
 
 [project.urls]
 Homepage = "https://github.com/patw/Pengy"

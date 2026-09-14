@@ -43,7 +43,7 @@ The Web UI (`pengy/web/main.py` → `pengy-web` command) is a **Flask-based** br
   - Settings page for all config options
   - Mobile-friendly with safe-area-inset support for notched phones
   - Full thread safety — `WebWorker` class with `threading.Event` for confirmation/sudo blocking
-- **Dependencies:** `flask>=3.0`, `markdown>=3.5`, `pygments>=2.17` (via `pip install pengy[web]` or `pengy[all]`)
+- **Dependencies:** `flask>=3.0`, `markdown>=3.5`, `pygments>=2.17` — part of the **default** install since v1.8.x, so a bare `pip install pengy` is enough (the `web`/`all` extras still parse but now add nothing)
 - **Run it:** `pengy-web` or `python -m pengy.web.main`
 
 All three interfaces share the same `~/.config/pengy/` — settings and chat history are shared.
