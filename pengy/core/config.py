@@ -48,9 +48,17 @@ DEFAULT_SYSTEM_MESSAGE = (
 )
 
 DEFAULTS = {
-    "base_url": "https://api.openai.com/v1",
+    # A local server, not a hosted API.  Pengy's audience runs Ollama or
+    # llama.cpp on their own machine, so the default endpoint is the one those
+    # users already have: Ollama's OpenAI-compatible port.  It needs no API key.
+    "base_url": "http://127.0.0.1:11434/v1",
     "api_key": "",
-    "model": "gpt-4o",
+    # Deliberately empty: a local server ships no model of its own (Ollama has
+    # none bundled -- `ollama list` on a fresh install is empty), so naming one
+    # would only be a lie that fails on the user's first message.  An empty
+    # model produces Pengy's own "pick a model" instructions instead
+    # (llm_client.no_model_help).
+    "model": "",
     "system_message": DEFAULT_SYSTEM_MESSAGE,
     "tool_confirmation": "none",  # "all" | "safe" | "none"
     "reasoning_effort": "",  # "" (provider default) | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"

@@ -16,8 +16,9 @@ LICENSE_NAME = "MIT License"
 _FOUNDING_YEAR = 2026
 
 DESCRIPTION = (
-    "Pengy is a local-first AI agent that connects to any OpenAI-compatible API "
-    "(OpenAI, Ollama, vLLM, Groq, OpenRouter, or a local endpoint) and gives the "
+    "Pengy is a local-first AI agent that defaults to a local model server "
+    "(Ollama; also llama.cpp, vLLM, LM Studio) and connects to any "
+    "OpenAI-compatible API, including hosted ones. It gives the "
     "model tools to operate on your filesystem, run code, search the web, and "
     "more — all with your approval."
 )

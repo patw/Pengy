@@ -4,7 +4,9 @@ import random
 import threading
 import time
 from collections.abc import Callable
-from openai import APIStatusError, OpenAI
+from urllib.parse import urlparse
+
+from openai import APIConnectionError, APIStatusError, OpenAI
 
 from pengy.core import tools as _tools_mod
 
@@ -227,6 +229,41 @@ class CredentialError(RuntimeError):
     exit_code = 2
 
 
+class ConfigError(RuntimeError):
+    """A turn cannot be attempted until the user chooses something.
+
+    Today that means one case: no model is selected.  Pengy's default endpoint is
+    a local server, which ships no model of its own, so the alternative to saying
+    this clearly is sending an empty ``model`` to the endpoint and showing the
+    user whatever it says about that (Ollama: ``model "" not found``).
+    """
+
+    kind = "config"
+    exit_code = 1
+
+
+# Sentinel credentials for endpoints that need none.  The OpenAI SDK refuses to
+# construct with an empty key -- "Missing credentials. Please pass an `api_key` …
+# or set the `OPENAI_API_KEY` … environment variable" -- which is precisely the
+# message that sends a local-server user chasing a variable Pengy never reads.
+# Ollama, llama.cpp and vLLM accept any value; a hosted provider still rejects
+# this one, and that rejection is translated into Pengy's own instructions by
+# :func:`_translate_api_error`, so nothing is masked.
+NO_KEY_PLACEHOLDER = "not-needed"
+
+# Hosts that mean "a model server on this machine".
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
+
+
+def is_local_endpoint(base_url: str) -> bool:
+    """True when *base_url* points at this machine."""
+    try:
+        host = urlparse(base_url).hostname or ""
+    except ValueError:
+        return False
+    return host.lower() in _LOCAL_HOSTS or host.startswith("127.")
+
+
 # Phrases the OpenAI SDK (and most OpenAI-compatible servers) use when a request
 # cannot be authenticated.  Matched case-insensitively on the message text, in
 # addition to status codes and exception class names, because SDK versions differ
@@ -262,6 +299,45 @@ def _looks_like_credential_problem(exc: BaseException) -> bool:
     return any(phrase in text for phrase in _CREDENTIAL_PHRASES)
 
 
+def no_model_help(base_url: str) -> str:
+    """The instructions a user needs when no model is selected.
+
+    A local endpoint ships no model of its own (a fresh Ollama has an empty
+    model list), so the useful answer is how to choose one -- not the endpoint's
+    complaint about an empty model field.
+    """
+    return (
+        f"No model is selected for {base_url}.\n"
+        "\n"
+        "Pengy's default endpoint is a local server, which has no model of its own:\n"
+        "    pengy-cli /models               list the models this endpoint offers\n"
+        "    pengy-cli /model <name>         select one\n"
+        "    ollama pull <name>              (Ollama) download one first, if the list is empty\n"
+        "  Or open Settings in the GUI / Web UI and use Fetch Models."
+    )
+
+
+def unreachable_help(base_url: str, detail: str = "") -> str:
+    """What to say when the endpoint did not answer at all.
+
+    With a local default this is the likeliest first-run failure, and the raw
+    transport text ("Connection error.", or a URL and a socket error) does not
+    tell a new user that the fix is to start their own server.
+    """
+    suffix = f" ({detail})" if detail else ""
+    if is_local_endpoint(base_url):
+        return (
+            f"Nothing answered at {base_url}{suffix}.\n"
+            "\n"
+            "Is your local model server running?\n"
+            "    ollama serve                    (Ollama) start the server, then: ollama pull <name>\n"
+            "    pengy-cli /models               list the models it offers\n"
+            "    pengy-cli /baseurl <url>        point Pengy at a different endpoint\n"
+            "    pengy-cli /config               review the current settings"
+        )
+    return f"Could not reach {base_url}{suffix}. Check the endpoint with pengy-cli /baseurl <url>."
+
+
 def credential_help(base_url: str) -> str:
     """The instructions a user actually needs when credentials are missing."""
     try:
@@ -288,10 +364,25 @@ def credential_help(base_url: str) -> str:
 
 
 def _translate_api_error(exc: BaseException, base_url: str) -> BaseException:
-    """Return a friendlier exception for credential failures, else ``exc``."""
-    if isinstance(exc, CredentialError) or not _looks_like_credential_problem(exc):
+    """Return a friendlier exception for credential/connection failures, else ``exc``."""
+    if isinstance(exc, (CredentialError, ConfigError)):
+        return exc
+    if isinstance(exc, APIConnectionError):
+        # The endpoint never answered. Distinguish "your server is not running"
+        # from "the network is down" so a local-first user gets told the former.
+        return RuntimeError(unreachable_help(base_url, _connection_detail(exc)))
+    if not _looks_like_credential_problem(exc):
         return exc
     return CredentialError(credential_help(base_url))
+
+
+def _connection_detail(exc: BaseException) -> str:
+    """A short human phrase for a connection failure, excluding SDK boilerplate."""
+    text = str(exc).strip()
+    if not text:
+        return "connection failed"
+    # "Connection error." is all the SDK gives; anything longer is worth showing.
+    return text if len(text) < 200 else text[:197] + "..."
 
 
 class LLMClient:
@@ -308,12 +399,20 @@ class LLMClient:
     @property
     def client(self):
         if self._client is None:
+            # A local endpoint needs no key, but the SDK refuses to construct
+            # with an empty one -- raising "Missing credentials. Please pass an
+            # `api_key` … or set the `OPENAI_API_KEY` … environment variable",
+            # the exact message that sends a local-server user after a variable
+            # Pengy never reads.  A hosted provider still rejects the sentinel,
+            # and that rejection becomes Pengy's own instructions (see
+            # _translate_api_error), so a real credentials problem is not hidden.
+            key = self.api_key or NO_KEY_PLACEHOLDER
             self._client = OpenAI(
                 base_url=self.base_url,
-                api_key=self.api_key,
+                api_key=key,
                 timeout=self.llm_timeout,
                 max_retries=0,
-                default_headers={"api-key": self.api_key},
+                default_headers={"api-key": key},
             )
         return self._client
 
@@ -341,6 +440,12 @@ class LLMClient:
         """
         current_messages = list(messages)
         accumulated_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        # Checked here rather than in each frontend so the CLI, GUI and Web UI
+        # cannot disagree -- and because an empty model would otherwise be sent
+        # to the endpoint, whose complaint about it is not an instruction.
+        if not (model or self.model).strip():
+            raise ConfigError(no_model_help(self.base_url))
 
         while True:
             # ── API call with 429 / 529 exponential backoff ──────────

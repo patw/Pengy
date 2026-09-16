@@ -131,7 +131,7 @@ Flask server-side-rendered interface. See [Web UI](#web-ui) section below for de
 │  Chat 3            │  🔧 Using tool: run_bash [command=ls /tmp]       │
 │                    │                                                  │
 │  ─────────────     │  Tool output                                     │
-│  Model: gpt-4o     │  file1.txt  file2.py                             │
+│  Model: llama3.2   │  file1.txt  file2.py                             │
 │  Tool Confirm: None│                                                  │
 │                    │  Assistant 🤖                                    │
 │                    │  Here are the files in /tmp: ...                 │
@@ -217,7 +217,7 @@ Flags (shared with the Rust and C++ CLIs): `--no-save`, `--model NAME`, `--syste
 | `/export [path]` | Export the current chat as Markdown |
 | `/yolo [all\|safe\|none]` | Set tool confirmation: all (YOLO), safe (read-only), none — cycles if no arg |
 | `/config` | Show current configuration (base URL, model, timeout, etc.) |
-| `/model <name>` | Switch models (e.g. `/model gpt-4o`) |
+| `/model <name>` | Switch models (e.g. `/model llama3.2`) |
 | `/models` | Fetch available models from the endpoint's `GET /v1/models` |
 | `/baseurl <url>` | Change the API base URL |
 | `/apikey <key>` | Set the API key |
@@ -355,9 +355,9 @@ Browser shows Bootstrap modal (tool name + args JSON)
 
 ```json
 {
-  "base_url": "https://api.openai.com/v1",
+  "base_url": "http://127.0.0.1:11434/v1",
   "api_key": "",
-  "model": "gpt-4o",
+  "model": "",
   "system_message": "You are a helpful assistant named Pengy. The current date is {date} and the user is {username} on host {hostname} which is {osinfo}.",
   "tool_confirmation": "none",
   "reasoning_effort": "",
@@ -379,9 +379,9 @@ Browser shows Bootstrap modal (tool name + args JSON)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `base_url` | string | `https://api.openai.com/v1` | OpenAI-compatible API endpoint |
-| `api_key` | string | (empty) | API key |
-| `model` | string | `gpt-4o` | Model name |
+| `base_url` | string | `http://127.0.0.1:11434/v1` | OpenAI-compatible API endpoint — a local Ollama server by default |
+| `api_key` | string | (empty) | API key; a local server needs none |
+| `model` | string | (empty) | Model name. No default on purpose: a local server ships no model, so an unset model makes Pengy print "pick a model" instructions (`/models`, `/model <name>`) rather than send `model: ""` |
 | `system_message` | string | (see above) | Template; `{date}`, `{username}`, `{hostname}`, `{osinfo}` filled at send time |
 | `tool_confirmation` | string | `"none"` | Tool confirmation mode: `"all"` (YOLO — skip all confirmations), `"safe"` (auto-approve read-only tools; confirm write/execute), `"none"` (confirm every tool) |
 | `reasoning_effort` | string | `""` | Passed as `reasoning_effort` on API calls when set: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` (`""` = provider default) |

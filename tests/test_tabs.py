@@ -313,26 +313,34 @@ class TestModelDropdown:
 
     def test_dropdown_populated_from_cache(self, window):
         """The cached model list pre-populates the dropdown (endpoint-scoped)."""
+        from pengy.core.config import DEFAULTS
         from pengy.core.model_cache import save_model_cache
 
-        save_model_cache("https://api.openai.com/v1", ["gpt-4o", "gpt-4o-mini"])
+        save_model_cache(DEFAULTS["base_url"], ["llama3.2", "qwen3:8b"])
         window._refresh_model_combo()
 
         combo = window.chat_history.model_combo
         items = [combo.itemText(i) for i in range(combo.count())]
-        assert items == ["gpt-4o", "gpt-4o-mini"]
-        assert combo.currentText() == "gpt-4o"
+        assert items == ["llama3.2", "qwen3:8b"]
+        # The configured model is empty by default (a local endpoint ships no
+        # model of its own), so the first model this endpoint last offered is
+        # pre-selected -- the sidebar must not show a blank while a send would
+        # otherwise resolve to nothing.
+        assert combo.currentText() == "llama3.2"
 
     def test_dropdown_ignores_cache_from_other_endpoint(self, window):
         """A cached list from a different base URL is not offered."""
         from pengy.core.model_cache import save_model_cache
 
-        save_model_cache("http://localhost:8080/v1", ["llama-3"])
+        save_model_cache("http://127.0.0.1:8080/v1", ["llama-3"])
         window._refresh_model_combo()
 
         combo = window.chat_history.model_combo
         items = [combo.itemText(i) for i in range(combo.count())]
-        assert items == ["gpt-4o"]  # only the configured default survives
+        # Nothing survives: that list belongs to another endpoint, and no model
+        # is configured yet, so the Fetch hint is the honest state.
+        assert items == []
+        assert "Fetch" in window.chat_history.model_hint_label.text()
 
     def test_combo_commit_emits_model_changed(self, window):
         emitted = []
@@ -357,9 +365,10 @@ class TestModelDropdown:
         """An empty QLabel still claims a line of layout height, so once a
         model list exists the hint must be hidden outright -- not just
         text-cleared -- or it leaves a permanent gap above Tool Confirm."""
+        from pengy.core.config import DEFAULTS
         from pengy.core.model_cache import save_model_cache
 
-        save_model_cache("https://api.openai.com/v1", ["gpt-4o", "gpt-4o-mini"])
+        save_model_cache(DEFAULTS["base_url"], ["llama3.2"])
         window._refresh_model_combo()
         hint = window.chat_history.model_hint_label
         assert hint.text() == ""
@@ -367,28 +376,31 @@ class TestModelDropdown:
 
     def test_model_change_sets_active_tab_model_and_persists(self, window):
         from pengy.core.chat_manager import get_chat
+        from pengy.core.config import DEFAULTS
 
         session = _active_session(window)
         assert session.chat.get("model") is None
-        assert window.config["model"] == "gpt-4o"
+        # No model is configured by default: a local endpoint ships none.
+        assert window.config["model"] == DEFAULTS["model"] == ""
 
-        window._on_model_changed("gpt-4o-mini")
+        window._on_model_changed("llama3.2")
 
-        assert session.chat["model"] == "gpt-4o-mini"
-        assert window.chat_history.model_combo.currentText() == "gpt-4o-mini"
+        assert session.chat["model"] == "llama3.2"
+        assert window.chat_history.model_combo.currentText() == "llama3.2"
         # Persisted to the chat file, not the global default
-        assert get_chat(session.chat["id"])["model"] == "gpt-4o-mini"
-        assert window.config["model"] == "gpt-4o"
+        assert get_chat(session.chat["id"])["model"] == "llama3.2"
+        assert window.config["model"] == ""
 
     def test_model_change_is_per_tab(self, window):
         first = _active_session(window)
         _dirty_chat(first)
+        window._on_model_changed("llama3.2")  # first tab's own model
         window.create_new_chat()
         second = _active_session(window)
         assert second is not first
 
         window._on_model_changed("deepseek-chat")
-        assert first.chat.get("model") is None
+        assert first.chat["model"] == "llama3.2"
         assert second.chat["model"] == "deepseek-chat"
 
         # Switching tabs swaps the dropdown to that tab's model
@@ -396,7 +408,7 @@ class TestModelDropdown:
             if window.tab_widget.widget(i) is first.chat_view:
                 window.tab_widget.setCurrentIndex(i)
                 break
-        assert window.chat_history.model_combo.currentText() == "gpt-4o"
+        assert window.chat_history.model_combo.currentText() == "llama3.2"
 
         for i in range(window.tab_widget.count()):
             if window.tab_widget.widget(i) is second.chat_view:

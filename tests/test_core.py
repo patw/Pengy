@@ -38,8 +38,17 @@ def tmp_cfg_dir():
 class TestConfig:
     def test_defaults(self):
         from pengy.core.config import DEFAULTS
-        assert DEFAULTS["base_url"] == "https://api.openai.com/v1"
-        assert DEFAULTS["model"] == "gpt-4o"
+        # A local endpoint, because that is what this app's users run: Ollama's
+        # OpenAI-compatible port. Not a hosted API, and not a vendor that needs
+        # a key someone has to go and buy first.
+        assert DEFAULTS["base_url"] == "http://127.0.0.1:11434/v1"
+        assert "openai" not in DEFAULTS["base_url"]
+        assert DEFAULTS["api_key"] == ""  # a local server needs no key
+        # No model default, deliberately: a local server ships no model of its
+        # own (a fresh `ollama list` is empty), so naming one would be a lie that
+        # fails on the user's first message. The empty string produces "choose a
+        # model" instructions instead (llm_client.no_model_help).
+        assert DEFAULTS["model"] == ""
         assert DEFAULTS["tool_confirmation"] == "none"
         assert DEFAULTS["context_keep_turns"] == 0
         assert DEFAULTS["tool_timeout"] == 300
@@ -76,7 +85,7 @@ class TestConfig:
 
         # Should load defaults without crashing
         loaded = cfg_mod.load_config()
-        assert loaded["model"] == "gpt-4o"  # default
+        assert loaded["model"] == cfg_mod.DEFAULTS["model"]  # default
 
         # Bad file should have been backed up
         backups = list(tmp_cfg_dir.glob("settings.json.corrupt-*"))

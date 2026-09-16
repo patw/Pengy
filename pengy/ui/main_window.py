@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QTextOption
 
-from pengy.core.config import load_config, save_config, render_system_message
+from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.model_cache import cached_models_for
 from pengy.core.chat_manager import (
     load_index, create_chat, save_chat, get_chat, delete_chat,
@@ -421,12 +421,26 @@ class MainWindow(QMainWindow):
         """Populate the sidebar model dropdown from the persistent cache."""
         models = cached_models_for(self.config.get("base_url", ""))
         session = self._tab_for_chat(self.active_chat_id) if self.active_chat_id else None
-        current = self._model_for_session(session) if session else self.config.get("model", "gpt-4o")
+        current = self._model_for_session(session) if session else self.config.get("model", DEFAULTS["model"])
         self.chat_history.set_models(models, current)
 
     def _model_for_session(self, session: _TabSession) -> str:
-        """Resolve the model for a tab: its per-tab override, else the default."""
-        return session.chat.get("model") or self.config.get("model", "gpt-4o")
+        """Resolve the model for a tab: its per-tab override, else the default.
+
+        The configured default is empty until a model is chosen, because a local
+        endpoint ships none (a fresh `ollama list` is empty).  Falling back to the
+        first model the endpoint last offered keeps the sidebar honest: without
+        it the dropdown could be showing a model while a send still failed with
+        "no model is selected".
+        """
+        return (session.chat.get("model")
+                or self.config.get("model", DEFAULTS["model"])
+                or self._first_cached_model())
+
+    def _first_cached_model(self) -> str:
+        """First model cached for the configured endpoint, if any."""
+        models = cached_models_for(self.config.get("base_url", ""))
+        return models[0] if models else ""
 
     def _on_model_changed(self, model: str):
         """Handle a model committed in the sidebar dropdown (active tab only)."""

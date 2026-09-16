@@ -10,7 +10,7 @@
 
 ## What is Pengy?
 
-Pengy is an LLM agent that runs on your own machine. It connects to OpenAI, Ollama, vLLM, Groq, OpenRouter, or any local endpoint, and gives the model 15 built-in tools to operate on your filesystem, run code, search the web, and more — all with your approval.
+Pengy is an LLM agent that runs on your own machine. It defaults to a **local server** — Ollama's OpenAI-compatible port — and also speaks to llama.cpp, vLLM, LM Studio, or any hosted OpenAI-compatible API (OpenAI, Groq, OpenRouter). It gives the model 15 built-in tools to operate on your filesystem, run code, search the web, and more — all with your approval.
 
 Three interfaces, one agent:
 
@@ -94,6 +94,31 @@ in a terminal.
 
 ### CLI (interactive or single-shot)
 
+First, make sure there is a model to talk to. The default endpoint is a local
+server, so all it takes is Ollama itself — and no API key, ever:
+
+```bash
+ollama serve                  # if it is not already running
+ollama pull llama3.2          # any model you like
+pengy-cli /models             # list what the endpoint offers
+pengy-cli /model llama3.2     # select one
+```
+
+There is deliberately **no default model**: a local server ships none of its own,
+so naming one would simply fail on your first message. Until you pick one, Pengy
+says so and tells you how — it never sends an empty model name to the endpoint.
+
+Using a different server (llama.cpp, vLLM, LM Studio) or a hosted API? Point
+Pengy at it once, and it is remembered:
+
+```bash
+pengy-cli /baseurl http://127.0.0.1:8080/v1     # llama.cpp
+pengy-cli /baseurl https://api.openai.com/v1    # or a hosted API…
+pengy-cli /apikey sk-...                        # …which needs a key
+```
+
+The same settings live in Settings in the GUI and Web UI.
+
 ```bash
 pengy-cli
 pengy-cli "What is the capital of France?"
@@ -111,7 +136,7 @@ The web UI is for single-user personal use. For remote access, put it behind ngi
 
 ## Features
 
-- **OpenAI-compatible** — Works with OpenAI, Ollama, vLLM, LM Studio, OpenRouter, Groq, or any local endpoint
+- **Local-first** — Defaults to a local Ollama endpoint (no API key, no account). Also works with llama.cpp, vLLM, LM Studio, OpenRouter, Groq, OpenAI, or any OpenAI-compatible endpoint
 - **15 built-in tools** — Read, write, and edit files; run bash (with sudo support) and Python; search the web and fetch URLs; explore directories, glob files, and search code; track multi-step ops with structured to-do lists; ask clarifying questions when instructions are vague
 - **Agentic workflow** — The LLM chains multiple tool calls per turn, piping results from one into the next
 - **Tool confirmation** — Three modes: auto-approve everything, auto-approve read-only tools only, or confirm every call
@@ -151,9 +176,9 @@ The web UI is for single-user personal use. For remote access, put it behind ngi
 
 | Setting | Description |
 |---------|-------------|
-| Base URL | API endpoint (e.g. `http://localhost:11434/v1` for Ollama) |
+| Base URL | API endpoint — defaults to `http://127.0.0.1:11434/v1` (Ollama) |
 | API Key | Your API key (or anything for local endpoints) |
-| Model | Model name, e.g. `gpt-4o`, `llama3`, `gemma` |
+| Model | Model name, e.g. `llama3.2`, `qwen3:8b`, `gemma3` — **no default**, see below |
 | System Message | Supports `{date}`, `{username}`, `{hostname}`, `{osinfo}` placeholders |
 | Tool Confirmation | All / Safe / None — controls which tools require approval |
 | Theme Mode (GUI) | System / Light / Dark — follows OS palette |

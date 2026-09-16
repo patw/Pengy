@@ -22,8 +22,8 @@ from pengy.core.about import (
     CATBEE_BLURB, CATBEE_URL, DESCRIPTION, GITHUB_URL, LICENSE_NAME, LICENSE_URL,
     WEBSITE_URL, copyright_line, edition_line,
 )
-from pengy.core.config import load_config, save_config, render_system_message
-from pengy.core.model_cache import load_model_cache, save_model_cache
+from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
+from pengy.core.model_cache import cached_models_for, load_model_cache, save_model_cache
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
     create_chat, delete_chat, get_chat, load_index, save_chat, save_chat_progress,
@@ -274,6 +274,18 @@ def _theme_mode(config: dict) -> str:
     return mode if mode in ("system", "light", "dark") else "system"
 
 
+def _first_cached_model(config: dict) -> str:
+    """First model this endpoint last offered, if one was ever fetched.
+
+    Stands in for the (deliberately empty) default model: a local server ships
+    no model of its own, so "what this endpoint had last time" is a better guess
+    than sending an empty model name.  With no cache either, the guard in
+    ``LLMClient.chat`` explains how to choose one.
+    """
+    models = cached_models_for(config.get("base_url", ""))
+    return models[0] if models else ""
+
+
 def _build_messages(chat: dict, config: dict) -> list[dict]:
     system_msg = config.get("system_message", "")
     messages = []
@@ -478,9 +490,9 @@ class WebWorker:
             )
 
             llm = LLMClient(
-                base_url=config.get("base_url", "https://api.openai.com/v1"),
+                base_url=config.get("base_url", DEFAULTS["base_url"]),
                 api_key=config.get("api_key", ""),
-                model=config.get("model", "gpt-4o"),
+                model=config.get("model", DEFAULTS["model"]) or _first_cached_model(config),
                 llm_timeout=config.get("llm_timeout", 300),
             )
 

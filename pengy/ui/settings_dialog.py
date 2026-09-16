@@ -15,6 +15,7 @@ from pengy.core.about import (
     CATBEE_BLURB, CATBEE_URL, DESCRIPTION, GITHUB_URL, LICENSE_NAME, LICENSE_URL,
     WEBSITE_URL, copyright_line, edition_line,
 )
+from pengy.core.config import DEFAULTS
 from pengy.core.model_cache import cached_models_for, load_model_cache, save_model_cache
 from pengy.ui.theme import ACCENT_NAMES, THEME_MODES, get_theme, scaled_size
 from pengy.ui.icons import apply_button_icon
@@ -96,9 +97,12 @@ class SettingsDialog(QDialog):
         llm_layout = QFormLayout(llm_tab)
         llm_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        self.base_url_input = QLineEdit(config.get("base_url", "https://api.openai.com/v1"))
-        self.base_url_input.setToolTip("OpenAI-compatible API endpoint, e.g. https://api.openai.com/v1 or a local llama.cpp server.")
-        llm_layout.addRow(_label("Base URL:", "OpenAI-compatible API endpoint, e.g. https://api.openai.com/v1 or a local llama.cpp server."), self.base_url_input)
+        self.base_url_input = QLineEdit(config.get("base_url", DEFAULTS["base_url"]))
+        _base_url_tip = ("OpenAI-compatible API endpoint. The default is a local Ollama "
+                         "server, which needs no API key — e.g. http://127.0.0.1:11434/v1 "
+                         "(Ollama) or http://127.0.0.1:8080/v1 (llama.cpp).")
+        self.base_url_input.setToolTip(_base_url_tip)
+        llm_layout.addRow(_label("Base URL:", _base_url_tip), self.base_url_input)
 
         self.api_key_input = QLineEdit(config.get("api_key", ""))
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -109,21 +113,28 @@ class SettingsDialog(QDialog):
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        current_model = config.get("model", "gpt-4o")
-        self.model_combo.addItem(current_model)
-        self.model_combo.setCurrentText(current_model)
+        current_model = config.get("model", DEFAULTS["model"])
         # Pre-populate from the persistent model cache so the dropdown
         # survives between sessions.  The list may be stale, but populated.
         cached = cached_models_for(self.base_url_input.text())
         self.model_cache_note = QLabel("")
         self.model_cache_note.setStyleSheet(f"color: {self._theme['muted']};")
         self.model_cache_note.setWordWrap(True)
+        if current_model:
+            self.model_combo.addItem(current_model)
+            self.model_combo.setCurrentText(current_model)
         if cached:
-            items = [current_model] + [m for m in cached if m != current_model]
+            items = ([current_model] if current_model else []) + [m for m in cached if m != current_model]
             self.model_combo.clear()
             self.model_combo.addItems(items)
-            self.model_combo.setCurrentText(current_model)
+            self.model_combo.setCurrentText(current_model or items[0])
             self._update_cache_note(load_model_cache())
+        elif not current_model:
+            # The default model is deliberately empty (a local endpoint ships no
+            # model of its own), so on a fresh install there is nothing to
+            # pre-select.  Say what to do rather than showing an empty box.
+            self.model_cache_note.setText(
+                f"No model selected yet \u2014 press Fetch to list what {self.base_url_input.text()} offers.")
         self.model_combo.setToolTip("Model name sent in chat completion requests. Use Fetch to list available models from the endpoint.")
         model_row.addWidget(self.model_combo, 1)
 

@@ -275,31 +275,36 @@ class TestSettingsDialogCache:
         assert dialog.fetch_models_btn.isEnabled(), "fetch did not finish"
 
     def test_dialog_prepopulates_from_cache(self, qapp, cfg_dir):
-        from pengy.core.config import load_config
+        from pengy.core.config import DEFAULTS, load_config
         from pengy.ui.settings_dialog import SettingsDialog
 
-        _set_endpoint(cfg_dir, "https://api.openai.com/v1")
-        save_model_cache("https://api.openai.com/v1", ["gpt-4o", "gpt-4o-mini"])
+        _set_endpoint(cfg_dir, DEFAULTS["base_url"])
+        save_model_cache(DEFAULTS["base_url"], ["llama3.2", "qwen3:8b"])
 
-        config = load_config()  # model defaults to gpt-4o
+        config = load_config()  # model defaults to "" -- a local server ships none
         dialog = SettingsDialog(config)
         try:
             items = [dialog.model_combo.itemText(i) for i in range(dialog.model_combo.count())]
-            assert items == ["gpt-4o", "gpt-4o-mini"]
-            assert dialog.model_combo.currentText() == "gpt-4o"
+            assert items == ["llama3.2", "qwen3:8b"]
+            # With no model configured, the first fetched model is offered
+            # rather than an empty entry in the list.
+            assert dialog.model_combo.currentText() == "llama3.2"
             assert "last fetched" in dialog.model_cache_note.text()
         finally:
             dialog.deleteLater()
 
-    def test_dialog_without_cache_starts_single_entry(self, qapp, cfg_dir):
-        from pengy.core.config import load_config
+    def test_dialog_without_cache_or_model_says_how_to_pick_one(self, qapp, cfg_dir):
+        from pengy.core.config import DEFAULTS, load_config
         from pengy.ui.settings_dialog import SettingsDialog
 
-        _set_endpoint(cfg_dir, "https://api.openai.com/v1")
+        _set_endpoint(cfg_dir, DEFAULTS["base_url"])
         dialog = SettingsDialog(load_config())
         try:
-            assert [dialog.model_combo.itemText(i) for i in range(dialog.model_combo.count())] == ["gpt-4o"]
-            assert dialog.model_cache_note.text() == ""
+            # A fresh install: local endpoint, no model chosen, nothing fetched.
+            # The combo stays empty (no phantom blank entry) and the note says
+            # what to do about it.
+            assert [dialog.model_combo.itemText(i) for i in range(dialog.model_combo.count())] == []
+            assert "Fetch" in dialog.model_cache_note.text()
         finally:
             dialog.deleteLater()
 

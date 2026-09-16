@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from pengy.core.config import load_config, save_config, render_system_message
+from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
     load_index, get_chat, create_chat, save_chat, delete_chat,
@@ -565,7 +565,7 @@ class PengyCLI:
         table.add_row("/clear", "Clear the terminal screen")
         table.add_row("/export [path]", "Export current chat as Markdown")
         table.add_row("/config", "Show current configuration")
-        table.add_row("/model <name>", "Change the model (e.g. /model gpt-4o)")
+        table.add_row("/model <name>", "Change the model (e.g. /model llama3.2)")
         table.add_row("/models", "Fetch available models from the endpoint")
         table.add_row("/baseurl <url>", "Set the API base URL (e.g. /baseurl http://localhost:11434/v1)")
         table.add_row("/apikey <key>", "Set the API key")
@@ -1307,9 +1307,9 @@ class PengyCLI:
     def _update_llm_client(self):
         """Recreate the LLM client from current config."""
         self.llm_client = LLMClient(
-            base_url=self.config.get("base_url", "https://api.openai.com/v1"),
+            base_url=self.config.get("base_url", DEFAULTS["base_url"]),
             api_key=self.config.get("api_key", ""),
-            model=self.config.get("model", "gpt-4o"),
+            model=self.config.get("model", DEFAULTS["model"]),
             llm_timeout=self.config.get("llm_timeout", 300),
         )
         tools.set_user_agent(self.config.get("user_agent", "PengyAgent/1.0"))

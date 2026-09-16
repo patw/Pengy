@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **The defaults are local now, not OpenAI.** `base_url` is
+  `http://127.0.0.1:11434/v1` — Ollama's OpenAI-compatible port, which needs no
+  API key — and `model` is **empty**, because a local server ships no model of
+  its own (a fresh `ollama list` is empty, so naming one would just fail on the
+  user's first message). This is the audience the app is for: people running
+  Ollama or llama.cpp on their own machine, not people with an OpenAI account.
+  Existing `settings.json` files are untouched — anything you have already
+  configured wins, and nothing is rewritten.
+- **An unset model explains itself instead of being sent.** Until a model is
+  chosen, `LLMClient.chat` raises a `ConfigError` (kind `config`) carrying
+  `no_model_help()`: `/models` to list what the endpoint offers, `/model <name>`
+  to pick one, `ollama pull <name>` if the list is empty, or Fetch Models in the
+  GUI/Web UI. No request is made, so the endpoint never sees `model: ""`. The
+  GUI sidebar and Web UI fall back to the first model the endpoint last
+  advertised, so what they show is what a send will use.
+- **An endpoint that never answers says so usefully.** With a local default, a
+  connection failure is the likeliest first-run mistake, and `Error: Connection
+  error.` is not an instruction. Local endpoints now get "Nothing answered at
+  <url> — is your local model server running?" plus `ollama serve` and
+  `/baseurl`; remote endpoints get "Could not reach <url>".
+- **The OpenAI SDK's empty-key error can no longer reach a user.** The SDK
+  refuses to build a client with an empty key — "Missing credentials. Please pass
+  an `api_key` ... or set the `OPENAI_API_KEY` environment variable" — which is
+  exactly the message the 1.8.4 work removed, and it is what a local-Ollama user
+  got today. A keyless endpoint now uses the sentinel `not-needed`; a hosted
+  provider still rejects that, and the rejection is still translated into
+  Pengy's own `/apikey` instructions, so a real credentials problem is not
+  hidden. `credential_help` also now says the default local endpoint needs no key.
+
 - **Fixed: a failed turn reported success.** `pengy-cli` printed `Error: ...` to
   *stdout* and exited **0**, so scripts, cron jobs and anything parsing
   `--output json` saw a silent failure. A failed single-shot turn now writes the

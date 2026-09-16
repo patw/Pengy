@@ -251,6 +251,32 @@ class TestSingleShotContract:
         assert "boom" in captured.err
         assert cli._turn_error is not None  # recorded, but no SystemExit raised
 
+    def test_missing_model_exits_nonzero_with_a_pick_a_model_hint(
+        self, cli, monkeypatch, capsys
+    ):
+        """The default model is empty on purpose (a local server ships none).
+
+        Single-shot mode must say how to choose one and exit 1 -- a config
+        problem, not a credentials one -- instead of sending ``model: ""`` and
+        reporting whatever the endpoint replies as the assistant's answer.
+        """
+        from pengy.core.config import DEFAULTS
+
+        _patch_chat(
+            monkeypatch,
+            llm_client.ConfigError(
+                llm_client.no_model_help(DEFAULTS["base_url"])
+            ),
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli.run_single_shot("hello")
+        assert exc.value.code == 1
+
+        captured = capsys.readouterr()
+        assert "No model is selected" in captured.err
+        assert "/models" in captured.err
+        assert captured.out == ""  # a failed turn never claims stdout
+
 
 class TestHandlerIsolation:
     """The CLI's error paths must never write to stdout in json mode."""
