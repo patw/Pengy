@@ -10,7 +10,7 @@
 
 ## What is Pengy?
 
-Pengy is an LLM agent that runs on your own machine. It defaults to a **local server** — Ollama's OpenAI-compatible port — and also speaks to llama.cpp, vLLM, LM Studio, or any hosted OpenAI-compatible API (OpenAI, Groq, OpenRouter). It gives the model 15 built-in tools to operate on your filesystem, run code, search the web, and more — all with your approval.
+Pengy is an LLM agent that runs on your own machine. It defaults to a **local server** — Ollama's OpenAI-compatible port — and also speaks to llama.cpp, vLLM, LM Studio, or any hosted OpenAI-compatible API (OpenAI, Groq, OpenRouter). It gives the model 16 built-in tools to operate on your filesystem, inspect images, run code, search the web, and more — all with your approval.
 
 Three interfaces, one agent:
 
@@ -137,7 +137,7 @@ The web UI is for single-user personal use. For remote access, put it behind ngi
 ## Features
 
 - **Local-first** — Defaults to a local Ollama endpoint (no API key, no account). Also works with llama.cpp, vLLM, LM Studio, OpenRouter, Groq, OpenAI, or any OpenAI-compatible endpoint
-- **15 built-in tools** — Read, write, and edit files; run bash (with sudo support) and Python; search the web and fetch URLs; explore directories, glob files, and search code; track multi-step ops with structured to-do lists; ask clarifying questions when instructions are vague
+- **16 built-in tools** — Read files and inspect images; write and edit files transactionally; run bash (with sudo support) and Python; search the web and fetch URLs; explore directories, glob files, and search code; track multi-step ops with structured to-do lists; ask clarifying questions when instructions are vague
 - **Agentic workflow** — The LLM chains multiple tool calls per turn, piping results from one into the next
 - **Tool confirmation** — Three modes: auto-approve everything, auto-approve read-only tools only, or confirm every call
 - **Tabbed chat** — Multiple concurrent chat sessions, each with its own worker thread
@@ -204,11 +204,12 @@ When you hit **▶ Play**, Pengy collects each placeholder once, renders the ful
 
 ## Tools
 
-Pengy gives the LLM these tools to operate on your machine:
+Pengy gives the LLM these 16 tools to operate on your machine:
 
 | Tool | Description |
 |------|-------------|
 | `read_file` / `read_multiple_files` | Read one or more files at once |
+| `read_image` | Inspect a local image, screenshot, photo, diagram, or chart |
 | `write_file` | Write or overwrite a file |
 | `replace_in_file` | Targeted text replacement (safer than full rewrites) |
 | `apply_changes` | Multi-file transactional edits with diff preview |
@@ -227,9 +228,9 @@ Pengy gives the LLM these tools to operate on your machine:
 
 ## Skills
 
-The 15 built-in tools cover the basics, but Pengy is designed to be extended with **skills** — your own custom instructions and scripts stored as plain markdown files.
+The 16 built-in tools cover the basics, but Pengy is designed to be extended with **skills** — local instruction files with optional helper scripts.
 
-A skill is just a `skillname/skillname_skill.md` file with instructions Pengy can read, optionally backed by a bash or Python script. No SDK, no manifest, no packaging — point Pengy at a directory and it figures out the rest.
+A local skill normally has a `skillname/skillname_skill.md` instruction file, optionally backed by a bash or Python helper. Put installed skills under `~/skills/` and list them in `skill_index.md`; Pengy's system instructions tell it to consult that index and read the selected skill before acting. For reusable packages, [BotSkills](https://skills.catbee.ca) lets you inspect a skill, download its ZIP, and review its manifest and helper scripts before installing it.
 
 This means your Pengy can do whatever you need it to:
 - Fetch weather from an API
@@ -243,7 +244,7 @@ This means your Pengy can do whatever you need it to:
 
 Skills are also self-authoring — ask Pengy to create one for you, and it writes the markdown, writes the script, and updates the index, all in one conversation.
 
-**📖 Read the full guide:** [`skills/README.md`](skills/README.md) — covers the philosophy, how skills work, 4 complete examples, and how to make your own.
+**📖 Start with [BotSkills](https://skills.catbee.ca) or read the full local guide:** [`skills/README.md`](skills/README.md) — covers the philosophy, how skills work, 4 complete examples, and how to make your own.
 
 ---
 
@@ -326,7 +327,7 @@ Pengy (Python) is the **reference implementation**. Two high-performance ports s
 | [**PengyR**](https://github.com/patw/PengyR) | Rust + Qt6 | High-performance native binary, statically-linked core |
 | [**PengyCPP**](https://github.com/patw/PengyCPP) | C++17 + Qt6 | Highest performance, smallest memory footprint |
 
-All three offer the same 15 tools, desktop theme controls, reusable task templates, three interfaces (GUI/CLI/Web), and full chat/task interop. PengyR and PengyCPP ship pre-built AppImage, `.deb`, `.dmg`, and `.zip` releases; Pengy (this one) installs from PyPI with `pip install pengy`, which includes the CLI and Web UI, plus the Qt GUI via `pengy[gui]`.
+All three offer the same 16 tools, durable image attachments, desktop theme controls, reusable task templates, three interfaces (GUI/CLI/Web), and full chat/task interop. PengyR and PengyCPP ship pre-built AppImage, `.deb`, `.dmg`, and `.zip` releases; Pengy (this one) installs from PyPI with `pip install pengy`, which includes the CLI and Web UI, plus the Qt GUI via `pengy[gui]`.
 
 ---
 

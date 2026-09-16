@@ -98,9 +98,10 @@ Pure Python — no Qt or terminal dependencies. Shared by both GUI and CLI.
 | Module | Responsibility |
 |--------|---------------|
 | `config.py` | Load/save `~/.config/pengy/settings.json` with default merging; `render_system_message()` fills `{date}`, `{username}`, `{hostname}`, `{osinfo}` placeholders at call time |
-| `chat_manager.py` | CRUD for `~/.config/pengy/chats.json`; chats are plain dicts with `id` (UUID), `title`, `messages[]`, `created_at` |
+| `chat_manager.py` | Per-chat CRUD and a derived history index under `~/.config/pengy/chats/`; imports legacy `chats.json` as a compatibility seed |
+| `attachments.py` | Durable content-addressed image attachment references, source objects, display derivatives, and provider-message resolution |
 | `llm_client.py` | `LLMClient.chat()` — a Python generator that yields `tool_request`, `assistant_tool_calls`, `tool_result`, or `final_response` dicts. Callers `.send()` confirmation dicts back into the generator to resume after tool calls |
-| `tools.py` | 15 OpenAI function-calling tool schemas (`TOOLS`) and `execute_tool(name, arguments)`. Also manages `_sudo_password_provider` (callback set by UI or CLI) and `_tool_timeout` |
+| `tools.py` | 16 OpenAI function-calling tool schemas (`TOOLS`) and `execute_tool(name, arguments)`. Also manages `_sudo_password_provider` (callback set by UI or CLI) and `_tool_timeout` |
 
 ### Desktop UI Package (`pengy/ui/`)
 
@@ -189,7 +190,7 @@ python -m pengy.cli.main "What is the capital of France?"
 ### Interactive Mode
 
 On startup:
-1. Loads the most recent chat from `chats.json` (or creates a new one if none exist)
+1. Loads the most recent per-chat record from `chats/` (or creates a new one if none exist)
 2. Shows a welcome panel with model name and tool confirmation status
 3. Enters the REPL loop: prompt → send → stream generator → loop
 
@@ -227,7 +228,11 @@ Flags (shared with the Rust and C++ CLIs): `--no-save`, `--model NAME`, `--syste
 | `/list` | List recent chats with index, title, message count, and creation date |
 | `/load <index>` | Load a chat by its `/list` index |
 | `/delete <index>` | Delete a chat by its `/list` index |
-| `/attach <path>` | Attach a text file (or use `@path` inline in your prompt) |
+| `/attach` | Show attachment help; use `@path` inline in a prompt |
+| `/attachments` | Show durable attachment-storage usage (read-only) |
+| `/tasks` / `/task <#>` | List or run saved prompt templates |
+| `/redact [n]` | Remove the last raw message(s), repeatable to an empty chat |
+| `/llm-timeout <sec>` / `/download-max <mb>` | Set LLM request timeout or default download cap |
 | `/system [message]` | Show or set the system message template |
 | `/compact` | Elide old tool results to free context window space |
 | `/quit`, `/exit`, `/q` | Exit the CLI |
@@ -363,6 +368,7 @@ Browser shows Bootstrap modal (tool name + args JSON)
   "reasoning_effort": "",
   "preserve_reasoning": false,
   "context_keep_turns": 0,
+  "attachment_context_keep_turns": 4,
   "ui_scale": 100,
   "theme_mode": "system",
   "theme_accent": "default",
@@ -387,6 +393,7 @@ Browser shows Bootstrap modal (tool name + args JSON)
 | `reasoning_effort` | string | `""` | Passed as `reasoning_effort` on API calls when set: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` (`""` = provider default) |
 | `preserve_reasoning` | bool | `false` | Keep reasoning fields (`reasoning_content`, `reasoning`, `reasoning_details`) on assistant messages sent back to the API |
 | `context_keep_turns` | int | `0` | Number of recent turns whose tool results are kept; older ones are elided to `[tool output from earlier turn elided]`. 0 = keep all. |
+| `attachment_context_keep_turns` | int | `4` | Recent turns whose durable image attachments are resolved into provider requests; `0` sends no historical attachments. |
 | `ui_scale` | int | `100` | Sets `QT_SCALE_FACTOR` on next launch (75/100/125/200); CLI ignores this |
 | `theme_mode` | string | `"system"` | Desktop theme: `"system"`, `"light"`, or `"dark"` |
 | `theme_accent` | string | `"default"` | Desktop accent color: `default`/`blue`/`teal`/`green`/`orange`/`red`/`pink`/`purple` |
@@ -410,26 +417,50 @@ Browser shows Bootstrap modal (tool name + args JSON)
 | `{hostname}` | `socket.gethostname()` |
 | `{osinfo}` | `f"{platform.system()} {platform.release()}"` |
 
-### Chats File: `~/.config/pengy/chats.json`
+### Chat storage: `~/.config/pengy/chats/`
 
-Array of chat session objects:
+**Conformance: required.** Each authoritative chat is one JSON file at
+`chats/<uuid>.json`; `chats/index.json` is a rebuildable cache used for fast history listings.
+The index contains only `{id, title, created_at, msg_count, preview}` summaries and is never the
+source of truth. If it is missing, stale, corrupt, or loses a cross-process update, rebuild it by
+scanning the per-chat files. Writes use temp-file plus rename.
+
+A legacy `~/.config/pengy/chats.json` array remains a compatibility seed for older editions. Import
+its chats when absent from the per-chat store; never append new turns to it. When deleting a chat,
+remove its legacy entry too so it cannot be resurrected by a later import.
+
+An authoritative chat is:
 
 ```json
-[
-  {
-    "id": "uuid-here",
-    "title": "First message preview...",
-    "messages": [
-      {"role": "user", "content": "Hello"},
-      {"role": "assistant", "content": "Hi there!"}
-    ],
-    "created_at": "2026-05-13T21:00:00"
-  }
-]
+{
+  "id": "uuid-here",
+  "title": "First message preview...",
+  "messages": [
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hi there!"}
+  ],
+  "created_at": "2026-05-13T21:00:00",
+  "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+}
 ```
 
-Only `user`, `assistant` (including those with `tool_calls`), and `tool` messages are persisted. This means a chat can be reloaded and rendered without re-running tools. When re-sending, the stored messages are passed to the API directly — the agent continues from where it left off.
+Only `user`, `assistant` (including those with `tool_calls`), and `tool` messages are persisted.
+The optional `usage` object is the cumulative total for the chat, not merely its last turn. This
+lets a chat reload and render without re-running tools, then continue from its stored messages.
 
+### Durable image attachments: `~/.config/pengy/attachments/`
+
+**Conformance: required for editions that support image attachments.** Chat messages store compact
+attachment references in `message.attachments`, never base64 image data. An image reference uses
+schema version 1 and a content ID: `{"v":1,"id":"sha256:<64 lowercase hex>","kind":"image",
+"name":"...","media_type":"image/...","byte_size":N,"created_at":"RFC3339","image":{"width":W,"height":H}}`.
+
+The immutable source bytes live under `attachments/objects/sha256/<first-two-hex>/<digest>`. Derived
+safe JPEG representations live under `attachments/derivatives/sha256/<first-two-hex>/<digest>/` as
+`image-display-v1.jpg` and `thumbnail-256-v1.jpg`. Validate the digest/path shape before serving or
+loading; write objects/derivatives atomically and keep source files private. Preserve unknown fields
+in references for forward compatibility. Resolve only bounded recent attachment turns into OpenAI
+image content parts at request time; persisted history stays compact.
 ---
 
 ## Tools
@@ -442,6 +473,11 @@ Tool argument previews are shown in the chat view truncated to 40 characters: `�
 
 ### `read_file(path)`
 Reads a local file. Expands `~`. Returns file contents or an error string.
+
+### `read_image(path)`
+Loads a local PNG, JPEG, GIF, WebP, BMP, or TIFF for the model to inspect. It produces an image
+content part for the next provider request rather than pretending image bytes are ordinary tool text.
+Large images are bounded by the configured image limits.
 
 ### `read_multiple_files(paths)`
 Reads up to 20 files at once, each under a clear header. The per-file budget equals `tool_output_max_chars`; the total batch budget is five times that value. `0` disables these output limits. Binary files are rejected with a clear error.
@@ -725,7 +761,7 @@ Attached images are sent as OpenAI-style content parts on the user message:
 
 *Conformance: **required**.*
 
-Tasks are reusable prompt templates stored in `~/.config/pengy/tasks.json` (same format across all Pengy editions). Each task has a title and a template body; `%placeholder%` tokens are collected via a form when the task is played, and the rendered prompt is sent through the normal chat path. Managed via the Tasks dialog in the desktop GUI (currently GUI-only — no CLI or web surface).
+Tasks are reusable prompt templates stored in `~/.config/pengy/tasks.json` (same format across all Pengy editions). Each task has a stable id, title, template, `created_at`, and `updated_at`; `%placeholder%` tokens are collected once in first-occurrence order, then the rendered prompt is sent through the normal chat path. All three frontends expose Tasks: desktop manager/player, CLI `/tasks` and `/task <#>`, and Web task picker/render endpoint. Keep task storage interoperable even when a frontend chooses a different editor or picker.
 
 ---
 

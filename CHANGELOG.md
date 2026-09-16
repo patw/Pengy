@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v1.8.5
+
+- **Polished every CLI surface.** Rust panels now measure ANSI styling and complex emoji at zero/appropriate display width, so wrapped Markdown and tool output keep their right borders aligned. Python, Rust, and C++ preserve complex UTF-8 emoji in model output; C++ raw/JSON/silent output no longer leaks spinner control sequences.
+- **More reliable web completion and documented SSE contracts.** Rust web now retains and replays events even when a fast turn completes before the browser opens its SSE connection. Python and C++ already use append-only per-chat logs independent of live subscribers; regression coverage now pins that behavior in all editions.
+- **Skills onboarding is clearer.** The Skills guide and README point to [BotSkills](https://skills.catbee.ca), where users can inspect reusable complete skill packages, download and review them before installation, then activate them through `~/skills/` and `skill_index.md`.
+- **Documentation now matches the shared application contract.** READMEs identify all 16 built-in tools and durable image attachment interop. The specifications now cover per-chat files plus rebuildable history index, legacy migration, cumulative usage, durable content-addressed attachments, bounded attachment context, and Tasks across GUI, CLI, and Web.
+
 - **The defaults are local now, not OpenAI.** `base_url` is
   `http://127.0.0.1:11434/v1` — Ollama's OpenAI-compatible port, which needs no
   API key — and `model` is **empty**, because a local server ships no model of

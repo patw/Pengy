@@ -534,6 +534,17 @@ class TestCumulativeUsage:
         cli._render_final({"content": "hi", "message": {"role": "assistant", "content": "hi"}}, chat)
         assert chat["usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
+    @pytest.mark.parametrize("mode", ["pretty", "raw", "json"])
+    def test_render_final_preserves_emoji(self, mode, capsys):
+        content = "✨ Great work! 👨‍💻 🚀 ☕️ 🇨🇦 1️⃣ ❤️"
+        cli = self._cli(mode)
+        chat = {"id": "emoji", "messages": []}
+        cli._render_final({"content": content, "message": {"role": "assistant", "content": content}}, chat)
+        out = capsys.readouterr().out
+        assert "👨‍💻" in out
+        assert "🇨🇦" in out
+        assert "❤️" in out
+
 
 # ────────────────────────────────────────────────────────────────────
 # Mid-turn assistant narration

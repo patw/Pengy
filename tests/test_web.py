@@ -562,6 +562,17 @@ class TestWebWorker:
         assert events[0]["type"] == "final_response"
         assert events[0]["html"] == "<p>done</p>"
 
+    def test_events_completed_before_sse_subscription_replay(self, tmp_dirs):
+        """A fast completed turn must not require a live SSE subscriber."""
+        chat = {"id": "test-id", "title": "test", "messages": []}
+        w = WebWorker(chat, {"model": "gpt-4o", "tool_confirmation": "none"})
+        # No iter_events consumer exists while this is appended.
+        w._put_event({"type": "final_response", "html": "<p>fast response</p>"})
+        assert w.event_count == 1
+        assert list(w.iter_events(timeout=0.5)) == [
+            {"type": "final_response", "html": "<p>fast response</p>"}
+        ]
+
     def test_producer_can_append_while_consumer_is_suspended_at_yield(self, tmp_dirs):
         """SSE backpressure must not retain the worker's event-log mutex."""
         chat = {"id": "test-id", "title": "test", "messages": []}
@@ -788,6 +799,20 @@ class TestTemplateRendering:
             resp = c.get(f"/chat/{chat['id']}")
             assert resp.status_code == 200
             html = resp.data.decode()
+
+    def test_chat_template_defines_wake_lock_helpers_before_processing_uses_them(self, tmp_dirs):
+        """A missing helper here aborts doSend after the UI enters processing."""
+        from pengy.core.chat_manager import create_chat
+
+        chat = create_chat()
+        with app.test_client() as c:
+            html = c.get(f"/chat/{chat['id']}").data.decode()
+        assert "let wakeLock = null;" in html
+        assert "async function acquireWakeLock()" in html
+        assert "function releaseWakeLock()" in html
+        assert "function setProcessing(val)" in html
+        assert html.index("async function acquireWakeLock()") < html.index("function setProcessing(val)")
+        assert html.index("function releaseWakeLock()") < html.index("function setProcessing(val)")
 
     def test_settings_template_renders(self, tmp_dirs):
         with app.test_client() as c:
