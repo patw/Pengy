@@ -20,7 +20,6 @@ These tests pin the consequences of that choice:
 
 from __future__ import annotations
 
-import httpx
 import pytest
 from openai import APIConnectionError, APITimeoutError
 
@@ -37,9 +36,24 @@ from pengy.core.llm_client import (
 
 
 def _connection_error() -> APIConnectionError:
-    """The SDK error for a refused connection or an unreachable host."""
-    request = httpx.Request("POST", "http://127.0.0.1:11434/v1/chat/completions")
-    return APIConnectionError(request=request)
+    """The SDK error for a refused connection or an unreachable host.
+
+    The request object is a stand-in, not an ``httpx.Request``: the SDK's
+    transport is **not** a test dependency.  CI resolves openai 3.x, whose
+    transport is ``httpx2``, while a local venv has openai 2.x + ``httpx`` --
+    importing either name here makes the suite pass on one and fail to even
+    *collect* on the other, which is precisely what happened on the first push.
+    ``APIConnectionError`` only stores this object (verified against openai
+    3.14.1 and 2.46.0), so a stand-in is faithful.
+    """
+    return APIConnectionError(request=_StubRequest())
+
+
+class _StubRequest:
+    """Minimal stand-in for the transport's request object."""
+
+    method = "POST"
+    url = "http://127.0.0.1:11434/v1/chat/completions"
 
 
 class TestDefaultsAreLocalAndKeyless:
@@ -144,9 +158,8 @@ class TestUnreachableEndpoint:
         assert "ollama serve" in str(translated)
 
     def test_timeouts_get_the_same_treatment(self):
-        request = httpx.Request("POST", "http://127.0.0.1:11434/v1/chat/completions")
         translated = llm_client._translate_api_error(
-            APITimeoutError(request=request), "http://127.0.0.1:11434/v1"
+            APITimeoutError(request=_StubRequest()), "http://127.0.0.1:11434/v1"
         )
         assert "Nothing answered at" in str(translated)
 
