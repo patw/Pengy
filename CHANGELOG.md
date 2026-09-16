@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## v1.8.5
+## v1.8.6
 
 - **Polished every CLI surface.** Rust panels now measure ANSI styling and complex emoji at zero/appropriate display width, so wrapped Markdown and tool output keep their right borders aligned. Python, Rust, and C++ preserve complex UTF-8 emoji in model output; C++ raw/JSON/silent output no longer leaks spinner control sequences.
 - **More reliable web completion and documented SSE contracts.** Rust web now retains and replays events even when a fast turn completes before the browser opens its SSE connection. Python and C++ already use append-only per-chat logs independent of live subscribers; regression coverage now pins that behavior in all editions.
