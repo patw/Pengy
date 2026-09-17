@@ -1471,13 +1471,23 @@ def _validate_host(host: str) -> "str | None":
     return None
 
 
+_REMOTE_PLACEHOLDER_RE = re.compile(r"__(USE_SUDO|PASSWORD|COMMAND|CWD)__")
+
+
 def _build_remote_script(command: str, password: "str | None", cwd: "str | None") -> str:
-    """Fill _REMOTE_WRAPPER's placeholders with POSIX single-quoted literals."""
-    return (_REMOTE_WRAPPER
-            .replace("__USE_SUDO__", "1" if password is not None else "0")
-            .replace("__PASSWORD__", shlex.quote(password or ""))
-            .replace("__COMMAND__", shlex.quote(command))
-            .replace("__CWD__", shlex.quote(cwd or "")))
+    """Fill _REMOTE_WRAPPER's placeholders with POSIX single-quoted literals.
+
+    One pass over the template: substituting placeholders one after another
+    would also rewrite placeholder text inside an already-inserted value (a
+    password containing ``__COMMAND__``), breaking out of its quoting.
+    """
+    values = {
+        "USE_SUDO": "1" if password is not None else "0",
+        "PASSWORD": shlex.quote(password or ""),
+        "COMMAND": shlex.quote(command),
+        "CWD": shlex.quote(cwd or ""),
+    }
+    return _REMOTE_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], _REMOTE_WRAPPER)
 
 
 def _remote_ssh_argv(ssh: str, host: str) -> list[str]:

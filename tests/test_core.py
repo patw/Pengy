@@ -2144,6 +2144,15 @@ class TestRemoteRunBash:
         result = execute_tool("run_bash", {"command": f"printf %s {payload} | wc -c", "host": "web1"})
         assert "100000" in result
 
+    def test_placeholder_text_in_values_is_not_substituted(self):
+        # Sequential .replace() calls rewrote placeholder text inside an
+        # already-inserted value, breaking out of its quoting.
+        from pengy.core.tools import _build_remote_script
+        script = _build_remote_script("echo __CWD__", "__COMMAND__ x", "/a b")
+        assert "\npw='__COMMAND__ x'\n" in script
+        assert "\ncmd='echo __CWD__'\n" in script
+        assert "\ncwd='/a b'\n" in script
+
     def test_wrapper_parses_under_sh(self):
         import subprocess
         from pengy.core.tools import _build_remote_script
