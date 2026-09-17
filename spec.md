@@ -330,7 +330,7 @@ The worker remains in the `_workers` dict until the SSE endpoint has drained its
 | `tool_request` | `name`, `args`, `auto_approved` | Append tool card; if not auto-approved, show confirmation modal |
 | `tool_result` | `content`, `declined` | Update tool card body and badge |
 | `final_response` | `html`, `usage` | Append assistant bubble |
-| `sudo_request` | — | Show sudo password modal |
+| `sudo_request` | `host` (string, or null for local) | Show sudo password modal naming the host |
 | `error` | `message` | Append error alert, re-enable input |
 | `keepalive` | — | SSE comment (`: keepalive`); browser ignores |
 
@@ -505,10 +505,12 @@ Safety limits (rejected with an error if exceeded): 20 files, 100 total operatio
 
 Returns the unified diff on success.
 
-### `run_bash(command, cwd=None)`
+### `run_bash(command, cwd=None, elevated=False, host=None)`
 Executes a bash command via `subprocess.Popen` in its own process group. An optional `cwd` is expanded and must name an existing directory. Timeout configurable via `tool_timeout` (default 300s). Captures stdout and stderr.
 
 **sudo support:** If the command contains `sudo`, the password provider callback is invoked. In the GUI this shows a `QInputDialog`; in the CLI it uses `Prompt.ask(..., password=True)`. The password reaches sudo via `SUDO_ASKPASS` (every `sudo` rewritten to `sudo -A`; see Design Decisions), not stdin — the command's own stdin is `/dev/null`. The password prompt line is stripped from stderr. Cancelling returns a cancellation message to the LLM. The password is cached for the duration of the LLM run (so multi-step sudo workflows within one turn don't re-prompt) and cleared when the run completes.
+
+**Remote execution (`host`):** with `host` set, the command runs on that machine over ssh instead of locally (see Design Decisions, "Remote sudo"). `cwd` is then a remote path. The sudo rules are identical — explicit `sudo` plus `elevated=true` — and the provider is called with the host, so the prompt names the machine. Passwords are cached per host (`None` = local) and never offered to another host; a failed sudo authentication (classic sudo or sudo-rs wording) discards that host's cached password and says so in the result.
 
 ### `run_python(code, cwd=None)`
 Writes code to a temp file and executes it with `python3`. An optional `cwd` is expanded and must name an existing directory. Timeout configurable via `tool_timeout` (default 300s). Captures stdout and stderr.
@@ -722,7 +724,7 @@ setting, so the model can see the output was truncated and why.
 
 ### Per-run isolation
 
-Sudo provider, cached sudo password, and the set of running subprocesses are **per-run** state,
+Sudo provider, cached sudo passwords (keyed by host), and the set of running subprocesses are **per-run** state,
 not global. Any implementation supporting more than one concurrent run (tabs, multiple web
 sessions) must scope them, or a sudo prompt raised by one run will be answered into another, and
 a Stop on one run will kill another run's subprocesses. Single-run frontends may share one
@@ -817,6 +819,10 @@ but read the reasoning first, because most of these were paid for with a bug.*
 The original design piped the password to the shell's stdin and rewrote only the *first* `sudo` to `sudo -S`. That quietly failed whenever anything else in the command touched stdin, which an LLM emits routinely: a pipeline (`echo x | sudo tee f`) gave sudo the pipe instead of the password, a redirect (`sudo cmd < /dev/null`) overrode it, an earlier command that reads stdin (`cat`, `read`) consumed the password first, and a second `sudo` had nothing left to read and died with `no tty present`. Only the single-`sudo`, no-stdin case worked. Askpass has none of those constraints — it is per-invocation and independent of stdin — so every occurrence can be rewritten safely. The command's own stdin is now `/dev/null` in all cases, which also stops a non-sudo command from hanging on a terminal read.
 
 **Portability of the askpass approach:** `-A`/`SUDO_ASKPASS` is supported by both sudo implementations Ubuntu ships. Verified on Ubuntu 26.04 against **sudo-rs 0.2.13** (the default since 25.10, `/usr/bin/sudo` via the alternatives system) and **legacy sudo 1.9.17p2** (`/usr/bin/sudo.ws`): both invoke the helper exactly once per `sudo` for every command shape above, and both pass `PENGY_SUDO_PASSWORD` through to it. Flag combinations the rewrite can produce (`-A -u`, `-A -g`, `-A --`) parse on both. The helper script uses only POSIX `printf '%s\n'`, which is byte-identical between dash's builtin and uutils `printf` (the Rust coreutils Ubuntu now ships) — including passwords containing quotes, `$`, `%s`, backslashes, and spaces. Note that the earlier `sudo -S` approach was *not* broken by the sudo-rs switch; sudo-rs supports `-S` too. The stdin collisions above were the sole cause.
+
+**Remote sudo (`run_bash` `host`):** Pengy never infers a target host from `ssh …` text — ssh option parsing, config aliases and nested quoting make that undecidable, and a guess is wrong at a privilege boundary. The model names the host explicitly; the sudo lexer, elevation rules and `sudo -A` rewrite run unchanged on the bare command. Pengy then runs `ssh -T -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -- <host> sh -s` and writes `_REMOTE_WRAPPER` to ssh's stdin with the password, command and cwd substituted as POSIX single-quoted literals (so nothing sensitive is on any argv and the remote login shell only ever parses `sh -s`). The wrapper recreates the askpass helper remotely — 0600 password file in a 0700 `mktemp -d` under `$XDG_RUNTIME_DIR`, `~/.cache` or `/tmp`, whichever proves executable — never exports the password, runs the command with `bash -c` (or `sh`) in its own session with stdin `/dev/null`, and removes the directory on exit. Key-based ssh login and an existing `known_hosts` entry are required; `BatchMode` makes anything else fail fast, and exit 255 with ssh's error text gets a hint appended.
+
+Stop works without a pty: Pengy holds ssh's stdin open for the whole run (a raw `os.pipe`, written from a thread) and waits on the ssh process rather than on output EOF. Killing ssh closes the channel; a watcher in the wrapper blocked on `cat` of the saved stdin fd sees EOF and SIGTERMs the command's process group (sudo relays it to its root child). Two details are load-bearing: `exec 3<&0` before backgrounding (POSIX gives background jobs `/dev/null` as stdin, so the watcher would otherwise fire immediately), and `trap 'exit 141' PIPE` (after the disconnect dash writes a job notice to the dead channel and would die of SIGPIPE before its EXIT trap removed the password directory). Host strings must match `[A-Za-z0-9._@:%-]+` without a leading `-`. The wrapper script must be byte-identical across editions.
 
 **File attachment injection (GUI):** Attached files are formatted as fenced code blocks and prepended to the message text before sending. The LLM sees them as part of the user turn, so no special API handling is needed.
 

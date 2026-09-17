@@ -1723,6 +1723,9 @@ class PengyCLI:
         name = response.get("name", "?")
         args = response.get("args", {})
         args_preview = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        if name == "run_bash" and isinstance(args, dict) and args.get("host"):
+            # Lead with the target so it survives the 60-char truncation.
+            args_preview = f"on {args['host']}: {args_preview}"
         if len(args_preview) > 60:
             args_preview = args_preview[:59] + "…"
 
@@ -1802,11 +1805,15 @@ class PengyCLI:
             else:
                 self.console.print("[red]Please enter 1, 2, 3, or 4.[/red]")
 
-    def _get_sudo_password(self) -> str | None:
-        """Prompt for sudo password in the terminal."""
+    def _get_sudo_password(self, host: str | None = None) -> str | None:
+        """Prompt for sudo password in the terminal.
+
+        *host* names the remote machine the command runs on (None for local).
+        """
+        target = f" for [bold]{escape(_sanitize_display(host))}[/bold]" if host else ""
         try:
             password = Prompt.ask(
-                "[yellow]Enter sudo password[/yellow]",
+                f"[yellow]Enter sudo password{target}[/yellow]",
                 password=True,
             )
             return password if password else None

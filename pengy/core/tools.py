@@ -6,6 +6,7 @@ import fnmatch
 import locale
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -78,18 +79,22 @@ def _kill_proc_group(proc):
 
 
 class ToolContext:
-    """Per-run tool state: sudo provider, cached sudo password, and the set of
+    """Per-run tool state: sudo provider, cached sudo passwords, and the set of
     active subprocesses.
 
     Each concurrent run (e.g. one per GUI tab) gets its own context so that a
     sudo prompt is routed to the right run and pressing Stop on one run kills
     only that run's subprocesses — never another tab's.  Callers that don't
     supply a context (CLI, Web) use the module-level ``_default_context``.
+
+    ``sudo_provider(host)`` is called with the target host (``None`` for the
+    local machine) so the prompt can name it.  Passwords are cached per host
+    and a password is never offered to a host it wasn't entered for.
     """
 
     def __init__(self, sudo_provider=None):
         self.sudo_provider = sudo_provider
-        self.cached_sudo_password = None
+        self.cached_sudo_passwords: dict = {}
         self._procs: set = set()
         self._pending_images: list[dict] = []
         self._lock = threading.Lock()
@@ -129,8 +134,20 @@ class ToolContext:
         for proc in procs:
             _kill_proc_group(proc)
 
+    def sudo_password_for(self, host: "str | None") -> "str | None":
+        """Return the cached password for *host*, prompting once if needed."""
+        if host not in self.cached_sudo_passwords:
+            password = self.sudo_provider(host) if self.sudo_provider else None
+            if password is None:
+                return None
+            self.cached_sudo_passwords[host] = password
+        return self.cached_sudo_passwords[host]
+
+    def forget_sudo_password(self, host: "str | None"):
+        self.cached_sudo_passwords.pop(host, None)
+
     def clear_sudo(self):
-        self.cached_sudo_password = None
+        self.cached_sudo_passwords.clear()
 
 
 def take_pending_images(context: "ToolContext | None" = None) -> list[dict]:
@@ -171,8 +188,8 @@ def set_sudo_password_provider(fn):
     """
     _default_context.sudo_provider = fn
     if fn is None:
-        # Session ended — clear cached password for safety
-        _default_context.cached_sudo_password = None
+        # Session ended — clear cached passwords for safety
+        _default_context.clear_sudo()
 
 
 def set_user_agent(ua: str):
@@ -460,7 +477,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run a command with bash. The command is non-interactive: stdin is closed, so anything that prompts or waits for input (a password prompt, an editor, `read`) will fail rather than wait — pass non-interactive flags instead. Set cwd to run the command in a specific working directory (defaults to the current directory). To run something as root, include an explicit `sudo ...` in the command AND set elevated=true; Pengy then prompts for the user's password separately. elevated=true does NOT elevate on its own — a command with elevated=true but no `sudo` is rejected, so every elevation stays an explicit, auditable sudo call. Do not set elevated merely because the text or arguments mention the word sudo. Commands are killed once the configured tool timeout elapses.",
+            "description": "Run a command with bash. The command is non-interactive: stdin is closed, so anything that prompts or waits for input (a password prompt, an editor, `read`) will fail rather than wait — pass non-interactive flags instead. Set cwd to run the command in a specific working directory (defaults to the current directory). To run something as root, include an explicit `sudo ...` in the command AND set elevated=true; Pengy then prompts for the user's password separately. elevated=true does NOT elevate on its own — a command with elevated=true but no `sudo` is rejected, so every elevation stays an explicit, auditable sudo call. Do not set elevated merely because the text or arguments mention the word sudo. To run on a remote machine, set host instead of writing `ssh host ...` yourself; only commands run via host can use sudo with a password prompt on that machine. Commands are killed once the configured tool timeout elapses.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -471,6 +488,10 @@ TOOLS = [
                     "cwd": {
                         "type": "string",
                         "description": "Optional working directory to run the command in",
+                    },
+                    "host": {
+                        "type": "string",
+                        "description": "Run the command on this remote host over ssh instead of locally. Use the ssh destination the user uses (an ~/.ssh/config alias, host, or user@host); key-based login must already work. cwd, if given, is a path on the remote host. For root on the remote host, include `sudo ...` in the command and set elevated=true exactly as for a local command; Pengy prompts for that host's sudo password. Do NOT wrap the command in ssh yourself.",
                     },
                     "elevated": {
                         "type": "boolean",
@@ -788,6 +809,7 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
         return _run_bash(
             arguments["command"], ctx, arguments.get("cwd"),
             bool(arguments.get("elevated", False)),
+            str(arguments["host"]) if arguments.get("host") else None,
         )
     elif name == "web_search":
         return _web_search(arguments["query"], arguments.get("max_results", 5))
@@ -1348,47 +1370,208 @@ def _resolve_cwd(cwd: str | None) -> "tuple[str | None, str | None]":
     return str(p), None
 
 
+# Remote-execution wrapper for run_bash(host=...).  Sent over ssh's stdin to
+# `sh -s`, so the only thing on the ssh command line is `sh -s` (independent of
+# the remote login shell) and the password never touches an argv.  The whole
+# script is one `{ ... }` compound command so the shell reads all of it before
+# running any of it; after that, stdin holds only the still-open channel.
+#
+#   - The askpass helper mirrors _AskpassHelper: a 0600 password file in a 0700
+#     mktemp dir, read by a 0700 script.  `pw` is never exported and is unset
+#     before the command starts, so `env` inside the command can't leak it.
+#     The dir must be executable (sudo execs the helper), hence the candidate
+#     list — $XDG_RUNTIME_DIR is tmpfs, /tmp is often noexec.
+#   - Stop: the Pengy side holds ssh's stdin open for the whole run.  Killing
+#     the local ssh closes the channel; the watcher's `cat` sees EOF and
+#     SIGTERMs the command's process group (setsid).  `sudo` relays SIGTERM to
+#     its root child.  No pty, so there is no SIGHUP to rely on.
+#   - `exec 3<&0`: background jobs get /dev/null as stdin when job control is
+#     off, so the watcher must read the channel through a saved fd.
+#   - `trap ... PIPE`: after the client disconnects, dash writes a "Terminated"
+#     notice to the dead channel; without a handler it dies of SIGPIPE before
+#     the EXIT trap removes the password dir.  Handler traps (unlike ignored
+#     signals) reset to default in the child, so the command's own SIGPIPE
+#     semantics are unchanged.
+#
+# Keep byte-identical with the Rust and C++ editions.
+_REMOTE_WRAPPER = r'''{
+umask 077
+use_sudo=__USE_SUDO__
+pw=__PASSWORD__
+cmd=__COMMAND__
+cwd=__CWD__
+d=
+if [ "$use_sudo" = 1 ]; then
+  for base in "${XDG_RUNTIME_DIR:-}" "${HOME:-}/.cache" /tmp; do
+    [ -n "$base" ] && [ -d "$base" ] && [ -w "$base" ] || continue
+    t=$(mktemp -d "$base/pengy-askpass.XXXXXX" 2>/dev/null) || continue
+    printf '#!/bin/sh\ncat "%s/pw"\n' "$t" > "$t/askpass"
+    chmod 700 "$t/askpass"
+    : > "$t/pw"
+    if "$t/askpass" >/dev/null 2>&1; then d=$t; break; fi
+    rm -rf "$t"
+  done
+  if [ -z "$d" ]; then
+    unset pw
+    echo "pengy: no writable, executable private directory for SUDO_ASKPASS on the remote host" >&2
+    exit 125
+  fi
+  trap 'rm -rf "$d"' EXIT
+  printf '%s\n' "$pw" > "$d/pw"
+fi
+unset pw
+trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 141' PIPE
+if [ -n "$cwd" ]; then cd "$cwd" || exit 126; fi
+if command -v bash >/dev/null 2>&1; then run=bash; else run=sh; fi
+exec 3<&0
+if [ -n "$d" ]; then
+  SUDO_ASKPASS="$d/askpass" setsid "$run" -c "$cmd" </dev/null 3<&- &
+else
+  setsid "$run" -c "$cmd" </dev/null 3<&- &
+fi
+child=$!
+( cat >/dev/null; kill -TERM -"$child" 2>/dev/null ) <&3 >/dev/null 2>&1 &
+watcher=$!
+exec 3<&-
+wait "$child"; rc=$?
+kill "$watcher" 2>/dev/null
+exit "$rc"
+}
+'''
+
+# ssh destinations: hostnames, ~/.ssh/config aliases, user@host, IPv6
+# literals.  No leading '-' (ssh option injection such as -oProxyCommand=...),
+# no whitespace/quotes/shell metacharacters/slashes.
+_HOST_RE = re.compile(r"[A-Za-z0-9._@:%-]+")
+
+# Failed-authentication messages from classic sudo and sudo-rs.  On a match the
+# cached password for that host is discarded so the next elevated call prompts
+# again instead of replaying a bad password until the account locks.
+_SUDO_AUTH_FAILURE_RE = re.compile(
+    r"Sorry, try again\.|incorrect password attempt|"
+    r"Authentication failed, try again\.|incorrect authentication attempt",
+    re.IGNORECASE,
+)
+
+# stderr shapes that mean ssh itself failed (exit 255 is ambiguous: a remote
+# command can exit 255 too).
+_SSH_FAILURE_RE = re.compile(
+    r"^ssh: |Permission denied \(|Host key verification failed",
+    re.MULTILINE,
+)
+
+
+def _validate_host(host: str) -> "str | None":
+    """Return an error message if *host* is not a safe ssh destination."""
+    if not host or host.startswith("-") or not _HOST_RE.fullmatch(host):
+        return (
+            f"Error: invalid host {host!r}. Use an ssh destination such as "
+            "`web1`, `user@web1.example.com`, or an ~/.ssh/config alias."
+        )
+    return None
+
+
+def _build_remote_script(command: str, password: "str | None", cwd: "str | None") -> str:
+    """Fill _REMOTE_WRAPPER's placeholders with POSIX single-quoted literals."""
+    return (_REMOTE_WRAPPER
+            .replace("__USE_SUDO__", "1" if password is not None else "0")
+            .replace("__PASSWORD__", shlex.quote(password or ""))
+            .replace("__COMMAND__", shlex.quote(command))
+            .replace("__CWD__", shlex.quote(cwd or "")))
+
+
+def _remote_ssh_argv(ssh: str, host: str) -> list[str]:
+    # -T: no pty (separate stdout/stderr, no echo, and the stdin-EOF watcher
+    # works).  BatchMode: never block on a login/passphrase/host-key prompt.
+    # `--` before the host as a second guard against option injection.
+    return [ssh, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+            "-o", "ServerAliveInterval=15", "--", host, "sh", "-s"]
+
+
+def _format_command_output(stdout_b: bytes, stderr_b: bytes, returncode: int,
+                           used_sudo: bool) -> tuple[str, str]:
+    """Decode and join command output; returns ``(output, stderr)``.
+
+    Decode manually with errors="replace" instead of Popen(text=True)'s strict
+    decoding: a command that emits invalid-UTF-8 or binary bytes (e.g. `cat` on
+    a UTF-16 file or a compiled binary) should reach the binary guard in
+    _snip_tool_output() as text to classify, not blow up communicate() with a
+    raw UnicodeDecodeError.
+    """
+    encoding = locale.getpreferredencoding(False)
+    stdout = (stdout_b or b"").decode(encoding, errors="replace")
+    stderr = (stderr_b or b"").decode(encoding, errors="replace")
+
+    output = stdout or ""
+    if used_sudo:
+        stderr = re.sub(r'^\[sudo[^]]*\].*\n?', '', stderr or "", flags=re.MULTILINE).strip()
+    if stderr:
+        output += "\n" + stderr
+    if returncode != 0:
+        output += f"\n[Exit code: {returncode}]"
+    return output, stderr
+
+
+def _sudo_auth_failure_note(ctx: "ToolContext", host: "str | None", stderr: str) -> str:
+    """Forget *host*'s cached password after a failed sudo authentication."""
+    if not _SUDO_AUTH_FAILURE_RE.search(stderr or ""):
+        return ""
+    ctx.forget_sudo_password(host)
+    where = f" on {host}" if host else ""
+    return f"\n[sudo authentication failed{where}; the cached password was discarded]"
+
+
 def _run_bash(command: str, ctx: "ToolContext" = None, cwd: str | None = None,
-              elevated: bool = False) -> str:
-    """Run a bash command."""
+              elevated: bool = False, host: str | None = None) -> str:
+    """Run a bash command, locally or on *host* over ssh."""
     ctx = ctx or _default_context
-    run_cwd, cwd_err = _resolve_cwd(cwd)
-    if cwd_err:
-        return cwd_err
+    if host is not None:
+        host_err = _validate_host(host)
+        if host_err:
+            return host_err
+        run_cwd = cwd or None  # a remote path; the wrapper cds into it
+    else:
+        run_cwd, cwd_err = _resolve_cwd(cwd)
+        if cwd_err:
+            return cwd_err
+    sudo_spans = _sudo_invocation_spans(command)
+    if sudo_spans and not elevated:
+        return (
+            "Elevation required: this command invokes sudo. Retry run_bash "
+            "with elevated=true to request sudo access."
+        )
+    if elevated and not sudo_spans:
+        # Fail loudly instead of silently running unprivileged. A caller
+        # that asked for elevation must actually contain a `sudo`
+        # invocation, so the escalation is explicit and auditable.
+        return (
+            "Error: elevated=true was set, but the command does not invoke "
+            "sudo. Add an explicit `sudo ...` to the command (so the "
+            "elevation is an auditable sudo call), or omit elevated=true if "
+            "no root is needed."
+        )
+    password = None
+    if sudo_spans:
+        if ctx.sudo_provider is None:
+            return "Error: sudo requested but no password provider is configured."
+        password = ctx.sudo_password_for(host)
+        if password is None:
+            return "Cancelled: sudo password not provided."
+        # Only parsed command words get -A — never a mention in data,
+        # documentation, a comment, or a quoted string.
+        command = _rewrite_sudo_for_askpass(command, sudo_spans)
+    if host is not None:
+        return _run_bash_remote(command, ctx, run_cwd, password, host)
+    return _run_bash_local(command, ctx, run_cwd, password)
+
+
+def _run_bash_local(command: str, ctx: "ToolContext", run_cwd: "str | None",
+                    password: "str | None") -> str:
     proc = None
     askpass = None
     env = None
-    used_sudo = False
     try:
-        sudo_spans = _sudo_invocation_spans(command)
-        if sudo_spans and not elevated:
-            return (
-                "Elevation required: this command invokes sudo. Retry run_bash "
-                "with elevated=true to request sudo access."
-            )
-        if elevated and not sudo_spans:
-            # Fail loudly instead of silently running unprivileged. A caller
-            # that asked for elevation must actually contain a `sudo`
-            # invocation, so the escalation is explicit and auditable.
-            return (
-                "Error: elevated=true was set, but the command does not invoke "
-                "sudo. Add an explicit `sudo ...` to the command (so the "
-                "elevation is an auditable sudo call), or omit elevated=true if "
-                "no root is needed."
-            )
-        if sudo_spans:
-            if ctx.sudo_provider is None:
-                return "Error: sudo requested but no password provider is configured."
-            password = ctx.cached_sudo_password
-            if password is None:
-                password = ctx.sudo_provider()
-                if password is None:
-                    return "Cancelled: sudo password not provided."
-                ctx.cached_sudo_password = password
-            used_sudo = True
-            # Only parsed command words get -A — never a mention in data,
-            # documentation, a comment, or a quoted string.
-            command = _rewrite_sudo_for_askpass(command, sudo_spans)
+        if password is not None:
             askpass = _AskpassHelper(password)
             env = os.environ.copy()
             env["SUDO_ASKPASS"] = askpass.path
@@ -1411,22 +1594,10 @@ def _run_bash(command: str, ctx: "ToolContext" = None, cwd: str | None = None,
         finally:
             ctx.unregister_process(proc)
 
-        # Decode manually with errors="replace" instead of Popen(text=True)'s
-        # strict decoding: a command that emits invalid-UTF-8 or binary bytes
-        # (e.g. `cat` on a UTF-16 file or a compiled binary) should reach the
-        # binary guard in _snip_tool_output() as text to classify, not blow up
-        # communicate() with a raw UnicodeDecodeError.
-        encoding = locale.getpreferredencoding(False)
-        stdout = (stdout_b or b"").decode(encoding, errors="replace")
-        stderr = (stderr_b or b"").decode(encoding, errors="replace")
-
-        output = stdout or ""
+        used_sudo = password is not None
+        output, stderr = _format_command_output(stdout_b, stderr_b, proc.returncode, used_sudo)
         if used_sudo:
-            stderr = re.sub(r'^\[sudo[^]]*\].*\n?', '', stderr or "", flags=re.MULTILINE).strip()
-        if stderr:
-            output += "\n" + stderr
-        if proc.returncode != 0:
-            output += f"\n[Exit code: {proc.returncode}]"
+            output += _sudo_auth_failure_note(ctx, None, stderr)
         return _snip_tool_output(output) or "(No output)"
     except subprocess.TimeoutExpired:
         _kill_proc_group(proc)
@@ -1438,6 +1609,111 @@ def _run_bash(command: str, ctx: "ToolContext" = None, cwd: str | None = None,
     finally:
         if askpass is not None:
             askpass.cleanup()
+
+
+def _run_bash_remote(command: str, ctx: "ToolContext", run_cwd: "str | None",
+                     password: "str | None", host: str) -> str:
+    """Run *command* on *host* through _REMOTE_WRAPPER over ssh."""
+    ssh = shutil.which("ssh")
+    if ssh is None:
+        return "Error: run_bash host= requires the `ssh` client, which was not found on PATH."
+    script = _build_remote_script(command, password, run_cwd).encode("utf-8")
+
+    # stdin is a raw pipe, not PIPE: communicate() closes a PIPE stdin at once,
+    # and that EOF would fire the remote watcher and kill the command.  The
+    # write end stays open until ssh exits (or Stop/timeout kills it).
+    read_fd, write_fd = os.pipe()
+    proc = None
+    writer = None
+
+    def _feed():
+        # Threaded: a large command can exceed the pipe buffer, and a blocking
+        # write here would deadlock against ssh's stdout filling up.
+        view = memoryview(script)
+        try:
+            while view:
+                view = view[os.write(write_fd, view):]
+        except OSError:
+            pass  # ssh exited (connection failure, Stop) — nothing to feed
+
+    def _close_channel():
+        # Closing the write end ends the remote channel's stdin: the wrapper's
+        # watcher then kills the remote command if it is still running.
+        nonlocal write_fd
+        if writer is not None:
+            # Never close under a live writer: the fd number could be reused by
+            # another open() and receive the rest of the script (password).
+            writer.join(timeout=5)
+            if writer.is_alive():
+                return
+        if write_fd is not None:
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+            write_fd = None
+
+    def _drain(stream, sink):
+        for chunk in iter(lambda: stream.read(65536), b""):
+            sink.append(chunk)
+
+    try:
+        timeout = None if _tool_timeout == -1 else _tool_timeout
+        try:
+            proc = subprocess.Popen(
+                _remote_ssh_argv(ssh, host),
+                stdin=read_fd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        finally:
+            os.close(read_fd)
+        writer = threading.Thread(target=_feed, daemon=True)
+        writer.start()
+        out_chunks: list[bytes] = []
+        err_chunks: list[bytes] = []
+        # Wait on ssh itself rather than on stdout EOF (communicate): if some
+        # other process inherited the output pipes (a ProxyCommand helper), EOF
+        # never comes while the channel stays open, and the channel is only
+        # closed once ssh is done — a deadlock on Stop.
+        readers = [
+            threading.Thread(target=_drain, args=(proc.stdout, out_chunks), daemon=True),
+            threading.Thread(target=_drain, args=(proc.stderr, err_chunks), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+        ctx.register_process(proc)
+        try:
+            proc.wait(timeout=timeout)
+        finally:
+            ctx.unregister_process(proc)
+        _close_channel()
+        for reader in readers:
+            reader.join(timeout=5)
+
+        used_sudo = password is not None
+        output, stderr = _format_command_output(
+            b"".join(out_chunks), b"".join(err_chunks), proc.returncode, used_sudo)
+        if proc.returncode == 255 and _SSH_FAILURE_RE.search(stderr):
+            output += (
+                f"\n[ssh to {host} failed. run_bash host= requires key-based "
+                "login and an existing known_hosts entry]"
+            )
+        if used_sudo:
+            output += _sudo_auth_failure_note(ctx, host, stderr)
+        return _snip_tool_output(output) or "(No output)"
+    except subprocess.TimeoutExpired:
+        _kill_proc_group(proc)
+        ctx.unregister_process(proc)
+        return f"Error: Command timed out after {_tool_timeout} seconds"
+    except Exception as e:
+        if proc is not None:
+            _kill_proc_group(proc)
+            ctx.unregister_process(proc)
+        return f"Error running command on {host}: {e}"
+    finally:
+        _close_channel()
 
 
 def _web_search(query: str, max_results: int = 5) -> str:

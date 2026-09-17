@@ -1533,19 +1533,19 @@ class TestToolContext:
 
     def test_sudo_provider_is_per_context(self):
         from pengy.core.tools import ToolContext
-        ctx_a = ToolContext(sudo_provider=lambda: "pw-a")
-        ctx_b = ToolContext(sudo_provider=lambda: "pw-b")
-        assert ctx_a.sudo_provider() == "pw-a"
-        assert ctx_b.sudo_provider() == "pw-b"
+        ctx_a = ToolContext(sudo_provider=lambda host=None: "pw-a")
+        ctx_b = ToolContext(sudo_provider=lambda host=None: "pw-b")
+        assert ctx_a.sudo_provider(None) == "pw-a"
+        assert ctx_b.sudo_provider(None) == "pw-b"
 
     def test_cached_sudo_password_not_shared(self):
         from pengy.core.tools import ToolContext
         ctx_a = ToolContext()
         ctx_b = ToolContext()
-        ctx_a.cached_sudo_password = "secret"
-        assert ctx_b.cached_sudo_password is None
+        ctx_a.cached_sudo_passwords[None] = "secret"
+        assert ctx_b.cached_sudo_passwords == {}
         ctx_a.clear_sudo()
-        assert ctx_a.cached_sudo_password is None
+        assert ctx_a.cached_sudo_passwords == {}
 
     def test_run_bash_routes_sudo_through_context(self):
         # A context with no provider must refuse sudo regardless of any global.
@@ -1557,7 +1557,7 @@ class TestToolContext:
     def test_sudo_invocation_requires_explicit_elevation(self):
         from pengy.core.tools import execute_tool, ToolContext
         calls = []
-        ctx = ToolContext(sudo_provider=lambda: calls.append(True) or "secret")
+        ctx = ToolContext(sudo_provider=lambda host=None: calls.append(True) or "secret")
         result = execute_tool("run_bash", {"command": "sudo true"}, ctx)
         assert "Elevation required" in result
         assert calls == []
@@ -1566,7 +1566,7 @@ class TestToolContext:
         # elevated=true must not be a silent no-op: with no explicit `sudo`
         # invocation it is an error and the command must NOT run.
         from pengy.core.tools import execute_tool, ToolContext
-        ctx = ToolContext(sudo_provider=lambda: "secret")
+        ctx = ToolContext(sudo_provider=lambda host=None: "secret")
         result = execute_tool(
             "run_bash", {"command": "echo should-not-run", "elevated": True}, ctx
         )
@@ -1578,7 +1578,7 @@ class TestToolContext:
         # A quoted/comment mention of sudo is data, not an invocation: it must
         # not satisfy elevated=true.
         from pengy.core.tools import execute_tool, ToolContext
-        ctx = ToolContext(sudo_provider=lambda: "secret")
+        ctx = ToolContext(sudo_provider=lambda host=None: "secret")
         result = execute_tool(
             "run_bash", {"command": "echo 'sudo apt update'", "elevated": True}, ctx
         )
@@ -1602,7 +1602,7 @@ class TestToolContext:
         )
         for command in commands:
             calls = []
-            ctx = ToolContext(sudo_provider=lambda: calls.append(True) or "secret")
+            ctx = ToolContext(sudo_provider=lambda host=None: calls.append(True) or "secret")
             result = execute_tool("run_bash", {"command": command}, ctx)
             assert calls == [], f"false sudo prompt for {command!r}"
             assert "Elevation required" not in result
@@ -1651,7 +1651,7 @@ class TestToolContext:
         )
         (fake_bin / "sudo").chmod(0o755)
 
-        ctx = ToolContext(sudo_provider=lambda: "s3cret")
+        ctx = ToolContext(sudo_provider=lambda host=None: "s3cret")
         old_path = os.environ["PATH"]
         os.environ["PATH"] = f"{fake_bin}:{old_path}"
         try:
@@ -1915,3 +1915,248 @@ class TestImageUtils:
             assert len(buf) > 0
         finally:
             os.unlink(path)
+
+
+class TestRemoteRunBash:
+    """run_bash(host=...) — remote execution and remote sudo escalation.
+
+    A stub ``ssh`` on PATH stands in for the real client: it records its argv
+    and runs the ``sh -s`` wrapper locally in a separate session.  That mirrors
+    the real process topology — killing the local "ssh" (Stop/timeout) does not
+    signal the "remote" shell directly; only the closed stdin channel reaches
+    it — so the wrapper's cleanup and kill paths are exercised honestly.
+    """
+
+    @pytest.fixture
+    def remote(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        argv_log = tmp_path / "ssh-argv"
+        (bin_dir / "ssh").write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$@\" > '{argv_log}'\n"
+            'while [ "$1" != "--" ]; do shift; done\n'
+            "shift 2\n"  # drop -- and the host
+            # Background jobs get /dev/null stdin; pass the channel via fd 3.
+            'exec 3<&0\n'
+            'setsid "$@" <&3 3<&- &\n'
+            "exec 3<&-\n"
+            'wait "$!"\n'
+        )
+        (bin_dir / "ssh").chmod(0o755)
+        # Stub sudo: succeeds only via -A with a working askpass; a password of
+        # "wrong" reproduces classic sudo's failed-auth output.
+        (bin_dir / "sudo").write_text(
+            "#!/bin/bash\n"
+            'if [ "$1" != "-A" ]; then echo "sudo: a terminal is required" >&2; exit 1; fi\n'
+            "shift\n"
+            'pw="$("$SUDO_ASKPASS")"\n'
+            'if [ "$pw" = wrong ]; then echo "Sorry, try again." >&2; '
+            'echo "sudo: 3 incorrect password attempts" >&2; exit 1; fi\n'
+            'echo "pw=$pw"\n'
+            'exec "$@"\n'
+        )
+        (bin_dir / "sudo").chmod(0o755)
+        runtime = tmp_path / "runtime"
+        runtime.mkdir(mode=0o700)
+        monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+        return {"argv_log": argv_log, "runtime": runtime}
+
+    @staticmethod
+    def _ctx(prompts, passwords=None):
+        from pengy.core.tools import ToolContext
+        passwords = passwords or {}
+
+        def provider(host):
+            prompts.append(host)
+            return passwords.get(host, "s3cret")
+        return ToolContext(sudo_provider=provider)
+
+    def test_host_validation_rejects_injection(self, remote):
+        from pengy.core.tools import execute_tool
+        prompts = []
+        ctx = self._ctx(prompts)
+        for host in ("-oProxyCommand=touch /tmp/x", "a b", "a;b", "`id`", "$(id)", "a/b", "'q'"):
+            result = execute_tool("run_bash", {"command": "sudo true", "elevated": True, "host": host}, ctx)
+            assert result.startswith("Error: invalid host"), (host, result)
+        assert prompts == []
+        assert not remote["argv_log"].exists()
+
+    def test_host_validation_accepts_ssh_destinations(self):
+        from pengy.core.tools import _validate_host
+        for host in ("web1", "pat@web1.lan", "web-1.example.com", "::1", "fe80::1%eth0"):
+            assert _validate_host(host) is None, host
+
+    def test_ssh_argv(self, remote):
+        from pengy.core.tools import execute_tool
+        execute_tool("run_bash", {"command": "true", "host": "web1"})
+        argv = remote["argv_log"].read_text().splitlines()
+        assert argv[-4:] == ["--", "web1", "sh", "-s"]
+        assert "-T" in argv and "BatchMode=yes" in argv
+
+    def test_unelevated_remote_command(self, remote, tmp_path):
+        from pengy.core.tools import execute_tool
+        result = execute_tool("run_bash", {
+            "command": 'pwd; echo "askpass=${SUDO_ASKPASS:-none}"; cat; echo stdin-closed; exit 7',
+            "cwd": str(tmp_path), "host": "web1",
+        })
+        assert str(tmp_path) in result
+        assert "askpass=none" in result
+        assert "stdin-closed" in result
+        assert "[Exit code: 7]" in result
+        assert list(remote["runtime"].iterdir()) == []
+
+    def test_remote_cwd_failure(self, remote):
+        from pengy.core.tools import execute_tool
+        result = execute_tool("run_bash", {"command": "pwd", "cwd": "/nonexistent_dir_xyz", "host": "web1"})
+        assert "[Exit code: 126]" in result
+
+    def test_elevation_rules_apply_to_remote(self, remote):
+        from pengy.core.tools import execute_tool
+        prompts = []
+        ctx = self._ctx(prompts)
+        assert "Elevation required" in execute_tool(
+            "run_bash", {"command": "sudo true", "host": "web1"}, ctx)
+        assert "does not invoke sudo" in execute_tool(
+            "run_bash", {"command": "echo 'sudo true'", "elevated": True, "host": "web1"}, ctx)
+        assert "does not invoke sudo" in execute_tool(
+            "run_bash", {"command": "ssh web1 sudo true", "elevated": True}, ctx)
+        assert prompts == []
+
+    def test_remote_sudo_delivers_password_without_leaking(self, remote):
+        from pengy.core.tools import execute_tool
+        prompts = []
+        password = "p'a$s w\"d\\x"
+        ctx = self._ctx(prompts, {"web1": password})
+        for command in (
+            "sudo echo hi",
+            "echo a; cat > /dev/null; sudo echo hi",
+            "sudo echo one; sudo echo two",
+            "echo x | sudo cat",
+            "sudo -S echo hi",
+        ):
+            result = execute_tool("run_bash", {"command": command, "elevated": True, "host": "web1"}, ctx)
+            assert f"pw={password}" in result, (command, result)
+            assert "terminal is required" not in result, (command, result)
+        result = execute_tool("run_bash", {
+            "command": "sudo env", "elevated": True, "host": "web1"}, ctx)
+        assert result.count(password) == 1  # only the stub's pw= line, never env
+        assert prompts == ["web1"]  # cached for the rest of the run
+        assert list(remote["runtime"].iterdir()) == []
+        assert password not in remote["argv_log"].read_text()
+
+    def test_passwords_are_cached_per_host(self, remote):
+        from pengy.core.tools import execute_tool
+        prompts = []
+        ctx = self._ctx(prompts, {"web1": "pw-web1", "db2": "pw-db2"})
+        r1 = execute_tool("run_bash", {"command": "sudo true", "elevated": True, "host": "web1"}, ctx)
+        r2 = execute_tool("run_bash", {"command": "sudo true", "elevated": True, "host": "db2"}, ctx)
+        r3 = execute_tool("run_bash", {"command": "sudo true", "elevated": True, "host": "web1"}, ctx)
+        assert "pw=pw-web1" in r1 and "pw=pw-db2" in r2 and "pw=pw-web1" in r3
+        assert prompts == ["web1", "db2"]
+        ctx.clear_sudo()
+        assert ctx.cached_sudo_passwords == {}
+
+    def test_local_prompt_is_keyed_separately(self, remote):
+        from pengy.core.tools import execute_tool
+        prompts = []
+        ctx = self._ctx(prompts, {None: "local-pw", "web1": "remote-pw"})
+        assert "pw=local-pw" in execute_tool("run_bash", {"command": "sudo true", "elevated": True}, ctx)
+        assert "pw=remote-pw" in execute_tool(
+            "run_bash", {"command": "sudo true", "elevated": True, "host": "web1"}, ctx)
+        assert prompts == [None, "web1"]
+
+    @pytest.mark.parametrize("host", [None, "web1"])
+    def test_auth_failure_evicts_only_that_host(self, remote, host):
+        from pengy.core.tools import execute_tool
+        prompts = []
+        ctx = self._ctx(prompts, {host: "wrong", "other": "fine"})
+        ctx.cached_sudo_passwords["other"] = "fine"
+        args = {"command": "sudo true", "elevated": True}
+        if host:
+            args["host"] = host
+        result = execute_tool("run_bash", args, ctx)
+        assert "sudo authentication failed" in result
+        assert host not in ctx.cached_sudo_passwords
+        assert ctx.cached_sudo_passwords == {"other": "fine"}
+        execute_tool("run_bash", args, ctx)
+        assert prompts == [host, host]  # re-prompted, not replayed
+
+    def test_stop_kills_remote_command_and_cleans_up(self, remote):
+        import threading
+        import time
+        from pengy.core.tools import execute_tool
+        prompts = []
+        ctx = self._ctx(prompts)
+        marker = remote["runtime"].parent / "remote-pid"
+        result = {}
+        t = threading.Thread(target=lambda: result.update(out=execute_tool("run_bash", {
+            "command": f"sudo sh -c 'echo $$ > {marker}; exec sleep 30'",
+            "elevated": True, "host": "web1"}, ctx)))
+        start = time.monotonic()
+        t.start()
+        for _ in range(100):
+            if marker.exists() and marker.read_text().strip():
+                break
+            time.sleep(0.05)
+        assert list(remote["runtime"].iterdir()), "askpass dir should exist mid-run"
+        ctx.kill_all()
+        t.join(timeout=10)
+        assert not t.is_alive()
+        assert time.monotonic() - start < 10
+        pid = int(marker.read_text())
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(pid, 9)
+            pytest.fail("remote command survived Stop")
+        for _ in range(100):
+            if not list(remote["runtime"].iterdir()):
+                break
+            time.sleep(0.05)
+        assert list(remote["runtime"].iterdir()) == [], "askpass dir leaked after Stop"
+
+    def test_missing_ssh_client(self, monkeypatch, tmp_path):
+        from pengy.core.tools import execute_tool
+        monkeypatch.setenv("PATH", str(tmp_path))
+        result = execute_tool("run_bash", {"command": "true", "host": "web1"})
+        assert "ssh" in result and result.startswith("Error")
+
+    def test_ssh_connection_failure_hint(self, tmp_path, monkeypatch):
+        from pengy.core.tools import execute_tool
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "ssh").write_text(
+            "#!/bin/sh\necho 'user@web1: Permission denied (publickey).' >&2\nexit 255\n")
+        (bin_dir / "ssh").chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+        result = execute_tool("run_bash", {"command": "true", "host": "web1"})
+        assert "ssh to web1 failed" in result
+
+    def test_large_command_does_not_deadlock(self, remote):
+        from pengy.core.tools import execute_tool
+        payload = "x" * 100_000
+        result = execute_tool("run_bash", {"command": f"printf %s {payload} | wc -c", "host": "web1"})
+        assert "100000" in result
+
+    def test_wrapper_parses_under_sh(self):
+        import subprocess
+        from pengy.core.tools import _build_remote_script
+        script = _build_remote_script("echo 'hi'\nsudo -A true", "a'b\"c$d\\e\nf", "/tmp")
+        subprocess.run(["sh", "-n"], input=script.encode(), check=True)
+
+    @pytest.mark.skipif(not os.environ.get("PENGY_TEST_SSH_HOST"),
+                        reason="set PENGY_TEST_SSH_HOST to a key-auth ssh host")
+    def test_real_ssh_host(self):
+        from pengy.core.tools import execute_tool
+        host = os.environ["PENGY_TEST_SSH_HOST"]
+        result = execute_tool("run_bash", {
+            "command": 'echo remote-ok; echo "${SUDO_ASKPASS:-none}"; yes | head -1',
+            "host": host,
+        })
+        assert "remote-ok" in result and "none" in result

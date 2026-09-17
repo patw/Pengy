@@ -177,8 +177,12 @@ def _tool_summary(name: str, args: object) -> str:
         summary = value("url")
     elif name == "download_file":
         summary = value("filename") or value("url")
-    elif name in {"run_bash", "run_python"}:
-        summary = value("command") or value("code")
+    elif name == "run_bash":
+        summary = value("command")
+        if value("host"):
+            summary = f"{value('host')}: {summary}"
+    elif name == "run_python":
+        summary = value("code")
     elif name in {"search_content", "glob"}:
         pattern = value("pattern")
         path = value("path")
@@ -467,9 +471,10 @@ class WebWorker:
                 if event.get("type") in ("final_response", "error"):
                     return
 
-    def _get_sudo_password(self) -> str | None:
+    def _get_sudo_password(self, host: str | None = None) -> str | None:
         self._sudo_event.clear()
-        self._put_event({"type": "sudo_request"})
+        # host is None for the local machine; the modal names a remote host.
+        self._put_event({"type": "sudo_request", "host": host})
         self._sudo_event.wait(timeout=120.0)
         if self._cancelled:
             return None

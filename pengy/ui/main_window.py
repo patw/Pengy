@@ -926,8 +926,12 @@ class MainWindow(QMainWindow):
                 self._update_tab_title(next_session)
                 self._show_question_dialog(next_chat_id, next_session, next_data)
 
-    def _on_sudo_password_requested(self):
-        """Show a password dialog when a sudo command needs a password."""
+    def _on_sudo_password_requested(self, host: str = ""):
+        """Show a password dialog when a sudo command needs a password.
+
+        *host* names the remote machine the command runs on ("" for local), so
+        the user knows which machine's password is being asked for.
+        """
         chat_id = self._sender_chat_id()
         if not chat_id:
             return
@@ -936,8 +940,8 @@ class MainWindow(QMainWindow):
             return
         password, ok = QInputDialog.getText(
             self,
-            "sudo Password",
-            "Enter sudo password:",
+            f"sudo Password — {host}" if host else "sudo Password",
+            f"Enter sudo password for {host}:" if host else "Enter sudo password:",
             QLineEdit.EchoMode.Password,
         )
         session.worker.send_sudo_password(password if ok else None)

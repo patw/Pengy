@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Remote sudo over ssh.** `run_bash` takes an optional `host`: the command runs on that machine over ssh (key-based login required), and `sudo` there works exactly like local sudo — explicit `sudo` plus `elevated=true`, a password prompt that names the host in the GUI, Web, and CLI, and delivery through a single-use `SUDO_ASKPASS` helper on the remote side, so the password is never on an argv or in the command's environment. Passwords are cached per host for the run and never offered to another host; a failed sudo authentication (local or remote) now discards the cached password instead of replaying it. Stop kills the remote command and cleans up its askpass directory.
+
 ## v1.8.6
 
 - **Polished every CLI surface.** Rust panels now measure ANSI styling and complex emoji at zero/appropriate display width, so wrapped Markdown and tool output keep their right borders aligned. Python, Rust, and C++ preserve complex UTF-8 emoji in model output; C++ raw/JSON/silent output no longer leaks spinner control sequences.

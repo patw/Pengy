@@ -198,6 +198,7 @@ class TestToolSummary:
         ("read_file", {"path": "/tmp/example.py"}, "/tmp/example.py"),
         ("fetch_url", {"url": "https://example.com/api"}, "https://example.com/api"),
         ("run_bash", {"command": "git status --short"}, "git status --short"),
+        ("run_bash", {"command": "uptime", "host": "web1"}, "web1: uptime"),
         ("search_content", {"pattern": "EventSource", "path": "~/dev/Pengy"}, "EventSource in ~/dev/Pengy"),
         ("apply_changes", {"changes": [{}, {}]}, "2 files"),
         ("ask_user_question", {"questions": [{}, {}, {}]}, "3 questions"),
@@ -502,6 +503,20 @@ class TestWebWorker:
         w.send_sudo_password("hunter2")
         assert w._sudo_event.is_set()
         assert w._sudo_result == "hunter2"
+
+    def test_sudo_request_names_host(self, tmp_dirs):
+        chat = {"id": "test-id", "title": "test", "messages": []}
+        config = {"model": "gpt-4o", "tool_confirmation": "none"}
+        w = WebWorker(chat, config)
+        w._sudo_result = "pw"
+        w._sudo_event.set()
+        events = []
+        w._put_event = events.append
+        w._sudo_event.wait = lambda timeout=None: True
+        assert w._tool_context.sudo_provider("web1") == "pw"
+        assert w._tool_context.sudo_provider(None) == "pw"
+        assert events == [{"type": "sudo_request", "host": "web1"},
+                          {"type": "sudo_request", "host": None}]
 
     def test_send_sudo_password_none(self, tmp_dirs):
         chat = {"id": "test-id", "title": "test", "messages": []}

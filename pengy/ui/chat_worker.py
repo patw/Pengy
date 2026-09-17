@@ -11,7 +11,8 @@ class ChatWorker(QObject):
     response = Signal(dict)
     error = Signal(str)
     finished = Signal()
-    sudo_password_requested = Signal()
+    # Target host for the prompt; empty string means the local machine.
+    sudo_password_requested = Signal(str)
     question_requested = Signal(dict)
 
     def __init__(self, llm_client, messages: list[dict],
@@ -114,13 +115,16 @@ class ChatWorker(QObject):
             if not self._cancelled.is_set():
                 self.finished.emit()
 
-    def _request_sudo_password(self):
-        """Block the calling thread and ask the main thread for a sudo password."""
+    def _request_sudo_password(self, host=None):
+        """Block the calling thread and ask the main thread for a sudo password.
+
+        *host* is the remote host the command runs on, or None for local.
+        """
         if self._cancelled.is_set():
             return None
         self._pending_sudo_password = None
         self._sudo_event.clear()
-        self.sudo_password_requested.emit()
+        self.sudo_password_requested.emit(host or "")
         self._sudo_event.wait()
         return self._pending_sudo_password
 
