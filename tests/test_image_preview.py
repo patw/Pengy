@@ -1,5 +1,8 @@
 """Qt chat image previews: exact hit target, full-resolution source and dismissal."""
 import pytest
+
+pytest.importorskip("PySide6", reason="GUI tests require the optional GUI extra")
+
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QImage, QMouseEvent
 from PySide6.QtWidgets import QApplication, QLabel

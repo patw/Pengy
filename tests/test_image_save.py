@@ -2,6 +2,9 @@
 import base64
 
 import pytest
+
+pytest.importorskip("PySide6", reason="GUI tests require the optional GUI extra")
+
 from PySide6.QtCore import QPoint
 from PySide6.QtGui import QContextMenuEvent, QImage
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu

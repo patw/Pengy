@@ -1,6 +1,8 @@
 """Desktop file drops must follow the same attachment path as the paperclip."""
 import pytest
 
+pytest.importorskip("PySide6", reason="GUI tests require the optional GUI extra")
+
 from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QImage
 from PySide6.QtWidgets import QApplication, QMessageBox
