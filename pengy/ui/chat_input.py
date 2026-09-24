@@ -52,6 +52,8 @@ def _is_text_file(path: Path) -> bool:
 class _InputEdit(QTextEdit):
     submit_pressed = Signal()
     image_pasted = Signal(Path)
+    files_dropped = Signal(list)
+    file_drag_active = Signal(bool)
 
     # Grow with the text instead of scrolling inside a two-line box.
     # Unscaled px; run through scaled_size() so ui_scale still applies.
@@ -61,6 +63,8 @@ class _InputEdit(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setPlaceholderText("Type a message... (Enter to send, Shift+Enter for new line)")
+        self.setAcceptDrops(True)
+        self._file_dragging = False
         self.apply_theme(get_theme())
         self.installEventFilter(self)
         self.textChanged.connect(self._autosize)
@@ -81,6 +85,10 @@ class _InputEdit(QTextEdit):
             }}
             QTextEdit:focus {{
                 border: 1px solid {theme['focus']};
+            }}
+            QTextEdit[fileDragActive="true"] {{
+                border: 2px dashed {theme['focus']};
+                background-color: {theme['selection']};
             }}
         """)
 
@@ -123,6 +131,40 @@ class _InputEdit(QTextEdit):
                     self.image_pasted.emit(Path(tmp_path))
                     return
         super().insertFromMimeData(source)
+
+    def _set_file_dragging(self, active: bool):
+        if self._file_dragging != active:
+            self._file_dragging = active
+            self.file_drag_active.emit(active)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(
+            url.isLocalFile() and Path(url.toLocalFile()).is_file()
+            for url in event.mimeData().urls()
+        ):
+            self._set_file_dragging(True)
+            event.acceptProposedAction()
+        else:
+            self._set_file_dragging(False)
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        self.dragEnterEvent(event)
+
+    def dragLeaveEvent(self, event):
+        self._set_file_dragging(False)
+        event.accept()
+
+    def dropEvent(self, event):
+        self._set_file_dragging(False)
+        if event.mimeData().hasUrls():
+            paths = [Path(url.toLocalFile()) for url in event.mimeData().urls()
+                     if url.isLocalFile() and Path(url.toLocalFile()).is_file()]
+            if paths:
+                self.files_dropped.emit(paths)
+                event.acceptProposedAction()
+                return
+        event.ignore()
 
     def eventFilter(self, obj, event):
         # Filter KeyPress, not KeyRelease. On release the newline has already
@@ -177,13 +219,33 @@ class ChatInputWidget(QWidget):
         self._edit = _InputEdit()
         self._edit.submit_pressed.connect(self._on_submit)
         self._edit.image_pasted.connect(self._on_image_pasted)
+        self._edit.files_dropped.connect(self._attach_files)
+        self._edit.file_drag_active.connect(self._show_drop_cue)
         row_layout.addWidget(self._edit)
 
         layout.addWidget(input_row)
 
+        self._drop_hint = QLabel("Drop files to attach")
+        self._drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._drop_hint.setAccessibleName("Drop files to attach")
+        self._drop_hint.hide()
+        layout.addWidget(self._drop_hint)
+
+    def _show_drop_cue(self, active: bool):
+        self._drop_hint.setVisible(active)
+        self._edit.setProperty("fileDragActive", active)
+        # Re-polish to refresh the hover-only border without changing the draft.
+        self._edit.style().unpolish(self._edit)
+        self._edit.style().polish(self._edit)
+        self._edit.update()
+
     def apply_theme(self, theme: dict[str, str]):
         self._theme = theme
         self._edit.apply_theme(theme)
+        self._drop_hint.setStyleSheet(
+            f"color: {theme['focus']}; background: {theme['selection']}; "
+            f"border: 1px dashed {theme['focus']}; border-radius: 6px; padding: 3px;"
+        )
         sz = scaled_size(36, theme)
         self._attach_btn.setFixedSize(sz, sz)
         apply_button_icon(self._attach_btn, "attach", theme, size=18)
@@ -202,17 +264,22 @@ class ChatInputWidget(QWidget):
         if not path_str:
             return
         path = Path(path_str)
-        if not _is_text_file(path) and not _is_image_file(path):
+        self._attach_files([path])
+
+    def _attach_files(self, paths: list[Path]):
+        unsupported = []
+        for path in paths:
+            if not path.is_file() or not (_is_text_file(path) or _is_image_file(path)):
+                unsupported.append(path.name)
+            elif path not in self._attachments:
+                self._attachments.append(path)
+                self._add_chip(path)
+        if unsupported:
             QMessageBox.warning(
-                self,
-                "Cannot Attach File",
-                f'"{path.name}" is not a supported file type.\n'
+                self, "Cannot Attach File",
+                "Unsupported file(s): " + ", ".join(unsupported) + "\n"
                 "Supported: text files and images (JPEG, PNG, GIF, WebP).",
             )
-            return
-        if path not in self._attachments:
-            self._attachments.append(path)
-            self._add_chip(path)
 
     def _add_chip(self, path: Path):
         chip = QWidget()

@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.9.3
+
+- **Image previews and save controls.** Drag and drop image files into the chat input, preview attached images before sending, remove individual images, and save images shown in chat to disk. Includes regression tests for drag-and-drop, image preview, and saving.
+- Coordinated v1.9.3 release across the Python, Rust, and C++ editions.
+
 ## v1.9.1
 
 - **Recover from aggregate context-limit errors without rerunning tools.** On an explicit provider context-overflow response (HTTP 400/413/422 with a recognized code or message), retry up to four times with a smaller *provider-only* copy of tool-result content: first keep head/tail previews, then replace older results with short stubs. Preserve assistant tool calls and matching IDs; keep the latest tool result until older candidates are exhausted. Full tool outputs remain in displayed and saved chat history, and no tool is executed again. If nothing can be reduced, return a clear error instead of treating an unrelated bad request as an overflow.

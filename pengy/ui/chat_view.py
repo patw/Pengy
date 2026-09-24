@@ -5,9 +5,12 @@ import os
 import re
 import threading
 import urllib.request
-from PySide6.QtWidgets import QTextBrowser
+from PySide6.QtWidgets import QTextBrowser, QMenu
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QImage, QMouseEvent, QTextDocument
+
+from pengy.ui.image_preview import ImagePreview
+from pengy.ui.image_save import save_image_as
 
 import markdown
 from pygments import highlight
@@ -90,6 +93,7 @@ class ChatView(QTextBrowser):
         self._image_pending: set[str] = set()
         self._image_lock = threading.Lock()
         self._image_loaded.connect(self._render)
+        self._preview = None
         # Auto-scroll tracking. setHtml() replaces the whole document and
         # resets the scrollbar to the top, so scrollbar.value() right after a
         # render is 0 — *not* a reliable "the user scrolled here" signal. We
@@ -224,8 +228,70 @@ class ChatView(QTextBrowser):
             with self._image_lock:
                 self._image_pending.discard(url_str)
 
+    def _image_at(self, pos):
+        """Return the source only when the click is within an image's layout rect."""
+        cursor = self.cursorForPosition(pos)
+        for offset in (0, -1):
+            position = cursor.position() + offset
+            if position < 0:
+                continue
+            candidate = self.textCursor()
+            candidate.setPosition(position)
+            fmt = candidate.charFormat()
+            if not fmt.isImageFormat():
+                continue
+            start = self.cursorRect(candidate)
+            if position + 1 >= self.document().characterCount():
+                continue
+            after = self.textCursor()
+            after.setPosition(position + 1)
+            end = self.cursorRect(after)
+            if start.y() <= pos.y() < start.y() + start.height() and start.x() <= pos.x() < end.x():
+                return fmt.toImageFormat().name()
+        return ""
+
+    def _open_image_preview(self, source: str):
+        url = QUrl(source)
+        image = QImage()
+        if url.isLocalFile() or os.path.isabs(source):
+            path = url.toLocalFile() if url.isLocalFile() else source
+            if path.endswith("/thumbnail-256-v1.jpg"):
+                display = os.path.join(os.path.dirname(path), "image-display-v1.jpg")
+                if os.path.isfile(display):
+                    path = display
+            image.load(path)
+        elif source.startswith(("http://", "https://")):
+            with self._image_lock:
+                data = self._image_cache.get(source)
+            if data:
+                image.loadFromData(data)
+        elif source.startswith("data:"):
+            resource = self.loadResource(QTextDocument.ResourceType.ImageResource, url)
+            if isinstance(resource, QImage):
+                image = resource
+        if image.isNull():
+            return
+        if self._preview is not None:
+            self._preview.close()
+        self._preview = ImagePreview(image, self, source=source, cache=self._image_cache)
+        self._preview.show()
+
+    def contextMenuEvent(self, event):
+        source = self._image_at(event.pos())
+        if not source:
+            super().contextMenuEvent(event)
+            return
+        menu = QMenu(self)
+        save_action = menu.addAction("Save Image As…")
+        if menu.exec(event.globalPos()) == save_action:
+            save_image_as(source, self._image_cache, self)
+
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
+            source = self._image_at(event.position().toPoint())
+            if source:
+                self._open_image_preview(source)
+                return
             anchor = self.anchorAt(event.pos())
             if anchor.startswith("toggle://"):
                 tool_id = anchor[len("toggle://"):]
@@ -293,6 +359,9 @@ class ChatView(QTextBrowser):
         self._render()
 
     def clear(self):
+        if self._preview is not None:
+            self._preview.close()
+            self._preview = None
         self._messages = []
         self._html_cache = []
         self._expanded_tools = set()
