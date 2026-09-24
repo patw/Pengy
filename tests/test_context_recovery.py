@@ -24,9 +24,11 @@ def client(stub):
 
 
 def overflow(message="This model's maximum context length is 1024 tokens", code=None):
-    import httpx
+    # The minimal response shape avoids importing httpx in CI environments
+    # where OpenAI's SDK uses a different internal HTTP transport.
+    from unittest.mock import Mock
     body = {"error": {"message": message, "code": code}}
-    response = httpx.Response(400, json=body, request=httpx.Request("POST", "http://localhost/v1/chat/completions"))
+    response = Mock(status_code=400, headers={}, request=Mock(), json=lambda: body)
     return BadRequestError(message, response=response, body=body)
 
 

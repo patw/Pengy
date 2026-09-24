@@ -5,7 +5,7 @@
 - **Recover from aggregate context-limit errors without rerunning tools.** On an explicit provider context-overflow response (HTTP 400/413/422 with a recognized code or message), retry up to four times with a smaller *provider-only* copy of tool-result content: first keep head/tail previews, then replace older results with short stubs. Preserve assistant tool calls and matching IDs; keep the latest tool result until older candidates are exhausted. Full tool outputs remain in displayed and saved chat history, and no tool is executed again. If nothing can be reduced, return a clear error instead of treating an unrelated bad request as an overflow.
 - The CLI shows `context_compacted` retry progress. Regression tests cover overflow recovery, unchanged history and tool-call pairing, bounded attempts, unrelated errors, and interaction with image-input fallback. Verified live against `fast`: a twelve-tool sequence recovered from three provider context-limit errors and completed.
 - The configured per-tool output cap remains a separate safety limit; this recovery addresses the *combined* size of several individually permitted outputs. Proactive model-specific aggregate budgeting is not included.
-- Refreshed `uv.lock` to match the current project metadata: CLI and web dependencies are included by default, while the optional desktop dependency uses PySide6-Essentials rather than the full PySide6/Addons package.
+- Refreshed `uv.lock` to match the current project metadata: CLI and web dependencies are included by default, while the optional desktop dependency uses PySide6-Essentials rather than the full PySide6/Addons package. Context-error detection also accepts older OpenAI SDK response shapes.
 
 ## v1.9.0
 

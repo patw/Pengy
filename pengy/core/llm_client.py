@@ -48,9 +48,15 @@ def _is_context_limit_error(exc: "APIStatusError") -> bool:
     if exc.status_code not in (400, 413, 422):
         return False
     body = getattr(exc, "body", None)
+    if not isinstance(body, dict) and getattr(exc, "response", None) is not None:
+        try:
+            body = exc.response.json()
+        except (ValueError, TypeError, AttributeError):
+            body = None
     details = body.get("error", body) if isinstance(body, dict) else {}
     if isinstance(details, dict):
-        codes = (details.get("code"), details.get("type"), body.get("code"))
+        codes = (details.get("code"), details.get("type"),
+                 body.get("code") if isinstance(body, dict) else None)
         if any(str(code).lower() in _CONTEXT_ERROR_CODES for code in codes):
             return True
         text = str(details.get("message") or exc.message or "").lower()
