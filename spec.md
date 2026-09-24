@@ -682,10 +682,32 @@ string `[tool output from earlier turn elided]`. The message is otherwise left i
 `tool_call_id` are preserved, because removing it would violate the pairing invariants above.
 This is a copy, not a mutation: elision applies to what is *sent*, never to what is *saved*.
 
+### Context-overflow recovery (v1.9.1)
+
+A single tool's output limit does not bound the *combined* request. If the provider explicitly
+reports a context-limit error (HTTP 400, 413, or 422 with a recognized error code or context/token
+limit wording), the LLM loop retries the same API request with a smaller **request-only** copy of
+tool messages. Generic bad requests must not be mistaken for context errors, nor may context
+errors that mention images trigger the unsupported-image fallback.
+
+The first reduction keeps up to 1,500 characters from both the head and tail of eligible large
+tool results, with an omission marker. Further failures replace eligible outputs/previews with a
+short stub. Reduce older eligible results before touching the newest tool result; skip short,
+declined, and cancelled results. Each retry must reduce content; stop after at most four
+reductions, or immediately when there is nothing safe to shorten. If recovery is impossible,
+report a context-limit error rather than claiming the model answered.
+
+Preserve all `assistant.tool_calls`, their paired `tool_call_id` values, message order, and the
+current user/system messages. Tool results already emitted to the UI and saved in chat remain
+**full and unchanged**; retrying the request never reruns a tool or asks for confirmation again.
+A `context_compacted` progress event carries `attempt`, `max_attempts`, and `chars_removed`.
+This is reactive recovery, not proactive token counting or a model-specific context budget.
+
 ### Retry and backoff
 
-Retryable statuses are **429** and **529**. Everything else propagates immediately. Up to
-`_MAX_RETRIES = 5` retries (6 attempts total).
+Only **429** and **529** use exponential backoff. Up to `_MAX_RETRIES = 5` retries (6 attempts
+total); explicit context-limit failures instead use the separate reduction policy above. Other
+errors propagate immediately.
 
 Delay for attempt *n* (0-indexed):
 

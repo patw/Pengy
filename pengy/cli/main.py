@@ -1430,6 +1430,13 @@ class PengyCLI:
                     chat["messages"].append(response["message"])
                     self._save_progress(chat)
 
+                elif rtype == "context_compacted":
+                    expecting_api_call = True
+                    self.console.print(
+                        "[yellow]Context limit — retrying with {:,} fewer tool-output characters ({}/{})[/yellow]".format(
+                            response.get("chars_removed", 0), response.get("attempt", 0),
+                            response.get("max_attempts", 0)))
+
                 elif rtype == "retrying":
                     # 429/529 backoff — surface it instead of hanging silently.
                     expecting_api_call = True

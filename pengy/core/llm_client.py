@@ -26,6 +26,79 @@ _RETRYABLE_STATUSES = {429, 529}
 # Sentinel for graceful image-stripping recovery.
 _RETRY_WITHOUT_IMAGES = object()
 
+# Only context errors get a size-reduction retry; generic bad requests do not.
+_MAX_CONTEXT_RETRIES = 4
+_CONTEXT_ERROR_CODES = {
+    "context_length_exceeded", "context_window_exceeded", "prompt_too_long",
+    "input_too_long", "max_context_length_exceeded", "token_limit_exceeded",
+}
+_CONTEXT_ERROR_PHRASES = (
+    "context length", "context window", "context limit", "maximum context",
+    "prompt too long", "input too long", "too many tokens", "token limit exceeded",
+    "exceeds the model's context", "exceeds the model context",
+    "exceeds the context", "context size", "context_length_exceeded",
+    "exceeds the maximum allowed number of tokens", "maximum number of tokens",
+)
+_CONTEXT_STUB = "[tool output omitted from provider request to fit context; original remains in chat history]"
+_CONTEXT_PREVIEW = 1500
+
+
+def _is_context_limit_error(exc: "APIStatusError") -> bool:
+    """Recognize a provider's *explicit* context-limit response, not a generic 400."""
+    if exc.status_code not in (400, 413, 422):
+        return False
+    body = getattr(exc, "body", None)
+    details = body.get("error", body) if isinstance(body, dict) else {}
+    if isinstance(details, dict):
+        codes = (details.get("code"), details.get("type"), body.get("code"))
+        if any(str(code).lower() in _CONTEXT_ERROR_CODES for code in codes):
+            return True
+        text = str(details.get("message") or exc.message or "").lower()
+    else:
+        text = str(details or exc.message or "").lower()
+    return any(phrase in text for phrase in _CONTEXT_ERROR_PHRASES)
+
+
+def _compact_tool_result(messages: list[dict], stage: int) -> tuple[list[dict], int] | None:
+    """Shrink tool bodies in a private request copy; never alter the transcript.
+
+    Keep head/tail previews on the first error, then stub previews and other
+    large results on subsequent errors. Protect the newest result until other
+    candidates are exhausted. Compact enough per retry to avoid many failed
+    provider requests for a multi-tool turn.
+    """
+    candidates = []
+    all_tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    newest_tool = all_tool_indices[-1] if all_tool_indices else None
+    for idx, msg in enumerate(messages):
+        if msg.get("role") != "tool" or not isinstance(msg.get("content"), str):
+            continue
+        text = msg["content"]
+        if text.startswith(_CONTEXT_STUB) or len(text) < 256:
+            continue
+        if text.startswith("Tool execution was declined") or text.startswith("User cancelled"):
+            continue
+        if stage == 1 and len(text) <= 2 * _CONTEXT_PREVIEW + 200:
+            continue
+        candidates.append((idx, text))
+    if not candidates:
+        return None
+    pool = [(idx, text) for idx, text in candidates if idx != newest_tool] or candidates
+    result = list(messages)
+    saved = 0
+    for idx, text in pool:
+        if stage == 1:
+            replacement = (text[:_CONTEXT_PREVIEW] +
+                           f"\n\n[... {len(text) - 2 * _CONTEXT_PREVIEW:,} characters omitted from provider request; original remains in chat history ...]\n\n" +
+                           text[-_CONTEXT_PREVIEW:])
+        else:
+            replacement = _CONTEXT_STUB
+        reduction = len(text) - len(replacement)
+        if reduction > 0:
+            result[idx] = {**messages[idx], "content": replacement}
+            saved += reduction
+    return (result, saved) if saved else None
+
 
 def _has_image_url_parts(messages: list[dict]) -> bool:
     """True if any message in the list contains image_url parts."""
@@ -439,6 +512,7 @@ class LLMClient:
         user can abort a long wait.  Return ``True`` to cancel.
         """
         current_messages = list(messages)
+        # Request-only reductions: tool events and persisted chat retain full output.
         accumulated_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         # Checked here rather than in each frontend so the CLI, GUI and Web UI
@@ -448,12 +522,19 @@ class LLMClient:
             raise ConfigError(no_model_help(self.base_url))
 
         while True:
+            # A fresh tool round begins with the full history; the original
+            # messages remain untouched for events and history persistence.
+            request_messages = list(current_messages)
+            context_retries = 0
+            rate_retries = 0
             # ── API call with 429 / 529 exponential backoff ──────────
-            for attempt in range(_MAX_RETRIES + 1):
+            while True:
+                if cancel_fn and cancel_fn():
+                    raise _Cancelled()
                 try:
                     request_kwargs = {
                         "model": model or self.model,
-                        "messages": current_messages,
+                        "messages": request_messages,
                         "tools": _tools_mod.TOOLS,
                         "tool_choice": "auto",
                     }
@@ -464,8 +545,12 @@ class LLMClient:
                 except APIStatusError as e:
                     # ── Graceful handling: model doesn't support images ──
                     if (e.status_code == 400
+                            and not _is_context_limit_error(e)
                             and _has_image_url_parts(current_messages)
                             and _is_image_input_error(e)):
+                        # Input history belongs to this generator only; avoid
+                        # modifying the caller's image-bearing message objects.
+                        current_messages = [dict(msg) for msg in current_messages]
                         _strip_image_url_parts(current_messages)
                         current_messages.append({
                             "role": "user",
@@ -479,7 +564,26 @@ class LLMClient:
                         response = _RETRY_WITHOUT_IMAGES
                         break  # exit retry loop
 
-                    if e.status_code not in _RETRYABLE_STATUSES or attempt >= _MAX_RETRIES:
+                    if _is_context_limit_error(e):
+                        if context_retries < _MAX_CONTEXT_RETRIES:
+                            compacted = _compact_tool_result(
+                                request_messages, 1 if context_retries == 0 else 2)
+                            if compacted is not None:
+                                request_messages, saved = compacted
+                                context_retries += 1
+                                yield {
+                                    "type": "context_compacted",
+                                    "attempt": context_retries,
+                                    "max_attempts": _MAX_CONTEXT_RETRIES,
+                                    "chars_removed": saved,
+                                }
+                                continue
+                        raise RuntimeError(
+                            "Model context limit reached; could not fit this request after "
+                            f"{context_retries} tool-output reductions. The full tool outputs "
+                            "remain in chat history. Try a shorter request or a larger-context model."
+                        ) from e
+                    if e.status_code not in _RETRYABLE_STATUSES or rate_retries >= _MAX_RETRIES:
                         self._reset_client()
                         # 401/403 → tell the user how to configure Pengy instead
                         # of surfacing the SDK's misleading env-var advice.
@@ -487,10 +591,11 @@ class LLMClient:
                     # 429 / 529 — backoff and retry
                     headers = getattr(e.response, "headers", {}) if e.response is not None else {}
                     ra = _retry_after_delay(e.status_code, headers)
-                    delay = _backoff_delay(attempt, ra)
+                    delay = _backoff_delay(rate_retries, ra)
+                    rate_retries += 1
                     yield {
                         "type": "retrying",
-                        "attempt": attempt + 1,
+                        "attempt": rate_retries,
                         "max_attempts": _MAX_RETRIES,
                         "delay_secs": round(delay, 1),
                         "status_code": e.status_code,
@@ -507,6 +612,12 @@ class LLMClient:
                         }
                         return
                     self._reset_client()
+                except _Cancelled:
+                    yield {
+                        "type": "final_response", "content": "Request cancelled.",
+                        "message": None, "usage": accumulated_usage,
+                    }
+                    return
                 except Exception as exc:
                     self._reset_client()
                     raise _translate_api_error(exc, self.base_url) from exc
