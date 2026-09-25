@@ -67,8 +67,10 @@ class MainWindow(QMainWindow):
         self._abandoned_workers: list[tuple[QThread, ChatWorker]] = []
 
         # question dialog queuing (Option B: one-at-a-time across tabs)
-        self._pending_questions: list[tuple[str, dict]] = []  # (chat_id, question_data)
+        self._pending_questions: list[tuple[str, ChatWorker, dict]] = []  # chat, originating worker, request
         self._question_dialog_open = False
+        self._active_question_dialog: QDialog | None = None
+        self._active_question_worker: ChatWorker | None = None
 
         self.setup_ui()
         self.apply_theme()
@@ -755,16 +757,24 @@ class MainWindow(QMainWindow):
 
     def _on_worker_finished(self):
         chat_id = self._sender_chat_id()
+        worker = self.sender()
         if chat_id:
-            self._worker_to_chat.pop(id(self.sender()), None)
+            self._worker_to_chat.pop(id(worker), None)
+        if self._active_question_worker is worker and self._active_question_dialog:
+            self._active_question_dialog.reject()
+        self._pending_questions = [
+            item for item in self._pending_questions if item[1] is not worker
+        ]
         if not chat_id:
             return
         session = self._tab_for_chat(chat_id)
-        if not session:
+        if not session or session.worker is not worker:
             return
         if session.worker_thread and session.worker_thread.isRunning():
             session.worker_thread.quit()
             session.worker_thread.wait(5000)
+        if getattr(self, "_sudo_dialog_worker", None) is self.sender():
+            self._sudo_dialog.reject()
         session.worker = None
         session.worker_thread = None
         session.thinking = False
@@ -781,6 +791,13 @@ class MainWindow(QMainWindow):
         if session.worker is not None:
             self._worker_to_chat.pop(id(session.worker), None)
             session.worker.cancel()
+            if getattr(self, "_sudo_dialog_worker", None) is session.worker:
+                self._sudo_dialog.reject()
+            if self._active_question_worker is session.worker and self._active_question_dialog:
+                self._active_question_dialog.reject()
+            self._pending_questions = [
+                item for item in self._pending_questions if item[1] is not session.worker
+            ]
             try:
                 session.worker.response.disconnect(self._on_worker_response)
                 session.worker.error.disconnect(self._on_worker_error)
@@ -882,49 +899,63 @@ class MainWindow(QMainWindow):
         if not session or not session.worker:
             return
 
+        worker = session.worker
         if self._question_dialog_open:
-            # Queue it — show it when the current one closes
-            self._pending_questions.append((chat_id, question_data))
+            # Queue the originating worker too: a replacement must not receive
+            # an old worker's answer when this question is eventually shown.
+            self._pending_questions.append((chat_id, worker, question_data))
             # Flash the tab title to indicate it's waiting
             session.thinking = True
             self._update_tab_title(session)
             return
 
-        self._show_question_dialog(chat_id, session, question_data)
+        self._show_question_dialog(chat_id, worker, question_data)
 
-    def _show_question_dialog(self, chat_id: str, session: _TabSession, question_data: dict):
-        """Show the QuestionDialog and send the response back to the worker."""
+    def _show_question_dialog(self, chat_id: str, worker: ChatWorker, question_data: dict):
+        """Show a question only while its originating worker is still waiting."""
+        session = self._tab_for_chat(chat_id)
+        if not session or session.worker is not worker or not worker.is_question_pending():
+            return
         self._question_dialog_open = True
 
         tab_title = session.chat.get("title", "New Chat")[:30]
         questions = question_data.get("questions", [])
         dialog = QuestionDialog(tab_title, questions, self._theme, self)
-        result = dialog.exec()
+        self._active_question_dialog = dialog
+        self._active_question_worker = worker
+        try:
+            result = dialog.exec()
+            current = self._tab_for_chat(chat_id)
+            if current and current.worker is worker and worker.is_question_pending():
+                if result == QDialog.DialogCode.Accepted and dialog.answers:
+                    worker.send_question_response({
+                        "answered": True,
+                        "tool_call_id": question_data["tool_call_id"],
+                        "answers": dialog.answers,
+                    })
+                else:
+                    worker.send_question_response(None)
+        finally:
+            self._active_question_dialog = None
+            self._active_question_worker = None
+            self._question_dialog_open = False
 
-        if result == QDialog.DialogCode.Accepted and dialog.answers:
-            session.worker.send_question_response({
-                "answered": True,
-                "tool_call_id": question_data["tool_call_id"],
-                "answers": dialog.answers,
-            })
-        else:
-            session.worker.send_question_response(None)
+        current = self._tab_for_chat(chat_id)
+        if current:
+            current.thinking = bool(current.worker and current.worker_thread
+                                    and current.worker_thread.isRunning())
+            self._update_tab_title(current)
 
-        # Clean up thinking flag if we flashed it for queued state
-        session.thinking = bool(session.worker and session.worker_thread and session.worker_thread.isRunning())
-        self._update_tab_title(session)
-
-        self._question_dialog_open = False
-
-        # Show next queued question if any
-        if self._pending_questions:
-            next_chat_id, next_data = self._pending_questions.pop(0)
+        # Skip stale queued requests; never deliver an old answer to a new run.
+        while self._pending_questions:
+            next_chat_id, next_worker, next_data = self._pending_questions.pop(0)
             next_session = self._tab_for_chat(next_chat_id)
-            if next_session and next_session.worker:
-                # Clear the queued flashing indicator
-                next_session.thinking = bool(next_session.worker and next_session.worker_thread and next_session.worker_thread.isRunning())
+            if next_session and next_session.worker is next_worker and next_worker.is_question_pending():
+                next_session.thinking = bool(next_session.worker_thread
+                                             and next_session.worker_thread.isRunning())
                 self._update_tab_title(next_session)
-                self._show_question_dialog(next_chat_id, next_session, next_data)
+                self._show_question_dialog(next_chat_id, next_worker, next_data)
+                break
 
     def _on_sudo_password_requested(self, host: str = ""):
         """Show a password dialog when a sudo command needs a password.
@@ -938,13 +969,25 @@ class MainWindow(QMainWindow):
         session = self._tab_for_chat(chat_id)
         if not session or not session.worker:
             return
-        password, ok = QInputDialog.getText(
-            self,
-            f"sudo Password — {host}" if host else "sudo Password",
-            f"Enter sudo password for {host}:" if host else "Enter sudo password:",
-            QLineEdit.EchoMode.Password,
-        )
-        session.worker.send_sudo_password(password if ok else None)
+        worker = session.worker
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(f"sudo Password — {host}" if host else "sudo Password")
+        dialog.setLabelText(
+            f"Enter sudo password for {host}:" if host else "Enter sudo password:")
+        dialog.setTextEchoMode(QLineEdit.EchoMode.Password)
+        self._sudo_dialog = dialog
+        self._sudo_dialog_worker = worker
+        try:
+            accepted = dialog.exec()
+            password = dialog.textValue()
+        finally:
+            self._sudo_dialog = None
+            self._sudo_dialog_worker = None
+        # exec() processes worker completion and tab changes while the prompt
+        # is visible. Never reply to a retired worker or a subsequent request.
+        current = self._tab_for_chat(chat_id)
+        if current and current.worker is worker and worker.is_sudo_pending():
+            worker.send_sudo_password(password if accepted and password else None)
 
     # ── Final response handling ───────────────────────────────────
 
@@ -1025,12 +1068,17 @@ class MainWindow(QMainWindow):
             if thread is not None and thread.isRunning():
                 thread.wait(3000)
 
-        # Cancel any pending queued questions so their workers don't hang
-        for chat_id, qdata in self._pending_questions:
+        # Cancel any pending queued questions so their workers don't hang.
+        # Do not reply to a replacement worker from a retired queued request.
+        for chat_id, worker, _ in self._pending_questions:
             session = self._tab_for_chat(chat_id)
-            if session and session.worker:
-                session.worker.send_question_response(None)
+            if session and session.worker is worker and worker.is_question_pending():
+                worker.send_question_response(None)
         self._pending_questions.clear()
+        if self._active_question_dialog:
+            self._active_question_dialog.reject()
+        if getattr(self, "_sudo_dialog", None):
+            self._sudo_dialog.reject()
 
         super().closeEvent(event)
 

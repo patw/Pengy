@@ -32,6 +32,7 @@ class ChatWorker(QObject):
         self._sudo_event = threading.Event()
         self._pending_sudo_password = None
         self._question_event = threading.Event()
+        self._question_pending = False
         self._pending_question_response = None
         # Per-run tool state so concurrent tabs don't share a sudo provider
         # or kill each other's subprocesses.
@@ -98,12 +99,16 @@ class ChatWorker(QObject):
                 elif response["type"] == "question_request":
                     self._pending_question_response = None
                     self._question_event.clear()
-                    # Emit question_requested AFTER clearing so the handler sees a fresh state
-                    self.question_requested.emit(response)
-                    self._question_event.wait()
-                    if self._cancelled.is_set():
-                        return
-                    send_value = self._pending_question_response
+                    self._question_pending = True
+                    try:
+                        # Emit only after clearing so the UI sees a fresh request.
+                        self.question_requested.emit(response)
+                        self._question_event.wait()
+                        if self._cancelled.is_set():
+                            return
+                        send_value = self._pending_question_response
+                    finally:
+                        self._question_pending = False
         except StopIteration:
             pass
         except Exception as e:
@@ -124,12 +129,19 @@ class ChatWorker(QObject):
             return None
         self._pending_sudo_password = None
         self._sudo_event.clear()
+        self._sudo_pending = True
         self.sudo_password_requested.emit(host or "")
         self._sudo_event.wait()
+        self._sudo_pending = False
         return self._pending_sudo_password
+
+    def is_sudo_pending(self):
+        return getattr(self, "_sudo_pending", False) and not self._sudo_event.is_set()
 
     def send_sudo_password(self, password):
         """Called from the main thread with the user-entered password (or None to cancel)."""
+        if not self.is_sudo_pending():
+            return
         self._pending_sudo_password = password
         self._sudo_event.set()
 
@@ -140,9 +152,13 @@ class ChatWorker(QObject):
         self._pending_confirmation = confirmation
         self._confirmation_event.set()
 
+    def is_question_pending(self):
+        return (self._question_pending and not self._question_event.is_set()
+                and not self._cancelled.is_set())
+
     def send_question_response(self, response: dict | None):
         """Called from the main thread with the user's answers (or None to cancel)."""
-        if not self.generator:
+        if not self.generator or not self.is_question_pending():
             return
         self._pending_question_response = response
         self._question_event.set()

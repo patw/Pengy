@@ -58,6 +58,10 @@ def window(qapp, tmp_cfg, monkeypatch):
         w.tab_widget.removeTab(0)
     w.close()
     qapp.processEvents()
+    # The fixture removes tab pages by hand above; keep the window alive until
+    # Qt can process deferred widget destruction before another modal exec().
+    w.deleteLater()
+    qapp.processEvents()
 
 
 # ── helpers ─────────────────────────────────────────────────────────
@@ -79,6 +83,66 @@ def _dirty_chat(session: _TabSession):
 
 
 # ── tests ───────────────────────────────────────────────────────────
+
+
+def test_sudo_dialog_closes_when_worker_finishes(window, monkeypatch):
+    """A finished worker must not leave a clickable prompt with a stale target."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QInputDialog
+    from pengy.ui.chat_worker import ChatWorker
+
+    session = _active_session(window)
+    worker = ChatWorker(object(), messages=[])
+    worker._sudo_pending = True
+    session.worker = worker
+    window._worker_to_chat[id(worker)] = window.active_chat_id
+    monkeypatch.setattr(window, "_sender_chat_id", lambda: window.active_chat_id)
+    monkeypatch.setattr(window, "sender", lambda: worker)
+
+    def finish_during_prompt():
+        dialog = window.findChild(QInputDialog)
+        assert dialog is not None and dialog.isVisible()
+        worker._sudo_event.set()  # provider is no longer waiting
+        window._on_worker_finished()
+        assert not dialog.isVisible()
+
+    QTimer.singleShot(0, finish_during_prompt)
+    window._on_sudo_password_requested("")
+    assert session.worker is None
+    assert window._sudo_dialog is None
+
+
+def test_sudo_dialog_closes_when_worker_abandoned(window):
+    """Stop/replacement must dismiss the old prompt before it can be answered."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QInputDialog
+    from pengy.ui.chat_worker import ChatWorker
+
+    session = _active_session(window)
+    worker = ChatWorker(object(), messages=[])
+    worker._sudo_pending = True
+    session.worker = worker
+    window._worker_to_chat[id(worker)] = window.active_chat_id
+    window._sender_chat_id = lambda: window.active_chat_id
+    worker.response.connect(window._on_worker_response)
+    worker.error.connect(window._on_worker_error)
+    worker.finished.connect(window._on_worker_finished)
+    worker.sudo_password_requested.connect(window._on_sudo_password_requested)
+    worker.question_requested.connect(window._on_worker_question)
+    from PySide6.QtCore import QThread
+    session.worker_thread = QThread()
+
+    def abandon_during_prompt():
+        dialog = window.findChild(QInputDialog)
+        assert dialog is not None and dialog.isVisible()
+        window._abandon_worker_for(session)
+        assert not dialog.isVisible()
+
+    QTimer.singleShot(0, abandon_during_prompt)
+    window._on_sudo_password_requested("")
+    assert session.worker is None
+    assert worker._cancelled.is_set()
+
 
 class TestTabLifecycle:
     def test_starts_with_one_tab(self, window):
@@ -252,6 +316,11 @@ class TestTabRestore:
         while w2.tab_widget.count() > 0:
             w2.tab_widget.removeTab(0)
         w2.close()
+        qapp.processEvents()
+        # Modal dialogs later in this suite must not run against Qt widgets
+        # left behind by the two temporary windows in this restore test.
+        w1.deleteLater()
+        w2.deleteLater()
         qapp.processEvents()
 
 
@@ -463,8 +532,88 @@ class TestCloseEvent:
 
         assert worker.cancelled
         assert abandoned.cancelled
+        session.worker = None
+        session.worker_thread = None
+        window._abandoned_workers.clear()
 
 class TestQuestionDialog:
+    @staticmethod
+    def _waiting_worker(window):
+        from pengy.ui.chat_worker import ChatWorker
+        worker = ChatWorker(object(), messages=[])
+        worker._question_pending = True
+        worker.generator = object()
+        session = _active_session(window)
+        session.worker = worker
+        window._worker_to_chat[id(worker)] = window.active_chat_id
+        return session, worker
+
+    @staticmethod
+    def _question():
+        return {"tool_call_id": "question-1", "questions": [{
+            "header": "Pick", "question": "Which?",
+            "options": [{"label": "A", "description": "first"}],
+        }]}
+
+    def test_finish_dismisses_question_without_reply(self, window, monkeypatch):
+        from PySide6.QtCore import QTimer
+        from pengy.ui.main_window import QuestionDialog
+        session, worker = self._waiting_worker(window)
+        monkeypatch.setattr(window, "sender", lambda: worker)
+
+        def finish_while_open():
+            dialog = window.findChild(QuestionDialog)
+            assert dialog and dialog.isVisible()
+            window._on_worker_finished()
+            assert not dialog.isVisible()
+
+        QTimer.singleShot(0, finish_while_open)
+        window._show_question_dialog(window.active_chat_id, worker, self._question())
+        assert session.worker is None
+        assert not worker._question_event.is_set()
+        assert window._active_question_dialog is None
+        assert not window._question_dialog_open
+
+    def test_abandon_dismisses_question_without_reply(self, window):
+        from PySide6.QtCore import QThread, QTimer
+        from pengy.ui.main_window import QuestionDialog
+        session, worker = self._waiting_worker(window)
+        session.worker_thread = QThread()
+        worker.response.connect(window._on_worker_response)
+        worker.error.connect(window._on_worker_error)
+        worker.finished.connect(window._on_worker_finished)
+        worker.sudo_password_requested.connect(window._on_sudo_password_requested)
+        worker.question_requested.connect(window._on_worker_question)
+
+        def abandon_while_open():
+            dialog = window.findChild(QuestionDialog)
+            assert dialog and dialog.isVisible()
+            window._abandon_worker_for(session)
+            assert not dialog.isVisible()
+
+        QTimer.singleShot(0, abandon_while_open)
+        window._show_question_dialog(window.active_chat_id, worker, self._question())
+        assert session.worker is None
+        assert worker._cancelled.is_set()
+        assert window._active_question_dialog is None
+        assert not window._question_dialog_open
+
+    def test_queued_question_is_not_given_to_replacement_worker(self, window):
+        session, old_worker = self._waiting_worker(window)
+        window._question_dialog_open = True
+        window._sender_chat_id = lambda: window.active_chat_id
+        window._on_worker_question(self._question())
+        assert window._pending_questions[0][1] is old_worker
+        from pengy.ui.chat_worker import ChatWorker
+        replacement = ChatWorker(object(), messages=[])
+        replacement._question_pending = True
+        replacement.generator = object()
+        session.worker = replacement
+        window._question_dialog_open = False
+        window._show_question_dialog(window.active_chat_id, old_worker, self._question())
+        assert not replacement._question_event.is_set()
+        assert window._active_question_dialog is None
+
     def test_dialog_creation(self, window, qapp):
         """QuestionDialog can be created and shows questions."""
         from pengy.ui.main_window import QuestionDialog
