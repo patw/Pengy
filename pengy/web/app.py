@@ -181,6 +181,8 @@ def _tool_summary(name: str, args: object) -> str:
         summary = value("command")
         if value("host"):
             summary = f"{value('host')}: {summary}"
+    elif name == "run_powershell":
+        summary = value("command")
     elif name == "run_python":
         summary = value("code")
     elif name in {"search_content", "glob"}:

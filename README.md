@@ -204,7 +204,7 @@ When you hit **▶ Play**, Pengy collects each placeholder once, renders the ful
 
 ## Tools
 
-Pengy gives the LLM these 16 tools to operate on your machine:
+Pengy gives the LLM these 16 tools to operate on your machine (17 on Windows, which adds `run_powershell`):
 
 | Tool | Description |
 |------|-------------|
@@ -213,7 +213,8 @@ Pengy gives the LLM these 16 tools to operate on your machine:
 | `write_file` | Write or overwrite a file |
 | `replace_in_file` | Targeted text replacement (safer than full rewrites) |
 | `apply_changes` | Multi-file transactional edits with diff preview |
-| `run_bash` | Execute shell commands locally or on a remote host over ssh (configurable timeout; sudo support, including remote sudo) |
+| `run_bash` | Execute shell commands locally or on a remote host over ssh (configurable timeout; sudo support, including remote sudo). On Windows, remote hosts only |
+| `run_powershell` | Windows only: run PowerShell scripts locally (PowerShell 7 if installed, else Windows PowerShell 5.1), with the privileges Pengy was started with |
 | `run_python` | Execute Python code |
 | `web_search` | DuckDuckGo web search |
 | `download_file` | Download a URL to `~/Downloads/` |

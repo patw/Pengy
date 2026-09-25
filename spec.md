@@ -512,8 +512,26 @@ Executes a bash command via `subprocess.Popen` in its own process group. An opti
 
 **Remote execution (`host`):** with `host` set, the command runs on that machine over ssh instead of locally (see Design Decisions, "Remote sudo"). `cwd` is then a remote path. The sudo rules are identical — explicit `sudo` plus `elevated=true` — and the provider is called with the host, so the prompt names the machine. Passwords are cached per host (`None` = local) and never offered to another host; a failed sudo authentication (classic sudo or sudo-rs wording) discards that host's cached password and says so in the result.
 
+**Windows:** `run_bash` is remote-only on Windows — `host` is required in the schema and a local call is rejected with a pointer to `run_powershell`. See below.
+
+### `run_powershell(command, cwd=None)` (Windows only)
+Exposed instead of a local `run_bash` on Windows; POSIX editions never list it. One local-shell tool per platform, named for the shell it really runs, because the tool name is the strongest hint a model gets about which syntax to write. No shell translation in either direction.
+
+**Resolution:** `pwsh` on PATH (PowerShell 7), else `powershell` on PATH, else `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` (Windows PowerShell 5.1, present on every Windows 10/11). Never `cmd.exe`. If none is found the tool returns an error naming what was searched. The tool description names the resolved version (5.1 gets a short list of syntax differences from 7) and the process's elevation state.
+
+**Privilege:** commands run with Pengy's own token. There is no elevation flow: if Pengy is not running as Administrator, the description tells the model that admin-only work (HKLM, services, SYSTEM scheduled tasks, firewall, Windows features) will fail and that it must not try `Start-Process -Verb RunAs` or `sudo`, but tell the user to restart Pengy with *Run as administrator*.
+
+**Invocation:** the script is written to a UTF-8 temp file (`pengy-*.ps1`, deleted afterwards) and run as `<ps> -NoLogo -NoProfile -NonInteractive -Command <prelude>`, where the fixed prelude reads that file with an explicit UTF-8 encoding and runs it through `[ScriptBlock]::Create`. This avoids `-File` (blocked by the default Restricted execution policy on client SKUs; `-ExecutionPolicy Bypass` is flagged by EDR), avoids `-EncodedCommand` (a well-known malware indicator that corporate EDR blocks), and keeps every model-authored byte off the command line. The prelude contains no double quotes. It also:
+- sets `$ProgressPreference = 'SilentlyContinue'` (progress records otherwise leak onto redirected output, as CLIXML on 5.1);
+- sets `$PSStyle.OutputRendering = 'PlainText'` when present (pwsh 7 emits ANSI colour into pipes);
+- sets `[Console]::OutputEncoding` (inside `try`) and `$OutputEncoding` to UTF-8 without BOM, and output is decoded as UTF-8;
+- exits 1 with the parser message if the script fails to parse;
+- otherwise exits with `$LASTEXITCODE` (the last native command's code, reset to 0 first), or 1 if the script throws; `exit N` in the script ends the process with `N`.
+
+stdin is `/dev/null` (`NUL`), and the process gets `CREATE_NO_WINDOW` so the console-less `pengy-gui` launcher never flashes a console. Timeout and Stop kill the whole tree with `taskkill /T /F` (see Tool execution safety net).
+
 ### `run_python(code, cwd=None)`
-Writes code to a temp file and executes it with `python3`. An optional `cwd` is expanded and must name an existing directory. Timeout configurable via `tool_timeout` (default 300s). Captures stdout and stderr.
+Writes code to a temp file and executes it with the interpreter running Pengy (`python.exe` in place of `pythonw.exe` when launched via `pengy-gui` on Windows). An optional `cwd` is expanded and must name an existing directory. Timeout configurable via `tool_timeout` (default 300s). Captures stdout and stderr.
 
 ### `web_search(query, max_results=5)`
 Searches the web using DuckDuckGo (`ddgs`). 5-second hard timeout on the search call. Returns numbered results with title, URL, and snippet.
@@ -734,8 +752,9 @@ retries, and reported once on the final response as `prompt_tokens` / `completio
 
 Tool dispatch runs with two independent deadlines, because they catch different failures:
 
-- Subprocess tools (`run_bash`, `run_python`) enforce `tool_timeout` at the process level and are
-  killed by **process group**, so orphaned grandchildren die with them.
+- Subprocess tools (`run_bash`, `run_powershell`, `run_python`) enforce `tool_timeout` at the process level and are
+  killed by **process group** (POSIX `killpg`; on Windows `taskkill /T /F` on the process tree, falling
+  back to `TerminateProcess`), so orphaned grandchildren die with them.
 - Every tool additionally runs under an outer deadline of `tool_timeout + 30` seconds. This
   catches tools with no internal deadline — `read_file` on a hung network mount, `fetch_url`
   against a trickling server — without requiring each one to implement its own guard. On expiry

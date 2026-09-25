@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Native PowerShell on Windows (`run_powershell`).** On Windows the model now gets `run_powershell` for local commands instead of a `run_bash` that silently ran `cmd.exe`. It uses PowerShell 7 (`pwsh`) when installed and otherwise the Windows PowerShell 5.1 that ships with Windows (never `cmd.exe`). The tool description tells the model which version it has, and whether Pengy is running as Administrator: if not, admin-only steps are reported back to the user instead of attempted through `Start-Process -Verb RunAs` or `sudo`. Scripts are run from a UTF-8 temp file compiled with `[ScriptBlock]::Create`, so there is no command-line quoting, no execution-policy prompt, and no `-EncodedCommand` for endpoint security to flag. Output is plain UTF-8 text with no ANSI colour or progress noise, and a script that throws or fails to parse exits 1. On Windows `run_bash` is kept only for remote hosts (`host` is required); remote sudo works exactly as on Linux and macOS. Linux and macOS are unchanged.
+- **Stop and timeouts work on Windows.** Killing a tool's process used `os.killpg`, which does not exist on Windows, so every timeout or Stop raised an error and left the command running. Windows now kills the whole process tree with `taskkill /T /F`.
+- **No console flashes from the Windows GUI.** Tool subprocesses (PowerShell, ssh, Python) start without a console window, and `run_python` uses `python.exe` rather than `pythonw.exe` when Pengy was launched through `pengy-gui`, so scripts' output is captured.
+
 ## v1.9.3
 
 - **Image previews and save controls.** Drag and drop image files into the chat input, preview attached images before sending, remove individual images, and save images shown in chat to disk. Includes regression tests for drag-and-drop, image preview, and saving.

@@ -438,6 +438,7 @@ function toolSummary(name, args) {
   else if (name === 'fetch_url') summary = val('url');
   else if (name === 'download_file') summary = val('filename') || val('url');
   else if (name === 'run_bash') summary = (val('host') ? `${val('host')}: ` : '') + val('command');
+  else if (name === 'run_powershell') summary = val('command');
   else if (name === 'run_python') summary = val('code');
   else if (['search_content', 'glob'].includes(name)) summary = val('pattern') + (val('path') ? ` in ${val('path')}` : '');
   else if (name === 'apply_changes') summary = Array.isArray(args.changes) ? `${args.changes.length} files` : '';

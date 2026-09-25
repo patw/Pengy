@@ -199,6 +199,7 @@ class TestToolSummary:
         ("fetch_url", {"url": "https://example.com/api"}, "https://example.com/api"),
         ("run_bash", {"command": "git status --short"}, "git status --short"),
         ("run_bash", {"command": "uptime", "host": "web1"}, "web1: uptime"),
+        ("run_powershell", {"command": "Get-Service sshd"}, "Get-Service sshd"),
         ("search_content", {"pattern": "EventSource", "path": "~/dev/Pengy"}, "EventSource in ~/dev/Pengy"),
         ("apply_changes", {"changes": [{}, {}]}, "2 files"),
         ("ask_user_question", {"questions": [{}, {}, {}]}, "3 questions"),

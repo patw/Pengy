@@ -40,10 +40,56 @@ _tool_timeout = 300  # seconds; -1 means no timeout
 #   - macOS ships bash 3.2.57 at /bin/bash (frozen at the last GPLv2 release);
 #     Homebrew's bash 5 appears earlier on PATH when installed
 #   - busybox/Alpine images have no /bin/bash at all
-# None means "let Popen pick the platform default" — /bin/sh on POSIX when
-# bash is genuinely absent, COMSPEC (cmd.exe) on Windows.  Windows is
-# aspirational: run_bash's kill path is still POSIX-only (os.killpg/SIGKILL).
-_SHELL = None if os.name == "nt" else shutil.which("bash")
+# None means "let Popen pick the platform default" — /bin/sh when bash is
+# genuinely absent.  Unused on Windows, where run_bash is remote-only and local
+# commands go through run_powershell instead.
+_IS_WINDOWS = os.name == "nt"
+_SHELL = None if _IS_WINDOWS else shutil.which("bash")
+
+# Tool subprocesses get no console window on Windows: under the console-less
+# pengy-gui launcher (pythonw) every powershell/ssh/python child would
+# otherwise flash one.  CREATE_NO_WINDOW still gives the child a (hidden)
+# console, so console APIs such as [Console]::OutputEncoding keep working.
+# Popen accepts creationflags=0 on POSIX.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if _IS_WINDOWS else 0
+
+
+def _find_powershell() -> "str | None":
+    """Resolve the PowerShell used by run_powershell.
+
+    PowerShell 7 (pwsh) is preferred when installed, but a clean Windows 11
+    ships only Windows PowerShell 5.1, so that is the supported floor.  The
+    absolute System32 path covers a PATH that has lost the v1.0 directory.
+    Never falls back to cmd.exe.
+    """
+    for name in ("pwsh", "powershell"):
+        found = shutil.which(name)
+        if found:
+            return found
+    builtin = os.path.join(
+        os.environ.get("SystemRoot", r"C:\Windows"),
+        "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    return builtin if os.path.isfile(builtin) else None
+
+
+def _powershell_label(path: "str | None") -> str:
+    """Human/model-facing name for the resolved PowerShell."""
+    name = (path or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if name in ("pwsh", "pwsh.exe"):
+        return "PowerShell 7"
+    return "Windows PowerShell 5.1"
+
+
+def _windows_is_admin() -> bool:
+    """True when this process holds an elevated (Administrator) token."""
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+_POWERSHELL = _find_powershell() if _IS_WINDOWS else None
 
 # Read-only tools that can be auto-approved when tool_confirmation is "safe"
 READONLY_TOOLS = frozenset({
@@ -65,13 +111,48 @@ _MAX_CHANGE_OPERATIONS = 100
 _MAX_CHANGE_BYTES = 1_000_000
 _MAX_CHANGE_BLOCK = 256_000
 
+def _kill_proc_tree_windows(proc):
+    """Kill a subprocess and its descendants on Windows.
+
+    os.killpg/os.getpgid/signal.SIGKILL don't exist on Windows (and
+    start_new_session is ignored there), so there is no process group to
+    signal.  taskkill /T walks the parent-PID tree instead.  Invoked by
+    absolute path so a taskkill.exe earlier on PATH can't hijack it, and with
+    CREATE_NO_WINDOW so a pythonw GUI doesn't flash a console.  proc.kill()
+    (TerminateProcess) is the fallback if taskkill is missing or fails; it
+    only reaches the immediate child.
+    """
+    taskkill = os.path.join(
+        os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+    try:
+        result = subprocess.run(
+            [taskkill, "/PID", str(proc.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def _kill_proc_group(proc):
-    """SIGKILL a subprocess's whole process group and reap it."""
+    """Kill a subprocess's whole process group (tree on Windows) and reap it."""
     if proc is not None and proc.poll() is None:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
+        if _IS_WINDOWS:
+            _kill_proc_tree_windows(proc)
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -331,7 +412,7 @@ def _truncate_head_lines(text: str, limit: int | None = None
     kept = _cut_at_line_end(text, budget)
     return kept, kept.count("\n") + 1, True
 
-TOOLS = [
+_BASE_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -780,6 +861,146 @@ TOOLS = [
 ]
 
 
+
+# ---------------------------------------------------------------------------
+# Platform-specific tool surface
+#
+# One local-shell tool per platform, named for the shell it really runs: the
+# tool name is the strongest hint a model gets about which syntax to write.
+# POSIX keeps run_bash exactly as above.  Windows gets run_powershell for
+# local commands, and run_bash survives only for remote hosts (host=), since
+# an ssh target really does run a POSIX shell.  No shell translation either
+# way.
+# ---------------------------------------------------------------------------
+
+def _run_powershell_schema(label: str, is_admin: bool) -> dict:
+    if is_admin:
+        privilege = (
+            "Pengy is running as Administrator, so commands already have "
+            "full administrative rights (HKLM registry, services, scheduled "
+            "tasks, firewall, Windows features); no elevation step is needed."
+        )
+    else:
+        privilege = (
+            "Pengy is NOT running as Administrator. Commands that need admin "
+            "rights (writing HKLM, managing services, scheduled tasks that run "
+            "as SYSTEM or with highest privileges, firewall rules, Windows "
+            "features, machine-wide installs) fail with access denied. Do not "
+            "try to self-elevate with Start-Process -Verb RunAs or sudo: the "
+            "elevated process cannot be captured here. Instead tell the user "
+            "the step needs admin rights: they can restart Pengy with Run as "
+            "administrator, or run the command themselves."
+        )
+    dialect = ""
+    if label == "Windows PowerShell 5.1":
+        dialect = (
+            " This is Windows PowerShell 5.1, not PowerShell 7: there are no "
+            "&& / || chain operators and no ternary operator, and curl/wget "
+            "are aliases for Invoke-WebRequest (use curl.exe for real curl)."
+        )
+    return {
+        "type": "function",
+        "function": {
+            "name": "run_powershell",
+            "description": (
+                f"Run a PowerShell script on this Windows machine with {label}. "
+                "Use PowerShell syntax and cmdlets; this is not bash. The "
+                "script may span multiple lines. It is non-interactive: stdin "
+                "is closed, so anything that prompts (Read-Host, "
+                "Get-Credential, confirmation prompts, an editor) fails rather "
+                "than waits; pass -Force, -Confirm:$false or other "
+                "non-interactive flags. Set cwd to run in a specific "
+                "directory. Default table formatting is cut to a narrow "
+                "width, so for wide or detailed objects pipe to Format-List, "
+                "ConvertTo-Json, or Out-String -Width 4096. The exit code is "
+                "the last native command's exit code, or 1 if the script "
+                "throws or fails to parse; non-terminating errors are shown "
+                f"but do not change it. {privilege}{dialect} To run on a "
+                "remote Linux or macOS machine, use run_bash with host. "
+                "Commands are killed once the configured tool timeout elapses."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The PowerShell script to execute",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory to run the script in",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    }
+
+
+def _remote_only_run_bash(schema: dict) -> dict:
+    """Windows variant of run_bash: same parameters, host required."""
+    fn = schema["function"]
+    params = fn["parameters"]
+    return {
+        "type": "function",
+        "function": {
+            **fn,
+            "description": (
+                "Run a bash command on a remote Linux or macOS host over ssh. "
+                "On this Windows machine run_bash is only for remote hosts: "
+                "host is required, and local commands go through "
+                "run_powershell. Use the ssh destination the user uses (an "
+                "~/.ssh/config alias, host, or user@host); key-based login "
+                "must already work. The command is non-interactive: stdin is "
+                "closed, so anything that prompts or waits for input fails "
+                "rather than waits; pass non-interactive flags instead. cwd, "
+                "if given, is a path on the remote host. To run something as "
+                "root there, include an explicit `sudo ...` in the command AND "
+                "set elevated=true; Pengy then prompts for that host's sudo "
+                "password. elevated=true does NOT elevate on its own: a "
+                "command with elevated=true but no `sudo` is rejected. Do not "
+                "wrap the command in ssh yourself. Commands are killed once "
+                "the configured tool timeout elapses."
+            ),
+            "parameters": {**params, "required": ["command", "host"]},
+        },
+    }
+
+
+# Other schemas that point the model at run_bash for local work.
+_WINDOWS_DESCRIPTION_SWAPS = {
+    "download_file": ("use run_bash with curl or wget", "use run_powershell with curl.exe"),
+    "fetch_url": ("use run_bash with curl", "use run_powershell with curl.exe"),
+    "glob": ("run_bash('find ...') or run_bash('ls ...')", "run_powershell('Get-ChildItem ...')"),
+}
+
+
+def _platform_tools(base: list, windows: bool, powershell_label: str = "",
+                    is_admin: bool = False) -> list:
+    """Return the tool list the model sees on this platform."""
+    if not windows:
+        return base
+    tools = []
+    for schema in base:
+        name = schema["function"]["name"]
+        if name == "run_bash":
+            tools.append(_run_powershell_schema(powershell_label, is_admin))
+            tools.append(_remote_only_run_bash(schema))
+            continue
+        swap = _WINDOWS_DESCRIPTION_SWAPS.get(name)
+        if swap:
+            fn = schema["function"]
+            schema = {**schema, "function": {
+                **fn, "description": fn["description"].replace(*swap)}}
+        tools.append(schema)
+    return tools
+
+
+TOOLS = _platform_tools(
+    _BASE_TOOLS, _IS_WINDOWS, _powershell_label(_POWERSHELL),
+    _windows_is_admin() if _IS_WINDOWS else False,
+)
+
 def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = None) -> str:
     """Execute a tool and return the result.
 
@@ -805,7 +1026,14 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
             arguments.get("dry_run", False),
             arguments.get("postconditions", []),
         )
+    elif name == "run_powershell":
+        return _run_powershell(arguments["command"], ctx, arguments.get("cwd"))
     elif name == "run_bash":
+        if _IS_WINDOWS and not arguments.get("host"):
+            return (
+                "Error: on Windows, run_bash only runs on remote hosts (set "
+                "host). Use run_powershell for commands on this machine."
+            )
         return _run_bash(
             arguments["command"], ctx, arguments.get("cwd"),
             bool(arguments.get("elevated", False)),
@@ -1499,7 +1727,7 @@ def _remote_ssh_argv(ssh: str, host: str) -> list[str]:
 
 
 def _format_command_output(stdout_b: bytes, stderr_b: bytes, returncode: int,
-                           used_sudo: bool) -> tuple[str, str]:
+                           used_sudo: bool, encoding: "str | None" = None) -> tuple[str, str]:
     """Decode and join command output; returns ``(output, stderr)``.
 
     Decode manually with errors="replace" instead of Popen(text=True)'s strict
@@ -1508,7 +1736,7 @@ def _format_command_output(stdout_b: bytes, stderr_b: bytes, returncode: int,
     _snip_tool_output() as text to classify, not blow up communicate() with a
     raw UnicodeDecodeError.
     """
-    encoding = locale.getpreferredencoding(False)
+    encoding = encoding or locale.getpreferredencoding(False)
     stdout = (stdout_b or b"").decode(encoding, errors="replace")
     stderr = (stderr_b or b"").decode(encoding, errors="replace")
 
@@ -1676,6 +1904,7 @@ def _run_bash_remote(command: str, ctx: "ToolContext", run_cwd: "str | None",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
+                creationflags=_NO_WINDOW,
             )
         finally:
             os.close(read_fd)
@@ -1724,6 +1953,98 @@ def _run_bash_remote(command: str, ctx: "ToolContext", run_cwd: "str | None",
         return f"Error running command on {host}: {e}"
     finally:
         _close_channel()
+
+
+# Fixed prelude for run_powershell.  The model's script is written to a UTF-8
+# temp file and compiled with [ScriptBlock]::Create rather than run via -File
+# (blocked by the default Restricted execution policy on Windows client SKUs,
+# and -ExecutionPolicy Bypass is a pattern EDR flags) or -EncodedCommand (a
+# classic malware IOC that corporate EDR blocks outright).  Reading the file
+# with an explicit UTF-8 encoding sidesteps 5.1's ANSI default for BOM-less
+# scripts, and nothing model-authored ever crosses the command line, so there
+# is no quoting to get wrong.
+#   - ProgressPreference: progress records otherwise leak onto redirected
+#     output (as CLIXML on 5.1).
+#   - PSStyle.OutputRendering (7.2+): pwsh emits ANSI colour even into a pipe.
+#   - OutputEncoding: UTF-8 both ways so non-ASCII output survives; the
+#     Console setter can throw without a console, hence the try.
+#   - A parse error surfaces from Create() and must exit non-zero, otherwise
+#     the run reports success.
+#   - Exit code: the last native exit code (LASTEXITCODE), or 1 when the
+#     script throws; `exit N` inside the script ends the process directly.
+# Must stay free of double quotes: it is one argv element, and Windows argv
+# quoting of embedded quotes is the fragile part.
+_POWERSHELL_PRELUDE = (
+    "$ProgressPreference = 'SilentlyContinue'; "
+    "if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }; "
+    "try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {}; "
+    "$OutputEncoding = [Text.UTF8Encoding]::new($false); "
+    "try { $__pengy = [ScriptBlock]::Create([IO.File]::ReadAllText('{path}', [Text.Encoding]::UTF8)) } "
+    "catch { $e = $_.Exception; if ($e.InnerException) { $e = $e.InnerException }; "
+    "[Console]::Error.WriteLine($e.Message); exit 1 }; "
+    "$global:LASTEXITCODE = 0; "
+    "& $__pengy; "
+    "exit $LASTEXITCODE"
+)
+
+
+def _powershell_prelude(script_path: str) -> str:
+    # PowerShell single-quoted strings escape ' by doubling it.
+    return _POWERSHELL_PRELUDE.replace("{path}", script_path.replace("'", "''"))
+
+
+def _run_powershell(command: str, ctx: "ToolContext" = None,
+                    cwd: str | None = None) -> str:
+    """Run a PowerShell script locally (Windows' run_powershell tool)."""
+    ctx = ctx or _default_context
+    if _POWERSHELL is None:
+        return (
+            "Error: PowerShell was not found (looked for pwsh and powershell "
+            "on PATH and Windows PowerShell under System32)."
+        )
+    run_cwd, cwd_err = _resolve_cwd(cwd)
+    if cwd_err:
+        return cwd_err
+    proc = None
+    script_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".ps1", prefix="pengy-", delete=False
+        ) as f:
+            f.write(command)
+            script_path = f.name
+        timeout = None if _tool_timeout == -1 else _tool_timeout
+        proc = subprocess.Popen(
+            [_POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive",
+             "-Command", _powershell_prelude(script_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,  # POSIX pwsh (tests): own group for killpg
+            creationflags=_NO_WINDOW,
+            cwd=run_cwd,
+        )
+        ctx.register_process(proc)
+        try:
+            stdout_b, stderr_b = proc.communicate(timeout=timeout)
+        finally:
+            ctx.unregister_process(proc)
+        output, _ = _format_command_output(
+            stdout_b, stderr_b, proc.returncode, False, encoding="utf-8")
+        return _snip_tool_output(output) or "(No output)"
+    except subprocess.TimeoutExpired:
+        _kill_proc_group(proc)
+        ctx.unregister_process(proc)
+        return f"Error: Command timed out after {_tool_timeout} seconds"
+    except Exception as e:
+        ctx.unregister_process(proc)
+        return f"Error running PowerShell: {e}"
+    finally:
+        if script_path is not None:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
 
 
 def _web_search(query: str, max_results: int = 5) -> str:
@@ -1898,6 +2219,21 @@ def _fetch_url(url: str, max_chars: int | None = None) -> str:
         return f"Error fetching URL: {e}"
 
 
+def _tool_python_executable() -> str:
+    """Interpreter for run_python: the one running Pengy.
+
+    Under the console-less pengy-gui launcher that is pythonw.exe, which gives
+    scripts no usable stdout/stderr, so prefer its python.exe sibling.
+    """
+    exe = _sys_module.executable
+    path = Path(exe)
+    if path.name.lower() == "pythonw.exe":
+        console = path.with_name("python.exe")
+        if console.is_file():
+            return str(console)
+    return exe
+
+
 def _run_python(code: str, ctx: "ToolContext" = None, cwd: str | None = None) -> str:
     """Execute Python code."""
     ctx = ctx or _default_context
@@ -1913,10 +2249,11 @@ def _run_python(code: str, ctx: "ToolContext" = None, cwd: str | None = None) ->
             temp_file = f.name
         timeout = None if _tool_timeout == -1 else _tool_timeout
         proc = subprocess.Popen(
-            [_sys_module.executable, temp_file],
+            [_tool_python_executable(), temp_file],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            creationflags=_NO_WINDOW,
             cwd=run_cwd,
         )
         ctx.register_process(proc)
@@ -2537,8 +2874,9 @@ def kill_active_process():
 
     Called by the CLI/Web on Stop / cancel.  The tabbed GUI instead calls
     ``ToolContext.kill_all()`` on its own per-run context so it never kills
-    another tab's subprocess.  Uses SIGKILL on the entire process group so
-    that any child processes are also terminated.
+    another tab's subprocess.  Kills the entire process group (SIGKILL on
+    POSIX, taskkill /T on Windows) so that any child processes are also
+    terminated.
     """
     _default_context.kill_all()
 

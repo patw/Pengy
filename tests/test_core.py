@@ -7,6 +7,7 @@ import json
 import io
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -1730,6 +1731,200 @@ class TestToolContext:
         finally:
             if proc.poll() is None:
                 proc.kill()
+
+
+class _FakeProc:
+    """Stand-in Popen for exercising the Windows kill branch on POSIX."""
+
+    def __init__(self):
+        self.pid = 4242
+        self.killed = False
+        self.waited = False
+
+    def poll(self):
+        return None
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        self.waited = True
+        return -9
+
+
+class TestKillProcGroupWindows:
+    """os.killpg/os.getpgid/signal.SIGKILL don't exist on Windows; the old
+    kill path raised AttributeError on every timeout/Stop there."""
+
+    def test_uses_taskkill_tree(self, monkeypatch):
+        import subprocess
+        from pengy.core import tools
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        monkeypatch.setattr(tools, "_IS_WINDOWS", True)
+        monkeypatch.setattr(tools.subprocess, "run", fake_run)
+        monkeypatch.delattr(tools.os, "killpg")
+        proc = _FakeProc()
+        tools._kill_proc_group(proc)
+        assert len(calls) == 1
+        argv = calls[0]
+        assert argv[0].lower().endswith("taskkill.exe")
+        assert argv[1:] == ["/PID", "4242", "/T", "/F"]
+        assert not proc.killed
+        assert proc.waited
+
+    def test_falls_back_to_kill_when_taskkill_missing(self, monkeypatch):
+        from pengy.core import tools
+
+        def fake_run(argv, **kwargs):
+            raise FileNotFoundError(argv[0])
+
+        monkeypatch.setattr(tools, "_IS_WINDOWS", True)
+        monkeypatch.setattr(tools.subprocess, "run", fake_run)
+        proc = _FakeProc()
+        tools._kill_proc_group(proc)
+        assert proc.killed
+        assert proc.waited
+
+    def test_falls_back_to_kill_when_taskkill_fails(self, monkeypatch):
+        import subprocess
+        from pengy.core import tools
+        monkeypatch.setattr(tools, "_IS_WINDOWS", True)
+        monkeypatch.setattr(
+            tools.subprocess, "run",
+            lambda argv, **kw: subprocess.CompletedProcess(argv, 128))
+        proc = _FakeProc()
+        tools._kill_proc_group(proc)
+        assert proc.killed
+
+
+class TestPlatformTools:
+    """One local-shell tool per platform: run_bash on POSIX; run_powershell
+    plus a remote-only run_bash on Windows."""
+
+    @staticmethod
+    def _by_name(tools):
+        return {t["function"]["name"]: t["function"] for t in tools}
+
+    def test_posix_surface_unchanged(self):
+        from pengy.core import tools
+        assert tools._platform_tools(tools._BASE_TOOLS, False) is tools._BASE_TOOLS
+        names = [t["function"]["name"] for t in tools._BASE_TOOLS]
+        assert "run_powershell" not in names
+        assert "host" not in self._by_name(tools._BASE_TOOLS)["run_bash"]["parameters"]["required"]
+
+    def test_windows_surface(self):
+        from pengy.core import tools
+        base_snapshot = repr(tools._BASE_TOOLS)
+        win = tools._platform_tools(tools._BASE_TOOLS, True, "PowerShell 7", False)
+        names = [t["function"]["name"] for t in win]
+        assert names.count("run_powershell") == 1 and names.count("run_bash") == 1
+        assert names.index("run_powershell") + 1 == names.index("run_bash")
+        assert len(win) == len(tools._BASE_TOOLS) + 1
+        fns = self._by_name(win)
+        assert fns["run_bash"]["parameters"]["required"] == ["command", "host"]
+        assert "remote" in fns["run_bash"]["description"]
+        for name in ("download_file", "fetch_url", "glob"):
+            assert "run_bash" not in fns[name]["description"]
+            assert "run_powershell" in fns[name]["description"]
+        # Adapting must not mutate the shared base schemas.
+        assert repr(tools._BASE_TOOLS) == base_snapshot
+
+    def test_privilege_and_dialect_wording(self):
+        from pengy.core import tools
+        admin = tools._run_powershell_schema("PowerShell 7", True)["function"]["description"]
+        user = tools._run_powershell_schema("Windows PowerShell 5.1", False)["function"]["description"]
+        assert "running as Administrator" in admin and "NOT running" not in admin
+        assert "NOT running as Administrator" in user
+        assert "Start-Process -Verb RunAs" in user
+        assert "5.1" in user and "&&" in user
+        assert "&&" not in admin
+
+    def test_powershell_label(self):
+        from pengy.core import tools
+        assert tools._powershell_label(r"C:\Program Files\PowerShell\7\pwsh.exe") == "PowerShell 7"
+        assert tools._powershell_label("/usr/bin/pwsh") == "PowerShell 7"
+        assert tools._powershell_label(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe") == "Windows PowerShell 5.1"
+
+    def test_local_run_bash_rejected_on_windows(self, monkeypatch):
+        from pengy.core import tools
+        monkeypatch.setattr(tools, "_IS_WINDOWS", True)
+        result = tools.execute_tool("run_bash", {"command": "echo hi"})
+        assert "run_powershell" in result and result.startswith("Error")
+
+    def test_run_powershell_missing_executable(self, monkeypatch):
+        from pengy.core import tools
+        monkeypatch.setattr(tools, "_POWERSHELL", None)
+        assert "PowerShell was not found" in tools.execute_tool(
+            "run_powershell", {"command": "Get-Date"})
+
+    def test_prelude_quoting(self):
+        from pengy.core import tools
+        # One argv element on Windows: embedded double quotes are the fragile part.
+        assert '"' not in tools._POWERSHELL_PRELUDE
+        prelude = tools._powershell_prelude(r"C:\Users\o'brien\x.ps1")
+        assert r"'C:\Users\o''brien\x.ps1'" in prelude
+
+    def test_run_python_avoids_pythonw(self, tmp_path, monkeypatch):
+        from pengy.core import tools
+        (tmp_path / "pythonw.exe").write_text("")
+        (tmp_path / "python.exe").write_text("")
+        monkeypatch.setattr(tools._sys_module, "executable", str(tmp_path / "pythonw.exe"))
+        assert tools._tool_python_executable() == str(tmp_path / "python.exe")
+
+
+@pytest.mark.skipif(not shutil.which("pwsh"), reason="pwsh not installed")
+class TestRunPowershellLive:
+    """Drives the real prelude through pwsh (runs on Linux/macOS with pwsh
+    installed, and on Windows)."""
+
+    @pytest.fixture(autouse=True)
+    def _pwsh(self, monkeypatch):
+        from pengy.core import tools
+        monkeypatch.setattr(tools, "_POWERSHELL", shutil.which("pwsh"))
+
+    def _run(self, command, **kw):
+        from pengy.core.tools import execute_tool
+        return execute_tool("run_powershell", {"command": command, **kw})
+
+    def test_unicode_multiline_and_cwd(self, tmp_path):
+        d = tmp_path / "dir with späce"
+        d.mkdir()
+        out = self._run('"héllo ✓"\nif ($true) {\n  (Get-Location).Path\n}', cwd=str(d))
+        assert "héllo ✓" in out
+        assert str(d) in out
+        assert "[Exit code" not in out
+
+    def test_no_ansi_colour(self):
+        out = self._run("Write-Error 'bad'")
+        assert "\x1b[" not in out
+        assert "bad" in out
+
+    def test_throw_exits_1(self):
+        out = self._run('throw "boom"')
+        assert "boom" in out and "[Exit code: 1]" in out
+
+    def test_parse_error_exits_1(self):
+        out = self._run("if ($true) {")
+        assert "Missing closing" in out and "[Exit code: 1]" in out
+
+    def test_explicit_exit_code(self):
+        assert "[Exit code: 7]" in self._run("exit 7")
+
+    def test_timeout_kills_and_cleans_up(self, monkeypatch):
+        import glob
+        from pengy.core import tools
+        monkeypatch.setattr(tools, "_tool_timeout", 2)
+        before = set(glob.glob(os.path.join(tempfile.gettempdir(), "pengy-*.ps1")))
+        out = self._run("Start-Sleep -Seconds 30")
+        assert "timed out" in out
+        after = set(glob.glob(os.path.join(tempfile.gettempdir(), "pengy-*.ps1")))
+        assert after <= before
 
 
 # ---------------------------------------------------------------------------
