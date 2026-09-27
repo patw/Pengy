@@ -6,6 +6,7 @@
 - **Stop and timeouts work on Windows.** Killing a tool's process used `os.killpg`, which does not exist on Windows, so every timeout or Stop raised an error and left the command running. Windows now kills the whole process tree with `taskkill /T /F`.
 - **No console flashes from the Windows GUI.** Tool subprocesses (PowerShell, ssh, Python) start without a console window, and `run_python` uses `python.exe` rather than `pythonw.exe` when Pengy was launched through `pengy-gui`, so scripts' output is captured.
 
+- **Retire stale sudo and question dialogs with their worker.** If a tab's worker finished, was stopped, or was replaced while a sudo password prompt or an `ask_user_question` dialog it had raised was still open, the dialog lingered and answered a worker that was gone. Those prompts are now tracked against the worker that raised them and are dismissed when it exits, and queued questions from a retired worker are dropped.
 - Coordinated v1.10.0 release across the Python, Rust, and C++ editions.
 
 ## v1.9.3
