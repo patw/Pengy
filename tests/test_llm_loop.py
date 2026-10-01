@@ -190,6 +190,49 @@ class TestFinalResponse:
 
 # ── Tests: tool loop, confirmation modes ───────────────────────────────────────
 
+@pytest.mark.parametrize("provider", ["openai_responses", "anthropic_messages"])
+def test_proxy_state_round_trip_and_resume(stub, client, tmp_path, provider):
+    envelope = {"format": "openai-proxy/reasoning-v1", "provider": provider,
+                "proxy_model": "stub-model", "model": "upstream-stub",
+                "blocks": [{"type": "reasoning", "encrypted_content": "opaque-test"}]}
+    f = tmp_path / "note.txt"
+    f.write_text("hello")
+    stub.queue(completion(tool_calls=[tool_call("tc1", "read_file", {"path": str(f)})],
+                          reasoning_details=envelope, reasoning_content="ordinary"),
+               completion(content="done", reasoning_details=envelope))
+    events = collect_auto(client.chat([{"role": "user", "content": "read"}],
+                                      tool_confirmation="all", preserve_reasoning=False))
+    assistant = stub.requests[1]["body"]["messages"][1]
+    assert assistant["reasoning_details"] == envelope
+    assert "reasoning_content" not in assistant
+    assert events[0]["message"]["reasoning_details"] == envelope
+    assert events[-1]["message"]["reasoning_details"] == envelope
+    # Saved JSON history must retain the state and replay on the next user turn.
+    from pengy.core.chat_manager import create_chat, save_chat, get_chat
+    chat = create_chat()
+    chat["messages"] = [events[-1]["message"], {"role": "user", "content": "again"}]
+    save_chat(chat)
+    history = get_chat(chat["id"])["messages"]
+    stub.queue(completion(content="resumed"), completion(content="switched"))
+    collect_auto(client.chat(history))
+    assert stub.requests[2]["body"]["messages"][0]["reasoning_details"] == envelope
+    collect_auto(client.chat(history, model="different-model"))
+    assert "reasoning_details" not in stub.requests[3]["body"]["messages"][0]
+    assert history[0]["reasoning_details"] == envelope
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+def test_foreign_reasoning_respects_toggle(stub, client, preserve):
+    details = [{"type": "other", "text": "ordinary"}]
+    stub.queue(completion(content="ok", reasoning_details=details))
+    final = collect_auto(client.chat([{"role": "user", "content": "hi"}],
+                                     preserve_reasoning=preserve))[-1]["message"]
+    assert ("reasoning_details" in final) == preserve
+    if preserve:
+        assert final["reasoning_details"] == details
+
+
+
 class TestToolLoop:
     def test_all_mode_auto_executes(self, stub, client, tmp_path):
         f = tmp_path / "note.txt"

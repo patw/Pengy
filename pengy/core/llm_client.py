@@ -229,6 +229,23 @@ def _serialize_tool_calls(tool_calls):
     return serialized
 
 
+def _is_proxy_reasoning(details) -> bool:
+    return (isinstance(details, dict)
+            and details.get("format") == "openai-proxy/reasoning-v1")
+
+
+def _without_cross_model_proxy_state(messages: list[dict], model: str) -> list[dict]:
+    """Filter request copies only; keep the opaque state in persisted history."""
+    result = []
+    for message in messages:
+        copy = dict(message)
+        details = copy.get("reasoning_details")
+        if _is_proxy_reasoning(details) and details.get("proxy_model") != model:
+            copy.pop("reasoning_details", None)
+        result.append(copy)
+    return result
+
+
 def _serialize_assistant_message(message, preserve_reasoning: bool = False) -> dict:
     serialized = {
         "role": "assistant",
@@ -237,11 +254,12 @@ def _serialize_assistant_message(message, preserve_reasoning: bool = False) -> d
     tool_calls = _get_msg_field(message, "tool_calls")
     if tool_calls:
         serialized["tool_calls"] = _serialize_tool_calls(tool_calls)
-    if preserve_reasoning:
-        for field in _REASONING_MESSAGE_FIELDS:
-            value = _get_msg_field(message, field)
-            if value is not None:
-                serialized[field] = value
+    for field in _REASONING_MESSAGE_FIELDS:
+        value = _get_msg_field(message, field)
+        # Tagged proxy state is required for continuation, not a UI preference.
+        if value is not None and (preserve_reasoning or (
+                field == "reasoning_details" and _is_proxy_reasoning(value))):
+            serialized[field] = value
     return serialized
 
 
@@ -530,7 +548,8 @@ class LLMClient:
         while True:
             # A fresh tool round begins with the full history; the original
             # messages remain untouched for events and history persistence.
-            request_messages = list(current_messages)
+            request_messages = _without_cross_model_proxy_state(
+                current_messages, model or self.model)
             context_retries = 0
             rate_retries = 0
             # ── API call with 429 / 529 exponential backoff ──────────
