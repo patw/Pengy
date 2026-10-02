@@ -33,9 +33,6 @@ _MAX_DELAY = 60.0          # cap
 _JITTER = 0.25             # ±25 %
 _RETRYABLE_STATUSES = {429, 529}
 
-# Sentinel for graceful image-stripping recovery.
-_RETRY_WITHOUT_IMAGES = object()
-
 # Only context errors get a size-reduction retry; generic bad requests do not.
 _MAX_CONTEXT_RETRIES = 4
 _CONTEXT_ERROR_CODES = {
@@ -143,16 +140,60 @@ def _strip_image_url_parts(messages: list[dict]):
                 msg["content"] = "[Empty — image content was removed]"
 
 
-_IMAGE_ERROR_KEYWORDS = {"image", "multimodal", "vision", "not support", "unsupported"}
+_LEGACY_TEXT_ONLY_ERROR = "Only text content parts are supported by this upstream format"
+_UNSUPPORTED_IMAGE_PHRASES = (
+    "does not support image", "doesn't support image", "do not support image",
+    "does not support vision", "does not support multimodal",
+    "image inputs are not supported", "image input is not supported",
+    "images are not supported", "image_url is not supported",
+    "unsupported image input", "unsupported vision input",
+)
 
 
-def _is_image_input_error(e: "APIStatusError") -> bool:
-    """Check if the API error is about the model not supporting image inputs."""
-    err_text = (e.message or "").lower()
-    body = getattr(e, "body", None)
-    if body and isinstance(body, (dict, list)):
-        err_text += " " + str(body).lower()
-    return any(kw in err_text for kw in _IMAGE_ERROR_KEYWORDS)
+def _api_error_details(exc: "APIStatusError") -> tuple[dict, str]:
+    """Handle both full HTTP bodies and the SDK's unwrapped error object."""
+    body = getattr(exc, "body", None)
+    if body is None and getattr(exc, "response", None) is not None:
+        try:
+            body = exc.response.json()
+        except (ValueError, TypeError, AttributeError):
+            pass
+    detail = body.get("error", body) if isinstance(body, dict) else body
+    fields = detail if isinstance(detail, dict) else {}
+    text = fields.get("message") or (detail if isinstance(detail, str) else None)
+    return fields, str(text or exc.message or "")
+
+
+def _is_image_input_error(exc: "APIStatusError") -> bool:
+    """Recover only explicit unsupported image input, not arbitrary image errors."""
+    if exc.status_code != 400:
+        return False
+    fields, text = _api_error_details(exc)
+    if fields.get("source") == "openai-proxy":
+        return (fields.get("code") == "unsupported_content_type"
+                and fields.get("content_type") == "image_url")
+    lower = text.lower().rstrip(".")
+    if lower == _LEGACY_TEXT_ONLY_ERROR.lower():
+        return True
+    return (any(phrase in lower for phrase in _UNSUPPORTED_IMAGE_PHRASES)
+            or (("text-only" in lower or "only text" in lower)
+                and any(word in lower for word in ("image", "vision", "multimodal"))))
+
+
+def _image_rejection_notice(exc: "APIStatusError") -> str:
+    fields, text = _api_error_details(exc)
+    if fields.get("source") == "openai-proxy" or text.rstrip(".").lower() == _LEGACY_TEXT_ONLY_ERROR.lower():
+        return (
+            "[The proxy adapter cannot translate image inputs for this route. "
+            "Images were omitted from this request; only file metadata is available. "
+            "This is not evidence that the underlying model lacks vision. "
+            "Do not claim to have inspected the images.]"
+        )
+    return (
+        "[The API endpoint rejected image/vision inputs as unsupported. "
+        "Images were omitted from this request; only file metadata is available. "
+        "Do not claim to have inspected the images.]"
+    )
 
 def _retry_after_delay(status_code: int, headers) -> float | None:
     """Extract Retry-After from response headers.
@@ -548,6 +589,10 @@ class LLMClient:
         current_messages = list(messages)
         # Request-only reductions: tool events and persisted chat retain full output.
         accumulated_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        # Once this endpoint rejects image input, don't reattach the same
+        # images on subsequent tool rounds in this turn.
+        image_input_rejected = False
+        image_rejection = None
 
         # Checked here rather than in each frontend so the CLI, GUI and Web UI
         # cannot disagree -- and because an empty model would otherwise be sent
@@ -560,6 +605,10 @@ class LLMClient:
             # messages remain untouched for events and history persistence.
             request_messages = _without_cross_model_proxy_state(
                 current_messages, model or self.model)
+            if image_input_rejected:
+                request_messages = [dict(msg) for msg in request_messages]
+                _strip_image_url_parts(request_messages)
+                request_messages.append({"role": "user", "content": image_rejection})
             context_retries = 0
             rate_retries = 0
             # ── API call with 429 / 529 exponential backoff ──────────
@@ -580,26 +629,19 @@ class LLMClient:
                     request_seconds = time.perf_counter() - request_started
                     break  # success — exit retry loop
                 except APIStatusError as e:
-                    # ── Graceful handling: model doesn't support images ──
-                    if (e.status_code == 400
-                            and not _is_context_limit_error(e)
-                            and _has_image_url_parts(current_messages)
+                    # Image recovery edits this provider request only; stored
+                    # history and tool/reasoning continuation state stay intact.
+                    if (not _is_context_limit_error(e)
+                            and _has_image_url_parts(request_messages)
                             and _is_image_input_error(e)):
-                        # Input history belongs to this generator only; avoid
-                        # modifying the caller's image-bearing message objects.
-                        current_messages = [dict(msg) for msg in current_messages]
-                        _strip_image_url_parts(current_messages)
-                        current_messages.append({
-                            "role": "user",
-                            "content": (
-                                "[This AI model does not support image/vision inputs, "
-                                "so the image could not be attached. "
-                                "The file metadata was returned above.]"
-                            ),
+                        image_input_rejected = True
+                        image_rejection = _image_rejection_notice(e)
+                        request_messages = [dict(msg) for msg in request_messages]
+                        _strip_image_url_parts(request_messages)
+                        request_messages.append({
+                            "role": "user", "content": image_rejection,
                         })
-                        self._reset_client()
-                        response = _RETRY_WITHOUT_IMAGES
-                        break  # exit retry loop
+                        continue  # retry once; no image parts remain in this request
 
                     if _is_context_limit_error(e):
                         if context_retries < _MAX_CONTEXT_RETRIES:
@@ -658,11 +700,6 @@ class LLMClient:
                 except Exception as exc:
                     self._reset_client()
                     raise _translate_api_error(exc, self.base_url) from exc
-
-            # If images were stripped due to model not supporting vision,
-            # restart the outer loop without them.
-            if response is _RETRY_WITHOUT_IMAGES:
-                continue
 
             # Accumulate token usage across all calls in this turn
             if response.usage:
