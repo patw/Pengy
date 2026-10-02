@@ -1,5 +1,6 @@
 """LLM client for OpenAI-compatible APIs."""
 import json
+import math
 import random
 import threading
 import time
@@ -15,6 +16,15 @@ _REASONING_MESSAGE_FIELDS = (
     "reasoning",
     "reasoning_details",
 )
+
+def _response_tokens_per_second(usage, seconds):
+    """Final response output / successful request time, not cumulative usage."""
+    tokens = getattr(usage, "completion_tokens", None)
+    if not isinstance(tokens, (int, float)) or tokens < 0 or not math.isfinite(seconds) or seconds <= 0:
+        return None
+    rate = tokens / seconds
+    return rate if math.isfinite(rate) else None
+
 
 # ── 429 / 529 backoff ────────────────────────────────────────────
 _MAX_RETRIES = 5
@@ -565,7 +575,9 @@ class LLMClient:
                     }
                     if reasoning_effort:
                         request_kwargs["reasoning_effort"] = reasoning_effort
+                    request_started = time.perf_counter()
                     response = self.client.chat.completions.create(**request_kwargs)
+                    request_seconds = time.perf_counter() - request_started
                     break  # success — exit retry loop
                 except APIStatusError as e:
                     # ── Graceful handling: model doesn't support images ──
@@ -778,5 +790,6 @@ class LLMClient:
             else:
                 yield {"type": "final_response", "content": assistant_msg.content,
                        "message": _serialize_assistant_message(assistant_msg, preserve_reasoning),
-                       "usage": accumulated_usage}
+                       "usage": accumulated_usage,
+                       "tokens_per_second": _response_tokens_per_second(response.usage, request_seconds)}
                 break

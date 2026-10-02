@@ -16,7 +16,7 @@ Update the version in `pyproject.toml`:
 version = "1.0.1"  # <-- bump this
 ```
 
-Also update `pengy/__init__.py` if you maintain a `__version__` there.
+Always update `pengy/__init__.py` and the local `pengy` package version in `uv.lock` to match. Audit active declarations, update the changelog and affected docs, and leave historical release entries/dependency versions unchanged. Coordinated releases use the same version in PengyR’s `Cargo.toml`, `Cargo.lock`, and `gui/Info.plist`, and PengyCPP’s `CMakeLists.txt`.
 
 ## Build
 
@@ -75,9 +75,18 @@ python -m venv /tmp/pengy-test
 /tmp/pengy-test/bin/pengy --version                # → Pengy vX.Y.Z
 ```
 
-## Git tag (after successful release)
+## GitHub CI/CD (preferred production release)
+
+Commit the tested version bump, then push the branch and an annotated version tag:
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git push origin main
+git tag -a vX.Y.Z -m "Pengy vX.Y.Z — short feature summary"
+git push origin vX.Y.Z
 ```
+
+The tag triggers `publish.yml`, which uploads the wheel/sdist to GitHub Releases and publishes
+to PyPI via trusted publishing. Do not manually upload the same version first. Use `gh run list`
+and `gh run view` to check both branch CI and tag deployment, verify the uploaded assets and
+PyPI version, then set a concise release title/body with `gh release edit`. For coordinated
+native releases, verify Linux AppImage + .deb, macOS DMG, and Windows ZIP + MSI in both repos.

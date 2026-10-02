@@ -663,3 +663,41 @@ class TestQuestionDialog:
         assert window._pending_questions == []
         assert window._question_dialog_open is False
 
+
+
+class TestEffortAndResponseRate:
+    def test_null_effort_follows_global(self, window):
+        session = _active_session(window)
+        session.chat["reasoning_effort"] = None
+        window._update_quick_settings_for(session)
+        assert window.chat_history.effort_combo.currentData() == "global"
+
+    def test_effort_and_rate_are_per_tab_and_persist(self, window):
+        from pengy.core.chat_manager import get_chat
+        first = _active_session(window)
+        window._on_effort_changed("high")
+        assert get_chat(first.chat["id"])["reasoning_effort"] == "high"
+        window._handle_final_response(first, {
+            "content": "done", "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "tokens_per_second": 42.5,
+        })
+        assert get_chat(first.chat["id"])["last_response_tokens_per_second"] == 42.5
+        window.create_new_chat()
+        second = _active_session(window)
+        assert window.chat_history.effort_combo.currentData() == "global"
+        assert window.chat_history.tokens_label.text() == "Tokens: —"
+        assert window.chat_history.rate_label.text() == "Last: — tok/s"
+        window._on_effort_changed("")
+        assert get_chat(second.chat["id"])["reasoning_effort"] == ""
+        assert first.chat["reasoning_effort"] == "high"
+        for i in range(window.tab_widget.count()):
+            if window.tab_widget.widget(i) is first.chat_view:
+                window.tab_widget.setCurrentIndex(i)
+                break
+        assert window.chat_history.effort_combo.currentData() == "high"
+        assert "42.5" in window.chat_history.rate_label.text()
+        window._on_effort_changed("global")
+        assert "reasoning_effort" not in get_chat(first.chat["id"])
+        window._handle_final_response(first, {"content": "", "usage": {}})
+        assert "last_response_tokens_per_second" not in get_chat(first.chat["id"])
+        assert window.chat_history.rate_label.text() == "Last: — tok/s"

@@ -488,3 +488,37 @@ class TestReadImageAttachment:
             isinstance(m["content"], str)
             for m in stub.requests[1]["body"]["messages"] if m["role"] == "user"
         )
+
+
+def test_rate_calculation_uses_output_not_prompt_or_total():
+    from types import SimpleNamespace
+    from pengy.core.llm_client import _response_tokens_per_second
+    usage = SimpleNamespace(prompt_tokens=1000, completion_tokens=30, total_tokens=1030)
+    assert _response_tokens_per_second(usage, 2) == 15
+    assert _response_tokens_per_second(usage, 0) is None
+    assert _response_tokens_per_second(usage, float("nan")) is None
+    assert _response_tokens_per_second(None, 2) is None
+    assert _response_tokens_per_second(SimpleNamespace(completion_tokens=0), 2) == 0
+
+
+def test_final_rate_is_not_accumulated_across_tool_calls(stub, client, monkeypatch, tmp_path):
+    import pengy.core.llm_client as module
+    path = tmp_path / "note.txt"
+    path.write_text("ok")
+    stub.queue(completion(tool_calls=[tool_call("tc", "read_file", {"path": str(path)})], usage=(100, 20)),
+               completion(content="done", usage=(200, 30)))
+    ticks = iter([0.0, 100.0, 200.0, 202.0])
+    # Replace only the module time object; do not alter the SDK's clocks.
+    from types import SimpleNamespace
+    monkeypatch.setattr(module, "time", SimpleNamespace(perf_counter=lambda: next(ticks)))
+    events = collect_auto(client.chat([{"role": "user", "content": "read"}], tool_confirmation="all"))
+    final = events[-1]
+    assert final["usage"]["completion_tokens"] == 50
+    assert final["tokens_per_second"] == 15.0
+
+
+def test_final_response_without_usage_has_no_rate(stub, client):
+    body = completion(content="ok")
+    body.pop("usage")
+    stub.queue(body)
+    assert collect_auto(client.chat([{"role": "user", "content": "hi"}]))[-1]["tokens_per_second"] is None

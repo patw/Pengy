@@ -113,7 +113,7 @@
         <label class="form-label fw-semibold">Reasoning Effort</label>
         <select name="reasoning_effort" class="form-select">
           <option value="" {% if not config.reasoning_effort %}selected{% endif %}>Provider default (do not send)</option>
-          {% for value,label in [('none','Off / none'),('minimal','Minimal'),('low','Low'),('medium','Medium'),('high','High'),('xhigh','Extra high'),('max','Max')] %}
+          {% for value,label in [('none','Off / none'),('low','Low'),('medium','Medium'),('high','High'),('xhigh','Extra high'),('max','Max')] %}
           <option value="{{ value }}" {% if config.reasoning_effort == value %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
         </select>

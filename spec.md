@@ -133,7 +133,7 @@ Flask server-side-rendered interface. See [Web UI](#web-ui) section below for de
 │                    │                                                  │
 │  ─────────────     │  Tool output                                     │
 │  Model: llama3.2   │  file1.txt  file2.py                             │
-│  Tool Confirm: None│                                                  │
+│  Effort: Global    │                                                  │
 │                    │  Assistant 🤖                                    │
 │                    │  Here are the files in /tmp: ...                 │
 │                    │                                                  │
@@ -147,7 +147,32 @@ Flask server-side-rendered interface. See [Web UI](#web-ui) section below for de
 - **+ New Chat button** — Creates a new chat session
 - **⚙ Settings button** — Opens the settings dialog
 - **Chat history list** — Scrollable, sorted newest first; click to load, right-click or trash icon (🗑) to delete
-- **Quick settings panel** — Shows current model name, tool confirmation mode (YOLO/Safe/None), and a status dot (green = idle, blinking = waiting for LLM)
+- **Quick settings panel** — Status dot, per-tab model and Effort selectors, cumulative chat token totals, and last-final-response tok/s. Tool confirmation remains in Settings.
+
+### Per-chat Effort and last-response throughput (v1.11.0)
+
+The desktop sidebar replaces the Tool Confirm display with an **Effort** dropdown; the
+confirmation policy remains global and accessible in Settings. **Global setting** follows
+`config.reasoning_effort`; **Provider default** explicitly omits the request hint. The offered
+levels are `none`, `low`, `medium`, `high`, `xhigh`, and `max`, subject to provider support.
+`minimal` is not offered in GUI/web Settings or the sidebar; legacy raw values remain readable.
+Changes are saved immediately and apply to the next message, not an already-running worker.
+
+The optional per-chat `reasoning_effort` string is an override: missing/null means use the
+global setting, while `""` explicitly means omit the provider option. The optional numeric
+`last_response_tokens_per_second` stores only the last final API response's throughput.
+Both fields survive chat save/reload and cumulative-usage updates across editions; neither
+is a provider message field. New chats omit both. Switching tabs refreshes effort and metrics,
+including clearing token labels for an empty/unmeasured chat.
+
+The core final-response event adds optional `tokens_per_second`: API-reported
+`usage.completion_tokens` for that final response divided by monotonic wall time for its
+successful HTTP request through complete body consumption. Do not divide accumulated turn
+usage or time the whole tool loop. The rate includes latency, prompt processing, and reasoning;
+it excludes preceding API calls, tool execution, human confirmation waits, and retry backoff.
+No provider-specific generation-duration heuristic is used. Missing usage or invalid duration
+means no rate (`—`); zero output tokens is a valid zero rate. The GUI saves the metric even
+when final text is empty. Existing cumulative `chat.usage` remains separate.
 
 ### Right-Top Pane (Chat View)
 - Markdown-rendered chat messages via `QTextBrowser`
@@ -390,7 +415,7 @@ Browser shows Bootstrap modal (tool name + args JSON)
 | `model` | string | (empty) | Model name. No default on purpose: a local server ships no model, so an unset model makes Pengy print "pick a model" instructions (`/models`, `/model <name>`) rather than send `model: ""` |
 | `system_message` | string | (see above) | Template; `{date}`, `{username}`, `{hostname}`, `{osinfo}` filled at send time |
 | `tool_confirmation` | string | `"none"` | Tool confirmation mode: `"all"` (YOLO — skip all confirmations), `"safe"` (auto-approve read-only tools; confirm write/execute), `"none"` (confirm every tool) |
-| `reasoning_effort` | string | `""` | Passed as `reasoning_effort` on API calls when set: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` (`""` = provider default) |
+| `reasoning_effort` | string | `""` | Passed as `reasoning_effort` on API calls when set: `none`/`low`/`medium`/`high`/`xhigh`/`max` (legacy raw `minimal` remains readable) (`""` = provider default) |
 | `preserve_reasoning` | bool | `false` | Keep reasoning fields (`reasoning_content`, `reasoning`, `reasoning_details`) on assistant messages sent back to the API |
 | `context_keep_turns` | int | `0` | Number of recent turns whose tool results are kept; older ones are elided to `[tool output from earlier turn elided]`. 0 = keep all. |
 | `attachment_context_keep_turns` | int | `4` | Recent turns whose durable image attachments are resolved into provider requests; `0` sends no historical attachments. |
@@ -440,7 +465,9 @@ An authoritative chat is:
     {"role": "assistant", "content": "Hi there!"}
   ],
   "created_at": "2026-05-13T21:00:00",
-  "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+  "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+  "reasoning_effort": "high",
+  "last_response_tokens_per_second": 42.5
 }
 ```
 
@@ -599,7 +626,7 @@ from the current API response (it resets on the next assistant message with tool
 
 The `ChatWorker` (a `QObject` moved to a `QThread`) drives `LLMClient.chat()` via the generator protocol. For tool confirmation and sudo password prompts, the worker blocks on a `threading.Event` while the main thread shows the dialog. The main thread unblocks the worker via `send_confirmation()` or `send_sudo_password()` which set the event.
 
-**Token usage:** After the final response, the GUI sidebar shows the turn's prompt/completion token counts. The data is accumulated across all API calls in the turn (including tool-call retries).
+**Token usage:** The GUI sidebar shows cumulative prompt/completion totals persisted in `chat.usage`, summed across all completed turns and their tool-call round trips. A separate last-response tok/s label uses only the final successful request; see the per-chat control contract above.
 
 ### CLI Flow
 
@@ -792,7 +819,7 @@ Attached images are sent as OpenAI-style content parts on the user message:
 | User Agent | QLineEdit | User-Agent for tool HTTP requests |
 | System Message | QTextEdit | Supports `{date}`, `{username}`, etc. templates |
 | Tool Confirmation | QComboBox | "YOLO (All)", "Safe Only", "None" — controls which tools require confirmation |
-| Reasoning effort | QComboBox | Provider default / none / minimal / low / medium / high / xhigh / max |
+| Reasoning effort | QComboBox | Provider default / none / low / medium / high / xhigh / max |
 | Reasoning preservation | QCheckBox | Keep reasoning fields on messages sent back to the API |
 | Keep tool results | QSpinBox | Number of recent turns to keep tool results for (0 = keep all) |
 | Theme mode | QComboBox | System / Light / Dark |

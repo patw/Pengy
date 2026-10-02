@@ -157,7 +157,6 @@ class SettingsDialog(QDialog):
         reasoning_options = [
             ("Provider default — do not send reasoning option", ""),
             ("Off / none", "none"),
-            ("Minimal", "minimal"),
             ("Low", "low"),
             ("Medium", "medium"),
             ("High", "high"),

@@ -1,5 +1,6 @@
 """Chat history sidebar for Pengy."""
 import re
+import math
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QListWidget,
     QListWidgetItem, QMenu, QFrame, QLabel, QHBoxLayout,
@@ -20,6 +21,7 @@ class ChatHistoryWidget(QWidget):
     settings_requested = Signal()
     tasks_requested = Signal()
     model_changed = Signal(str)
+    effort_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -139,13 +141,35 @@ class ChatHistoryWidget(QWidget):
         self.model_hint_label.hide()  # shown only when set_models() has no cached list
         qs_layout.addWidget(self.model_hint_label)
 
-        self.confirm_label = QLabel("Tool Confirm: None")
-        self.confirm_label.setStyleSheet(f"color: {self._theme['fg']};")
-        qs_layout.addWidget(self.confirm_label)
+        effort_row = QHBoxLayout()
+        self.effort_label = QLabel("Effort:")
+        effort_row.addWidget(self.effort_label)
+        self.effort_combo = QComboBox()
+        self.effort_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.effort_combo.setMinimumContentsLength(10)
+        for label, value in [("Global setting", "global"), ("Provider default", ""),
+                             ("Off / none", "none"), ("Low", "low"), ("Medium", "medium"),
+                             ("High", "high"), ("Extra high", "xhigh"), ("Max", "max")]:
+            self.effort_combo.addItem(label, value)
+        self.effort_combo.setToolTip(
+            "Reasoning effort for this tab; saved with the chat. Global setting follows Settings. "
+            "Provider default sends no hint. Supported levels depend on the model/provider. "
+            "Changes apply to the next message.")
+        self.effort_combo.activated.connect(
+            lambda _index: self.effort_changed.emit(self.effort_combo.currentData()))
+        effort_row.addWidget(self.effort_combo, 1)
+        qs_layout.addLayout(effort_row)
 
         self.tokens_label = QLabel("Tokens: —")
         self.tokens_label.setStyleSheet(f"color: {self._theme['fg']};")
         qs_layout.addWidget(self.tokens_label)
+        self.rate_label = QLabel("Last: — tok/s")
+        self.rate_label.setToolTip(
+            "Last final API response only: API-reported output tokens divided by successful request "
+            "wall time. Includes network latency, prompt processing and reasoning; excludes tool "
+            "execution, confirmation waits and retry backoff. Not a pure decoding speed. "
+            "— means no measurement available.")
+        qs_layout.addWidget(self.rate_label)
 
         layout.addWidget(qs_frame)
 
@@ -165,7 +189,7 @@ class ChatHistoryWidget(QWidget):
                           size=scaled_size(16, theme))
         apply_button_icon(self.tasks_btn, "tasks", theme,
                           size=scaled_size(16, theme))
-        for label in (self.model_label, self.confirm_label, self.tokens_label):
+        for label in (self.model_label, self.effort_label, self.tokens_label, self.rate_label):
             label.setStyleSheet(f"color: {theme['fg']};")
         self.model_hint_label.setStyleSheet(f"color: {theme['muted']}; font-size: 9pt;")
         self.load_chats([]) if False else None  # keep method import-safe; rows are restyled on reload
@@ -418,14 +442,6 @@ class ChatHistoryWidget(QWidget):
         color = self._theme['danger'] if self._dot_phase else "transparent"
         self.status_dot.setStyleSheet(f"color: {color}; font-size: 14px;")
 
-    # "none" is the *safest* mode — it confirms every call. Labelling it "None"
-    # read as "no confirmations", which is exactly backwards.
-    _CONFIRM_LABELS = {
-        "all": "Tool Confirm: YOLO",
-        "safe": "Tool Confirm: Safe",
-        "none": "Tool Confirm: Confirm All",
-    }
-
     def set_models(self, models: list[str], current: str):
         """Populate the model dropdown, keeping *current* selected."""
         items = list(models)
@@ -439,7 +455,7 @@ class ChatHistoryWidget(QWidget):
         # Nudge the user toward Fetch when there's no cached list to pick
         # from. An empty QLabel still claims a line of layout height, so hide
         # it outright once populated instead of just clearing its text --
-        # otherwise it leaves a permanent gap above "Tool Confirm:".
+        # otherwise it leaves a permanent gap above the effort selector.
         if models:
             self.model_hint_label.setText("")
             self.model_hint_label.hide()
@@ -457,14 +473,21 @@ class ChatHistoryWidget(QWidget):
         self._current_model = model
         self.model_changed.emit(model)
 
-    def update_quick_settings(self, model: str, tool_confirmation: str):
+    def update_quick_settings(self, model: str, effort: str):
         """Update the quick settings display."""
         if model:
             self.model_combo.setCurrentText(model)
             self._current_model = model
-        self.confirm_label.setText(
-            self._CONFIRM_LABELS.get(tool_confirmation, f"Tool Confirm: {tool_confirmation}")
-        )
+        previous = self.effort_combo.blockSignals(True)
+        try:
+            index = self.effort_combo.findData(effort)
+            self.effort_combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            self.effort_combo.blockSignals(previous)
+
+    def update_response_rate(self, rate):
+        valid = isinstance(rate, (int, float)) and math.isfinite(rate) and rate >= 0
+        self.rate_label.setText(f"Last: {rate:.1f} tok/s" if valid else "Last: — tok/s")
 
     def update_token_usage(self, prompt: int, completion: int):
         """Show the chat's cumulative token usage (summed across all turns)."""

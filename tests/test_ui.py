@@ -471,25 +471,36 @@ class TestDeleteConfirmation:
 
 
 # ────────────────────────────────────────────────────────────────────
-# Tool-confirmation labels
+# Effort selector and last-response throughput
 # ────────────────────────────────────────────────────────────────────
 
-class TestConfirmLabels:
-    @pytest.mark.parametrize("mode,expected", [
-        ("all", "YOLO"),
-        ("safe", "Safe"),
-        ("none", "Confirm All"),
-    ])
-    def test_sidebar_label(self, qapp, mode, expected):
+class TestEffortControls:
+    @pytest.mark.parametrize("effort", ["global", "", "none", "low", "medium", "high", "xhigh", "max"])
+    def test_restores_effort_without_emitting(self, qapp, effort):
         widget = ChatHistoryWidget()
-        widget.update_quick_settings("gpt-4o", mode)
-        assert expected in widget.confirm_label.text()
+        changes = []
+        widget.effort_changed.connect(changes.append)
+        widget.update_quick_settings("gpt-4o", effort)
+        assert widget.effort_combo.currentData() == effort
+        assert changes == []
+        assert widget.effort_combo.findData("minimal") == -1
+        assert not hasattr(widget, "confirm_label")
         widget.deleteLater()
 
-    def test_safest_mode_is_not_labelled_none(self, qapp):
+    def test_user_selection_and_response_rate(self, qapp):
         widget = ChatHistoryWidget()
-        widget.update_quick_settings("gpt-4o", "none")
-        assert widget.confirm_label.text() != "Tool Confirm: None"
+        changes = []
+        widget.effort_changed.connect(changes.append)
+        index = widget.effort_combo.findData("high")
+        widget.effort_combo.setCurrentIndex(index)
+        widget.effort_combo.activated.emit(index)
+        assert changes == ["high"]
+        widget.update_response_rate(42.25)
+        assert "42.2" in widget.rate_label.text()
+        widget.update_response_rate(0)
+        assert "0.0" in widget.rate_label.text()
+        widget.update_response_rate(None)
+        assert widget.rate_label.text() == "Last: — tok/s"
         widget.deleteLater()
 
 
@@ -819,6 +830,9 @@ class TestCumulativeTokens:
 
         def update_token_usage(self, prompt, completion):
             self.calls.append((prompt, completion))
+
+        def update_response_rate(self, rate):
+            self.rate = rate
 
     class _Session:
         def __init__(self, chat):

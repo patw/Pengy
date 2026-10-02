@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self.chat_history.settings_requested.connect(self.open_settings)
         self.chat_history.tasks_requested.connect(self.open_tasks)
         self.chat_history.model_changed.connect(self._on_model_changed)
+        self.chat_history.effort_changed.connect(self._on_effort_changed)
         self._refresh_model_combo()
 
         # Restore open tabs or create initial chat
@@ -456,6 +457,17 @@ class MainWindow(QMainWindow):
         save_chat(session.chat)
         self._update_quick_settings_for(session)
 
+    def _on_effort_changed(self, effort: str):
+        session = self._tab_for_chat(self.active_chat_id)
+        if not session:
+            return
+        if effort == "global":
+            session.chat.pop("reasoning_effort", None)
+        else:
+            session.chat["reasoning_effort"] = effort
+        save_chat(session.chat)
+        self._update_quick_settings_for(session)
+
     def load_chat_list(self):
         """Load and display chat history."""
         chats = load_index()
@@ -615,7 +627,9 @@ class MainWindow(QMainWindow):
             self.llm_client,
             messages,
             tool_confirmation=tool_confirmation,
-            reasoning_effort=self.config.get("reasoning_effort", ""),
+            reasoning_effort=(session.chat["reasoning_effort"]
+                if isinstance(session.chat.get("reasoning_effort"), str)
+                else self.config.get("reasoning_effort", "")),
             preserve_reasoning=bool(self.config.get("preserve_reasoning", False)),
             model=self._model_for_session(session),
         )
@@ -1003,6 +1017,11 @@ class MainWindow(QMainWindow):
         # persists across reloads. Done *before* the save below so both land
         # in the same write instead of the usage total lagging a turn behind.
         totals = add_usage(session.chat, response.get("usage"))
+        rate = response.get("tokens_per_second")
+        if rate is not None:
+            session.chat["last_response_tokens_per_second"] = rate
+        else:
+            session.chat.pop("last_response_tokens_per_second", None)
         session.prompt_tokens = totals["prompt_tokens"]
         session.completion_tokens = totals["completion_tokens"]
 
@@ -1011,20 +1030,22 @@ class MainWindow(QMainWindow):
             session.chat["messages"].append(assistant_msg)
             reasoning = assistant_msg.get("reasoning_content") or assistant_msg.get("reasoning")
             session.chat_view.append_message("assistant", content, reasoning_content=reasoning)
-            save_chat(session.chat)
+        save_chat(session.chat)
         if session is self._tab_for_chat(self.active_chat_id):
             self.chat_history.update_token_usage(
                 session.prompt_tokens, session.completion_tokens)
+            self.chat_history.update_response_rate(rate)
 
     def _update_quick_settings_for(self, session: _TabSession):
         """Update the sidebar quick-settings panel for a given tab."""
         self.chat_history.update_quick_settings(
             self._model_for_session(session),
-            self.config.get("tool_confirmation", "none"),
+            session.chat["reasoning_effort"]
+            if isinstance(session.chat.get("reasoning_effort"), str) else "global",
         )
-        if session.prompt_tokens or session.completion_tokens:
-            self.chat_history.update_token_usage(
-                session.prompt_tokens, session.completion_tokens)
+        self.chat_history.update_token_usage(
+            session.prompt_tokens, session.completion_tokens)
+        self.chat_history.update_response_rate(session.chat.get("last_response_tokens_per_second"))
         # Drive the status dot + label from this tab's state
         if session.tool_running:
             self.chat_history.set_tool_running(True)
