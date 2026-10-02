@@ -93,7 +93,12 @@ jobs:
       - name: Qt tests + GUI smoke test
         run: |
           python -c "from PySide6 import QtCore; print('Qt', QtCore.__version__)"
-          python -m pytest tests/ -v 2>&1
+          # Qt's QApplication/widget lifetimes can leak between pytest modules
+          # and crash a later modal-dialog test. Run every file in a fresh
+          # process (no tests skipped) while preserving fail-fast behavior.
+          for test_file in tests/test_*.py; do
+            python -m pytest "$test_file" -v 2>&1
+          done
           python -c "import pengy.main; print('pengy.main imports with Qt present')"
 
       - name: Console-less GUI launcher entry point exists (Windows shortcuts target it)
