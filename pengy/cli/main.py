@@ -1400,6 +1400,10 @@ class PengyCLI:
             tool_confirmation=self.config.get("tool_confirmation", "none"),
             reasoning_effort=self.config.get("reasoning_effort", ""),
             preserve_reasoning=bool(self.config.get("preserve_reasoning", False)),
+            chat_id=chat["id"] if not self._no_save else "",
+            **{key: self.config.get(key, default) for key, default in (
+                ("auto_context_recovery", True), ("recovery_keep_turns", 3),
+                ("output_token_limit", 0), ("output_token_parameter", "max_tokens"))},
         )
         self._yolo_this_turn = False
         send_value = None
@@ -1432,8 +1436,8 @@ class PengyCLI:
 
                 elif rtype == "context_compacted":
                     expecting_api_call = True
-                    self.console.print(
-                        "[yellow]Context limit — retrying with {:,} fewer tool-output characters ({}/{})[/yellow]".format(
+                    self._print_stderr(response.get("message") or
+                        "Context limit — retrying with {:,} fewer characters ({}/{})".format(
                             response.get("chars_removed", 0), response.get("attempt", 0),
                             response.get("max_attempts", 0)))
 

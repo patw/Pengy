@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from openai import APIConnectionError, APIStatusError, OpenAI
 
 from pengy.core import tools as _tools_mod
+from pengy.core.context_recovery import Recovery, SUMMARY_PROMPT
 
 _REASONING_MESSAGE_FIELDS = (
     "reasoning_content",
@@ -45,6 +46,7 @@ _CONTEXT_ERROR_PHRASES = (
     "exceeds the model's context", "exceeds the model context",
     "exceeds the context", "context size", "context_length_exceeded",
     "exceeds the maximum allowed number of tokens", "maximum number of tokens",
+    "leaves no room to answer in the context",
 )
 _CONTEXT_STUB = "[tool output omitted from provider request to fit context; original remains in chat history]"
 _CONTEXT_PREVIEW = 1500
@@ -596,7 +598,9 @@ class LLMClient:
     def chat(self, messages: list[dict], tool_confirmation: str = "none",
              reasoning_effort: str = "", preserve_reasoning: bool = False,
              cancel_fn: Callable[[], bool] | None = None,
-             tool_context=None, model: str | None = None):
+             tool_context=None, model: str | None = None, *, chat_id: str = "",
+             auto_context_recovery: bool = True, recovery_keep_turns: int = 3,
+             output_token_limit: int = 0, output_token_parameter: str = "max_tokens"):
         """
         Send a chat request and handle tool calls.
         Yields intermediate tool call info for UI updates.
@@ -626,11 +630,37 @@ class LLMClient:
         if not (model or self.model).strip():
             raise ConfigError(no_model_help(self.base_url))
 
+        recovery = Recovery(current_messages, self.base_url, model or self.model,
+                            chat_id=chat_id, enabled=auto_context_recovery,
+                            keep_turns=recovery_keep_turns)
+        output_token_parameter = output_token_parameter if isinstance(output_token_parameter, str) else ""
+        if output_token_parameter not in ("max_tokens", "max_completion_tokens"):
+            raise ConfigError("output_token_parameter must be max_tokens or max_completion_tokens")
+
+        def summarize(source):
+            if cancel_fn and cancel_fn(): raise _Cancelled()
+            try:
+                reply = self.client.chat.completions.create(
+                    model=model or self.model,
+                    messages=[{"role": "system", "content": SUMMARY_PROMPT},
+                              {"role": "user", "content": source}],
+                    **{output_token_parameter: 2048},
+                )
+            except APIStatusError as exc:
+                raise RuntimeError("Context summary request failed; original history retained. " + str(exc)) from exc
+            if reply.usage:
+                for key in accumulated_usage:
+                    accumulated_usage[key] += getattr(reply.usage, key, 0) or 0
+            if cancel_fn and cancel_fn(): raise _Cancelled()
+            choice = reply.choices[0]
+            if choice.finish_reason != "stop" or choice.message.tool_calls or not (choice.message.content or "").strip():
+                raise RuntimeError("Context summary was incomplete; original history retained. Try a new chat or adjust the provider's reasoning/output budget.")
+            return choice.message.content
+
         while True:
-            # A fresh tool round begins with the full history; the original
-            # messages remain untouched for events and history persistence.
+            # A validated provider-only reduction persists across tool rounds.
             request_messages = _without_cross_model_proxy_state(
-                current_messages, model or self.model)
+                recovery.apply(current_messages), model or self.model)
             if image_input_rejected:
                 request_messages = [dict(msg) for msg in request_messages]
                 _strip_image_url_parts(request_messages)
@@ -650,9 +680,27 @@ class LLMClient:
                     }
                     if reasoning_effort:
                         request_kwargs["reasoning_effort"] = reasoning_effort
+                    if output_token_limit > 0:
+                        request_kwargs[output_token_parameter] = output_token_limit
                     request_started = time.perf_counter()
                     response = self.client.chat.completions.create(**request_kwargs)
                     request_seconds = time.perf_counter() - request_started
+                    choice = response.choices[0]
+                    if (choice.finish_reason == "length" and not choice.message.tool_calls
+                            and not (choice.message.content or "").strip()):
+                        if response.usage:
+                            for key in accumulated_usage:
+                                accumulated_usage[key] += getattr(response.usage, key, 0) or 0
+                        event = recovery.reduce(current_messages, summarize)
+                        if event:
+                            yield event
+                            request_messages = recovery.apply(current_messages)
+                            if image_input_rejected:
+                                _strip_image_url_parts(request_messages)
+                                request_messages.append({"role": "user", "content": image_rejection})
+                            request_messages = _without_cross_model_proxy_state(request_messages, model or self.model)
+                            continue
+                        raise GenerationLimitError(_generation_limit_message(choice.message.content, False))
                     break  # success — exit retry loop
                 except APIStatusError as e:
                     # Image recovery edits this provider request only; stored
@@ -670,6 +718,17 @@ class LLMClient:
                         continue  # retry once; no image parts remain in this request
 
                     if _is_context_limit_error(e):
+                        if auto_context_recovery:
+                            event = recovery.reduce(current_messages, summarize)
+                            if event:
+                                yield event
+                                request_messages = recovery.apply(current_messages)
+                                if image_input_rejected:
+                                    _strip_image_url_parts(request_messages)
+                                    request_messages.append({"role": "user", "content": image_rejection})
+                                request_messages = _without_cross_model_proxy_state(request_messages, model or self.model)
+                                continue
+                            raise RuntimeError("Model context limit reached; could not fit the protected task after bounded recovery. Full history retained; try a shorter request or a new chat.") from e
                         if context_retries < _MAX_CONTEXT_RETRIES:
                             compacted = _compact_tool_result(
                                 request_messages, 1 if context_retries == 0 else 2)

@@ -969,6 +969,11 @@ function handleEvent(data) {
       showThinking();
       break;
 
+    case 'context_compacted':
+      showThinking();
+      appendRecoveryNotice(data.message || 'Context recovery — full history retained. Retrying.');
+      break;
+
     case 'retrying':
       showRetrying(data);
       break;
@@ -1105,6 +1110,13 @@ function updateCumulativeTokens(cumulativeUsage) {
   if (!total) return;
   el.textContent = `${total.toLocaleString()} tokens`;
   el.hidden = false;
+}
+
+function appendRecoveryNotice(message) {
+  const el = document.createElement('div');
+  el.className = 'alert alert-info py-2';
+  el.textContent = message;
+  appendToArea(el);
 }
 
 function appendError(message) {

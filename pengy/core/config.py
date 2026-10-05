@@ -64,6 +64,10 @@ DEFAULTS = {
     "reasoning_effort": "",  # "" (provider default) | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
     "preserve_reasoning": False,
     "context_keep_turns": 0,
+    "auto_context_recovery": True,
+    "recovery_keep_turns": 3,
+    "output_token_limit": 0,  # 0 omits provider output limit
+    "output_token_parameter": "max_tokens",  # or max_completion_tokens
     "ui_scale": 100,
     "theme_mode": "system",  # "system" | "light" | "dark"
     "theme_accent": "default",  # "default" | "blue" | "teal" | "green" | "orange" | "red" | "pink" | "purple"

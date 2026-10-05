@@ -632,6 +632,9 @@ class MainWindow(QMainWindow):
                 else self.config.get("reasoning_effort", "")),
             preserve_reasoning=bool(self.config.get("preserve_reasoning", False)),
             model=self._model_for_session(session),
+            recovery_options={"chat_id": chat_id, **{key: self.config.get(key, default)
+                for key, default in (("auto_context_recovery", True), ("recovery_keep_turns", 3),
+                                     ("output_token_limit", 0), ("output_token_parameter", "max_tokens"))}},
         )
         thread = QThread()
         worker.moveToThread(thread)
@@ -673,6 +676,8 @@ class MainWindow(QMainWindow):
 
         if response["type"] == "final_response":
             self._handle_final_response(session, response)
+        elif response["type"] == "context_compacted":
+            session.chat_view.append_message("assistant", response.get("message", "Context recovery — full history retained."))
         elif response["type"] == "retrying":
             # 429/529 backoff: surface it instead of hanging silently.
             if session is self._tab_for_chat(self.active_chat_id):

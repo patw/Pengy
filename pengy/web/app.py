@@ -512,6 +512,10 @@ class WebWorker:
                 preserve_reasoning=bool(config.get("preserve_reasoning", False)),
                 cancel_fn=lambda: self._cancelled,
                 tool_context=self._tool_context,
+                chat_id=chat["id"],
+                **{key: config.get(key, default) for key, default in (
+                    ("auto_context_recovery", True), ("recovery_keep_turns", 3),
+                    ("output_token_limit", 0), ("output_token_parameter", "max_tokens"))},
             )
             send_value = None
 
@@ -525,7 +529,7 @@ class WebWorker:
                 send_value = None
                 rtype = response.get("type", "")
 
-                if rtype == "retrying":
+                if rtype in ("retrying", "context_compacted"):
                     # Backoff sleep handled inside the generator; push event
                     # through so the SSE stream shows "Overloaded, retrying…"
                     self._put_event(response)
