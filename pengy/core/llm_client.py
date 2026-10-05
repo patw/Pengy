@@ -40,6 +40,9 @@ _CONTEXT_ERROR_CODES = {
     "context_length_exceeded", "context_window_exceeded", "prompt_too_long",
     "input_too_long", "max_context_length_exceeded", "token_limit_exceeded",
 }
+# A length stop this short is context starvation, not a plausible output cap;
+# larger (or unreported) completions keep the safe truncation failure.
+_SHORT_LENGTH_COMPLETION_TOKENS = 1024
 _CONTEXT_ERROR_PHRASES = (
     "context length", "context window", "context limit", "maximum context",
     "prompt too long", "input too long", "too many tokens", "token limit exceeded",
@@ -365,7 +368,32 @@ def _format_question_answers(questions: list[dict], answers: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _generation_limit_message(content: str | None, has_tool_calls: bool) -> str:
+def _completion_tokens(usage) -> int | None:
+    value = getattr(usage, "completion_tokens", None) if usage else None
+    return value if isinstance(value, int) and value >= 0 else None
+
+
+def _length_suggests_context_pressure(choice, usage, output_token_limit: int) -> bool:
+    """Whether a length stop is worth a context-reduction retry.
+
+    An empty answer always qualifies. A partial answer or truncated tool call
+    qualifies only when the provider reports a completion too short to be an
+    output cap -- typically a lead-in like "Redoing it properly:" cut off just
+    before its tool call because the window was nearly full.
+    """
+    if choice.finish_reason != "length":
+        return False
+    if not choice.message.tool_calls and not (choice.message.content or "").strip():
+        return True
+    completion = _completion_tokens(usage)
+    limit = _SHORT_LENGTH_COMPLETION_TOKENS
+    if output_token_limit > 0:
+        limit = min(limit, output_token_limit)
+    return completion is not None and completion < limit
+
+
+def _generation_limit_message(content: str | None, has_tool_calls: bool,
+                              usage=None, recovery_attempts: int = 0) -> str:
     """Length means generation exhaustion, not necessarily a full context window."""
     if has_tool_calls:
         detail = "Generation limit reached during tool calls; no tools from this response were executed."
@@ -373,11 +401,18 @@ def _generation_limit_message(content: str | None, has_tool_calls: bool) -> str:
         detail = "Generation limit reached before an answer was produced."
     else:
         detail = "Generation limit reached; the answer is incomplete."
+    prompt = getattr(usage, "prompt_tokens", None) if usage else None
+    completion = _completion_tokens(usage)
+    counts = ""
+    if isinstance(prompt, int) and completion is not None:
+        counts = f" (prompt {prompt:,} tokens, completion {completion:,} tokens)"
+    retried = (f"Pengy retried after {recovery_attempts} context reduction(s) without success."
+               if recovery_attempts else "Pengy did not retry automatically.")
     message = (
-        f"{detail} The provider reported finish_reason=length. "
+        f"{detail} The provider reported finish_reason=length{counts}. "
         "This can mean an output-token cap or insufficient remaining context. "
         "Try a shorter conversation, a larger output allowance, or a reasoning budget "
-        "that leaves room for an answer. Pengy did not retry automatically."
+        f"that leaves room for an answer. {retried}"
     )
     if (content or "").strip():
         message += f"\n\nPartial response (incomplete, not saved as an answer):\n{content}"
@@ -686,11 +721,12 @@ class LLMClient:
                     response = self.client.chat.completions.create(**request_kwargs)
                     request_seconds = time.perf_counter() - request_started
                     choice = response.choices[0]
-                    if (choice.finish_reason == "length" and not choice.message.tool_calls
-                            and not (choice.message.content or "").strip()):
+                    if _length_suggests_context_pressure(choice, response.usage, output_token_limit):
                         if response.usage:
                             for key in accumulated_usage:
                                 accumulated_usage[key] += getattr(response.usage, key, 0) or 0
+                        # The truncated reply is discarded unexecuted; a retry
+                        # regenerates it against a smaller provider view.
                         event = recovery.reduce(current_messages, summarize)
                         if event:
                             yield event
@@ -700,7 +736,9 @@ class LLMClient:
                                 request_messages.append({"role": "user", "content": image_rejection})
                             request_messages = _without_cross_model_proxy_state(request_messages, model or self.model)
                             continue
-                        raise GenerationLimitError(_generation_limit_message(choice.message.content, False))
+                        raise GenerationLimitError(_generation_limit_message(
+                            choice.message.content, bool(choice.message.tool_calls),
+                            response.usage, recovery.attempts))
                     break  # success — exit retry loop
                 except APIStatusError as e:
                     # Image recovery edits this provider request only; stored
@@ -799,7 +837,8 @@ class LLMClient:
             # generation cap as though it proved context overflow.
             if choice.finish_reason == "length":
                 raise GenerationLimitError(_generation_limit_message(
-                    assistant_msg.content, bool(assistant_msg.tool_calls)))
+                    assistant_msg.content, bool(assistant_msg.tool_calls),
+                    response.usage, recovery.attempts))
             serialized = _serialize_assistant_message(assistant_msg, preserve_reasoning)
             current_messages.append(serialized)
 

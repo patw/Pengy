@@ -5,6 +5,7 @@ import json
 import pytest
 from unittest.mock import patch
 
+from pengy.core.llm_client import GenerationLimitError
 from pengy.core.context_recovery import Recovery, fingerprint, synthetic, SUMMARY_PROMPT
 from tests.test_context_recovery import client, stub, overflow, _completion_obj
 from tests.test_llm_loop import completion, tool_call, collect_auto
@@ -186,3 +187,61 @@ def test_summary_source_is_chunked_without_sampling_user_text():
     assert len(chunks) > 1 and all(len(c) <= 32000 for c in chunks)
     assert "FIRST_REQUIREMENT" in "".join(chunks)
     assert "LAST_REQUIREMENT" in "".join(chunks)
+
+
+def length_stop(content=None, tool_calls=None, completion_tokens=5):
+    reply = completion(content=content, tool_calls=tool_calls, usage=(250000, completion_tokens))
+    reply["choices"][0]["finish_reason"] = "length"
+    return reply
+
+
+def test_short_partial_length_recovers_and_discards_lead_in(client, stub):
+    messages = history()
+    original = copy.deepcopy(messages)
+    lead_in = "The mutations never applied — redoing it properly:"
+    stub.queue(length_stop(lead_in, completion_tokens=14), completion(content="checkpoint"),
+               completion(content="recovered"))
+    events = collect_auto(client.chat(messages))
+    assert [e["type"] for e in events] == ["context_compacted", "final_response"]
+    assert events[-1]["content"] == "recovered"
+    assert not any(lead_in in json.dumps(r["body"]) for r in stub.requests[1:])
+    assert messages == original
+
+
+def test_short_truncated_tool_call_recovers_without_executing(client, stub, tmp_path):
+    path = tmp_path / "must-not-exist"
+    call = tool_call("tc1", "write_file", {"path": str(path), "content": "unsafe"})
+    call["function"]["arguments"] = '{"path":'
+    stub.queue(length_stop("Writing:", [call], completion_tokens=40),
+               completion(content="checkpoint"), completion(content="recovered"))
+    with patch("pengy.core.llm_client._run_tool") as run:
+        events = collect_auto(client.chat(history(), tool_confirmation="all"))
+    run.assert_not_called()
+    assert not path.exists()
+    assert [e["type"] for e in events] == ["context_compacted", "final_response"]
+
+
+@pytest.mark.parametrize("completion_tokens, limit", [(4096, 0), (256, 256), (None, 0)])
+def test_capped_or_unreported_partial_length_still_fails_safely(client, stub, completion_tokens, limit):
+    reply = length_stop("A long partial answer", completion_tokens=completion_tokens or 0)
+    if completion_tokens is None:
+        reply.pop("usage")
+    stub.queue(reply)
+    with pytest.raises(GenerationLimitError, match="answer is incomplete") as error:
+        collect_auto(client.chat(history(), output_token_limit=limit))
+    assert len(stub.requests) == 1
+    assert "did not retry automatically" in str(error.value)
+    if completion_tokens is not None:
+        assert f"completion {completion_tokens:,} tokens" in str(error.value)
+        assert "prompt 250,000 tokens" in str(error.value)
+
+
+def test_exhausted_short_length_recovery_reports_retries(client):
+    def create(**kwargs):
+        if "tools" not in kwargs:
+            return _completion_obj(completion(content="requirements retained"))
+        return _completion_obj(length_stop("Redoing it:", completion_tokens=8))
+    with patch.object(client.client.chat.completions, "create", side_effect=create):
+        with pytest.raises(GenerationLimitError, match=r"retried after \d+ context reduction") as error:
+            collect_auto(client.chat(history(), recovery_keep_turns=0))
+    assert "Redoing it:" in str(error.value)
