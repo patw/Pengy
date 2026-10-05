@@ -363,6 +363,32 @@ def _format_question_answers(questions: list[dict], answers: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _generation_limit_message(content: str | None, has_tool_calls: bool) -> str:
+    """Length means generation exhaustion, not necessarily a full context window."""
+    if has_tool_calls:
+        detail = "Generation limit reached during tool calls; no tools from this response were executed."
+    elif not (content or "").strip():
+        detail = "Generation limit reached before an answer was produced."
+    else:
+        detail = "Generation limit reached; the answer is incomplete."
+    message = (
+        f"{detail} The provider reported finish_reason=length. "
+        "This can mean an output-token cap or insufficient remaining context. "
+        "Try a shorter conversation, a larger output allowance, or a reasoning budget "
+        "that leaves room for an answer. Pengy did not retry automatically."
+    )
+    if (content or "").strip():
+        message += f"\n\nPartial response (incomplete, not saved as an answer):\n{content}"
+    return message
+
+
+class GenerationLimitError(RuntimeError):
+    """A truncated completion is a failed turn, never a completed answer."""
+
+    kind = "truncated"
+    exit_code = 1
+
+
 class CredentialError(RuntimeError):
     """The endpoint rejected us for missing or invalid credentials.
 
@@ -707,7 +733,14 @@ class LLMClient:
                 accumulated_usage["completion_tokens"] += response.usage.completion_tokens
                 accumulated_usage["total_tokens"] += response.usage.total_tokens
 
-            assistant_msg = response.choices[0].message
+            choice = response.choices[0]
+            assistant_msg = choice.message
+            # Check before history/events/tools: even valid-looking arguments
+            # may belong to an incomplete tool-call sequence. Do not retry a
+            # generation cap as though it proved context overflow.
+            if choice.finish_reason == "length":
+                raise GenerationLimitError(_generation_limit_message(
+                    assistant_msg.content, bool(assistant_msg.tool_calls)))
             serialized = _serialize_assistant_message(assistant_msg, preserve_reasoning)
             current_messages.append(serialized)
 
