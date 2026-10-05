@@ -545,10 +545,11 @@ class TestWebWorker:
         # Should get keepalives until timeout
         keepalives = [e for e in events if e.get("type") == "keepalive"]
         assert len(keepalives) >= 1
-        # Should get timeout error
-        errors = [e for e in events if e.get("type") == "error"]
-        assert len(errors) == 1
-        assert "timeout" in errors[0]["message"].lower()
+        # Connection expiry is not a task error and doesn't touch the log.
+        assert events[-1] == {"type": "stream_rotate"}
+        assert not any(e.get("type") == "error" for e in events)
+        assert not w._done
+        assert w.event_count == 0
     def test_iter_events_resumes_from_index(self, tmp_dirs):
         """A reconnecting consumer can start from any past event index."""
         chat = {"id": "test-id", "title": "test", "messages": []}

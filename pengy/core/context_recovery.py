@@ -168,20 +168,65 @@ class Recovery:
             self.state = original
             raise
 
+    def _summary_plan(self, messages: list[dict]):
+        """Plan eligible completed turns without spending calls or mutating state."""
+        users = [i for i, m in enumerate(messages) if m.get("role") == "user" and not synthetic(m)]
+        count = max(0, len(users) - 1 - self.keep_turns)
+        boundaries = []
+        for i in users[:count + 1]:
+            prior = next((m for m in reversed(messages[:i]) if tracked(m)), None)
+            if (sum(tracked(m) for m in messages[:i]) > self.state["drop"]
+                    and prior and prior.get("role") == "assistant" and not prior.get("tool_calls")):
+                boundaries.append(i)
+        if not boundaries: return None
+        # Remove roughly a quarter of eligible history in complete-turn units.
+        end = boundaries[max(0, (len(boundaries) - 1) // 4)]
+        drop = sum(tracked(m) for m in messages[:end])
+        selected, n = [], 0
+        for m in messages[:end]:
+            if tracked(m):
+                n += 1
+                if n > self.state["drop"]: selected.append(m)
+        if not selected: return None
+        # Summarize every character in bounded chunks; no hidden head-only
+        # sampling of user requirements. Tool previews are already explicit.
+        reduced = []
+        for original in selected:
+            m = dict(original)
+            if m.get("role") == "assistant":
+                for key in ("reasoning", "reasoning_content", "reasoning_details"): m.pop(key, None)
+            stage = self.state["tools"].get(fingerprint(original))
+            if stage and m.get("role") == "tool":
+                content = text_of(m)
+                m["content"] = STUB if stage == 2 else content[:1500] + "\n[... shortened ...]\n" + content[-1500:]
+            reduced.append(m)
+        records = []
+        if self.state["summary"]: records.append("Previous checkpoint:\n" + self.state["summary"])
+        for m in reduced:
+            records.append(m.get("role", "") + ": " + text_of(m))
+            for call in m.get("tool_calls") or []: records.append("Tool requested: " + json.dumps(call["function"], ensure_ascii=False))
+        source = "\n\n".join(records)
+        chunks = [source[i:i+CHUNK_CHARS] for i in range(0, len(source), CHUNK_CHARS)]
+        if self.summary_calls + len(chunks) > MAX_SUMMARY_CALLS: return None
+        return drop, sum(m.get("role") == "user" for m in selected), chunks, len(source)
+
     def _reduce(self, messages: list[dict], summarize: Callable[[str], str]) -> dict | None:
         """Commit a strictly smaller plan; failed summaries never discard history."""
         if not self.enabled or self.attempts >= MAX_RETRIES:
             return None
         before = self.apply(messages)
         before_size = sum(len(text_of(m)) + len(str(m.get("reasoning_content", ""))) + len(str(m.get("reasoning", ""))) + len(str(m.get("reasoning_details", ""))) for m in before)
+        # Keep attempt 4 available for history rather than spending every
+        # reduction on reasoning/tool bodies. Planning makes no model calls.
+        reserved_summary = self._summary_plan(messages) if self.attempts == MAX_RETRIES - 1 else None
         # Stage 1: optional reasoning from completed history.
         candidate = None
-        if not self.state["reasoning"]:
+        if reserved_summary is None and not self.state["reasoning"]:
             self.state["reasoning"] = True
             after = self.apply(messages)
             if after != before: candidate = "historical_reasoning"
         # Stage 2: large tool bodies, protecting newest until older ones exhausted.
-        if candidate is None:
+        if candidate is None and reserved_summary is None:
             available = [m for m in before if m.get("role") == "tool" and isinstance(m.get("content"), str)
                          and not m["content"].startswith((STUB, "Tool execution was declined", "User cancelled"))]
             newest = next((fingerprint(m) for m in reversed(messages) if m.get("role") == "tool"), None)
@@ -199,53 +244,17 @@ class Recovery:
         # Stage 3: summarize whole old turns, never the active task/recent turns.
         turns_removed = 0
         if candidate is None:
-            users = [i for i, m in enumerate(messages) if m.get("role") == "user" and not synthetic(m)]
-            count = max(0, len(users) - 1 - self.keep_turns)
-            boundaries = []
-            for i in users[:count + 1]:
-                prior = next((m for m in reversed(messages[:i]) if tracked(m)), None)
-                if (sum(tracked(m) for m in messages[:i]) > self.state["drop"]
-                        and prior and prior.get("role") == "assistant" and not prior.get("tool_calls")):
-                    boundaries.append(i)
-            if not boundaries: return None
-            # Remove roughly a quarter of eligible history in complete-turn units.
-            end = boundaries[max(0, (len(boundaries) - 1) // 4)]
-            drop = sum(tracked(m) for m in messages[:end])
-            selected, n = [], 0
-            for m in messages[:end]:
-                if tracked(m):
-                    n += 1
-                    if n > self.state["drop"]: selected.append(m)
-            if not selected: return None
-            # Summarize every character in bounded chunks; no hidden head-only
-            # sampling of user requirements. Tool previews are already explicit.
-            reduced = []
-            for original in selected:
-                m = dict(original)
-                if m.get("role") == "assistant":
-                    for key in ("reasoning", "reasoning_content", "reasoning_details"): m.pop(key, None)
-                stage = self.state["tools"].get(fingerprint(original))
-                if stage and m.get("role") == "tool":
-                    content = text_of(m)
-                    m["content"] = STUB if stage == 2 else content[:1500] + "\n[... shortened ...]\n" + content[-1500:]
-                reduced.append(m)
-            records = []
-            if self.state["summary"]: records.append("Previous checkpoint:\n" + self.state["summary"])
-            for m in reduced:
-                records.append(m.get("role", "") + ": " + text_of(m))
-                for call in m.get("tool_calls") or []: records.append("Tool requested: " + json.dumps(call["function"], ensure_ascii=False))
-            source = "\n\n".join(records)
-            chunks = [source[i:i+CHUNK_CHARS] for i in range(0, len(source), CHUNK_CHARS)]
-            if self.summary_calls + len(chunks) > MAX_SUMMARY_CALLS: return None
+            summary_plan = reserved_summary or self._summary_plan(messages)
+            if summary_plan is None: return None
+            drop, turns_removed, chunks, source_length = summary_plan
             summaries = []
             for chunk in chunks:
                 self.summary_calls += 1
                 summaries.append(summarize(chunk))
             summary = "\n\n".join(summaries)
-            if not summary.strip() or len(summary) >= len(source) or len(summary) > 100000: return None
+            if not summary.strip() or len(summary) >= source_length or len(summary) > 100000: return None
             self.state["drop"] = drop
             self.state["summary"] = summary
-            turns_removed = sum(m.get("role") == "user" for m in selected)
             candidate = "history_summary"
         after = self.apply(messages)
         after_size = sum(len(text_of(m)) + len(str(m.get("reasoning_content", ""))) + len(str(m.get("reasoning", ""))) + len(str(m.get("reasoning_details", ""))) for m in after)

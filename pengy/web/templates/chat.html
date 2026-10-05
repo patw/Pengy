@@ -298,6 +298,8 @@ const CHAT_ID = {{ chat.id | tojson }};
 const HAS_ACTIVE_WORKER = {{ has_active_worker | tojson }};
 let isProcessing = false;
 let eventSource = null;
+let sseReconnectTimer = null;
+let sseReconnectAttempt = 0;
 let sseCursor = sessionStorage.getItem('pengy_sse_cursor_' + CHAT_ID) || '';
 let pendingToolCallId = null;
 let pendingQuestionId = null;
@@ -337,8 +339,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && isProcessing) {
       acquireWakeLock();
-      // CONNECTING is EventSource's normal automatic-reconnect state; do
-      // not replace it and lose its built-in Last-Event-ID cursor.
+      // Preserve a live/connecting instance; openSSE also respects any
+      // pending reconnect backoff and resumes from the saved real log cursor.
       if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
         openSSE();
       }
@@ -350,8 +352,8 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('pageshow', (event) => {
     if (event.persisted && isProcessing) {
       acquireWakeLock();
-      // CONNECTING is EventSource's normal automatic-reconnect state; do
-      // not replace it and lose its built-in Last-Event-ID cursor.
+      // Preserve a live/connecting instance; openSSE also respects any
+      // pending reconnect backoff and resumes from the saved real log cursor.
       if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
         openSSE();
       }
@@ -483,6 +485,7 @@ function setProcessing(val) {
   if (val) {
     acquireWakeLock();
   } else {
+    closeSSE();
     releaseWakeLock();
   }
   if (!val) document.getElementById('messageInput').focus();
@@ -550,7 +553,7 @@ function stopGeneration() {
   }
   fetch(`/chat/${CHAT_ID}/stop`, { method: 'POST' })
     .catch(err => console.error('Stop error:', err));
-  if (eventSource) { eventSource.close(); eventSource = null; }
+  closeSSE();
   hideThinking();
   setProcessing(false);
 }
@@ -894,42 +897,72 @@ document.getElementById('messageInput').addEventListener('focus', () => {
 
 // ── SSE ───────────────────────────────────────────────────────
 
-function openSSE() {
-  // Preserve a CONNECTING instance so its native Last-Event-ID reconnect
-  // continues uninterrupted. A replacement instance explicitly supplies our
-  // session cursor because EventSource cannot set custom request headers.
-  if (eventSource && eventSource.readyState !== EventSource.CLOSED) return;
+function closeSSE() {
+  if (sseReconnectTimer !== null) {
+    clearTimeout(sseReconnectTimer);
+    sseReconnectTimer = null;
+  }
   if (eventSource) { eventSource.close(); eventSource = null; }
+  sseReconnectAttempt = 0;
+}
+
+function scheduleSSEReconnect(source, rotation = false) {
+  if (source !== eventSource) return; // retired connection callback
+  source.close();
+  eventSource = null;
+  if (!isProcessing || sseReconnectTimer !== null) return;
+  // Normal lifetime rotation is cheap; network failures back off with jitter.
+  const base = Math.min(30000, 1000 * (2 ** Math.min(sseReconnectAttempt, 5)));
+  const delay = rotation ? 100 : Math.min(30000, base * (0.75 + Math.random() * 0.5));
+  if (!rotation) sseReconnectAttempt++;
+  sseReconnectTimer = setTimeout(() => {
+    sseReconnectTimer = null;
+    if (isProcessing) openSSE();
+  }, delay);
+}
+
+function openSSE() {
+  // Do not bypass pending backoff on visibility/page-show events. New streams
+  // resume from our last REAL log ID; they never start another task.
+  if (!isProcessing || sseReconnectTimer !== null) return;
+  if (eventSource && eventSource.readyState !== EventSource.CLOSED) return;
+  if (eventSource) eventSource.close();
   const url = `/chat/${CHAT_ID}/stream` + (sseCursor ? `?after=${encodeURIComponent(sseCursor)}` : '');
-  eventSource = new EventSource(url);
-  eventSource.onmessage = e => {
+  const source = new EventSource(url);
+  eventSource = source;
+  source.onopen = () => {
+    if (source === eventSource) sseReconnectAttempt = 0;
+  };
+  source.addEventListener('stream_rotate', () => {
+    scheduleSSEReconnect(source, true);
+  });
+  source.onmessage = e => {
+    if (source !== eventSource) return;
+    const data = JSON.parse(e.data);
+    // Compatibility with older servers: their synthetic timeout has a bogus
+    // next ID. Ignore it and reconnect without advancing the replay cursor.
+    if (data.type === 'error' && data.message === 'Stream timeout') {
+      scheduleSSEReconnect(source, true);
+      return;
+    }
     if (e.lastEventId) {
+      if (sseCursor && Number(e.lastEventId) <= Number(sseCursor)) return;
       sseCursor = e.lastEventId;
       sessionStorage.setItem('pengy_sse_cursor_' + CHAT_ID, sseCursor);
     }
-    handleEvent(JSON.parse(e.data));
+    handleEvent(data);
   };
-  eventSource.onerror = () => {
-    // Don't close immediately — EventSource auto-reconnects when the
-    // connection drops (e.g. phone slept, user switched apps). When the
-    // phone wakes up, the connection is re-established automatically and
-    // the browser fires onopen + onmessage for any queued events.
-    //
-    // Only act if the EventSource has given up entirely (CLOSED), which
-    // happens when the server returns a non-retryable HTTP status. In that
-    // case the task may have completed while we were disconnected — reload
-    // the page to sync state from the server.
-    if (eventSource && eventSource.readyState === EventSource.CLOSED) {
-      eventSource.close();
-      eventSource = null;
-      if (isProcessing) {
-        reloadToSync();
-      } else {
-        hideThinking();
-        setProcessing(false);
-      }
+  source.onerror = () => {
+    if (source !== eventSource) return;
+    if (source.readyState === EventSource.CLOSED) {
+      // Non-retryable HTTP response: sync persisted state, not a prompt retry.
+      closeSSE();
+      if (isProcessing) reloadToSync();
+      return;
     }
-    // If readyState is CONNECTING, let the browser auto-reconnect.
+    // Replace native fixed-delay retries with bounded exponential backoff.
+    // Stop remains available; a retry only GETs the event stream.
+    scheduleSSEReconnect(source);
   };
 }
 
@@ -982,7 +1015,7 @@ function handleEvent(data) {
       hideThinking();
       appendAssistantMessage(data.html, data.usage);
       updateCumulativeTokens(data.cumulative_usage);
-      eventSource.close(); eventSource = null;
+      closeSSE();
       sessionStorage.removeItem('pengy_sse_cursor_' + CHAT_ID);
       setProcessing(false);
       break;
@@ -1003,7 +1036,7 @@ function handleEvent(data) {
         // while we were disconnected (phone slept), or it was stopped /
         // cancelled.  If we still think a task is running, reload to sync
         // the final state from the server.  Otherwise just clean up silently.
-        if (eventSource) { eventSource.close(); eventSource = null; }
+        closeSSE();
         if (isProcessing) {
           reloadToSync();
         } else {
@@ -1012,7 +1045,7 @@ function handleEvent(data) {
         return;
       }
       appendError(data.message || 'Unknown error');
-      if (eventSource) { eventSource.close(); eventSource = null; }
+      closeSSE();
       setProcessing(false);
       break;
   }

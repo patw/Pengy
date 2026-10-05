@@ -442,8 +442,10 @@ class WebWorker:
             self._new_event.notify_all()
 
     def iter_events(self, start_index: int = 0, timeout: float = 3600.0):
-        """Yield events from *start_index* onward, with keepalives.
+        """Yield real log events and keepalives for this connection's lifetime.
 
+        Lifetime expiry emits a nonterminal stream_rotate control frame. It
+        never changes worker state or advances the append-only replay cursor.
         Never yield while holding ``_events_lock``: an SSE consumer can be
         suspended by a slow client at ``yield``, while the worker must still be
         able to append progress events.
@@ -461,7 +463,9 @@ class WebWorker:
                 else:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        event = {"type": "error", "message": "Stream timeout"}
+                        # This connection expired, not the worker. A control
+                        # event is deliberately absent from the replay log.
+                        event = {"type": "stream_rotate"}
                     else:
                         notified = self._new_event.wait(timeout=min(remaining, 25.0))
                         if not notified:
@@ -470,7 +474,7 @@ class WebWorker:
             # Deliberately outside the mutex; see docstring above.
             if event is not None:
                 yield event
-                if event.get("type") in ("final_response", "error"):
+                if event.get("type") in ("final_response", "error", "stream_rotate"):
                     return
 
     def _get_sudo_password(self, host: str | None = None) -> str | None:
@@ -883,6 +887,9 @@ def chat_stream(chat_id: str):
             for event in worker.iter_events(start_index=start_index):
                 if event.get("type") == "keepalive":
                     yield ": keepalive\n\n"
+                elif event.get("type") == "stream_rotate":
+                    # No id: control frames must never consume a real log ID.
+                    yield 'event: stream_rotate\ndata: {}\n\n'
                 else:
                     yield f"id: {event_index}\ndata: {json.dumps(event)}\n\n"
                     event_index += 1

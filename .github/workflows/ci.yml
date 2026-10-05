@@ -32,6 +32,11 @@ jobs:
       - name: Verify dependency integrity
         run: pip check
 
+      - name: Set up Node.js for browser SSE regressions
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: Run tests
         run: |
           PENGY_NO_NUDGE=1 python -m pytest tests/ -v 2>&1
@@ -89,6 +94,11 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y libgl1 libegl1 libxkbcommon0 desktop-file-utils
           pip install -e ".[gui]" pytest
+
+      - name: Set up Node.js for browser SSE regressions
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Qt tests + GUI smoke test
         run: |

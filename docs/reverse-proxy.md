@@ -1,5 +1,18 @@
 # Reverse Proxy Setup
 
+## Long-running tasks and reconnects (Python web)
+
+Each SSE connection rotates after one hour; this is **not** a task or inference
+failure. The browser reconnects to the same worker using the last real event ID.
+Rotation control frames have no event ID and do not alter the persisted log.
+Network reconnect failures use jittered exponential backoff (1 second initially,
+up to 30 seconds), reset after a successful open. The task remains active and
+Stop stays available. Reconnects only fetch events: they never resubmit a prompt
+or rerun tools. Terminal task errors still end the stream normally.
+
+Reverse proxies should disable SSE buffering and allow keepalives through. An
+LLM request timeout (`llm_timeout`) is separate from SSE connection rotation.
+
 Pengy Web is designed for single-user personal use. It has no built-in authentication. For remote access, put it behind a reverse proxy with SSL.
 
 ## Quick start (nginx)
