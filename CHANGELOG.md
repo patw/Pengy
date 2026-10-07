@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Web tool-confirmation, `ask_user_question`, and sudo prompts no longer expire.** The web worker gave the confirmation/question prompts a hardcoded 300 s and the sudo prompt 120 s, after which it silently treated the wait as a *decline* — the tool did not run ("Tool execution was declined by user." / "User cancelled the question.") and the browser modal was left open on a turn that had already moved on. The CLI and GUI prompts wait indefinitely, so the web worker now does too: each wait blocks until the user answers or cancels. Stop still interrupts a pending prompt. There is no new setting — the behaviour simply matches the other surfaces.
+
 ## v1.11.3
 
 - **Recover from short truncated replies, not just empty ones.** A `finish_reason: length` reply with a lead-in sentence (e.g. "Redoing it properly:") or a truncated tool call now triggers automatic context recovery when the provider reports fewer than 1,024 completion tokens (and fewer than `output_token_limit`, if set) — too short to be an output cap, so the window was nearly full. Previously only an empty reply qualified, and long agentic runs failed outright. The truncated reply is discarded and no tool from it runs. Longer or unreported completions still fail safely. Length errors now include prompt/completion token counts and say whether recovery was attempted.

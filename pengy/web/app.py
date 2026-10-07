@@ -481,7 +481,10 @@ class WebWorker:
         self._sudo_event.clear()
         # host is None for the local machine; the modal names a remote host.
         self._put_event({"type": "sudo_request", "host": host})
-        self._sudo_event.wait(timeout=120.0)
+        # Block until the user answers or cancels -- no timeout.  The CLI and GUI
+        # prompts wait indefinitely, and a hidden expiry here silently declined
+        # the command (and left the modal open) instead of matching them.
+        self._sudo_event.wait()
         if self._cancelled:
             return None
         return self._sudo_result
@@ -579,7 +582,9 @@ class WebWorker:
                             send_value = {"confirmed": True, "tool_call_id": tool_call_id}
                         else:
                             self._confirm_event.clear()
-                            self._confirm_event.wait(timeout=300.0)
+                            # Block until the user answers or cancels -- no timeout,
+                            # matching the CLI/GUI prompts (see _get_sudo_password).
+                            self._confirm_event.wait()
                             if self._cancelled:
                                 break
                             result = self._confirm_result
@@ -600,7 +605,9 @@ class WebWorker:
                         "safe_id": _safe_id(tool_call_id),
                     })
                     self._confirm_event.clear()
-                    self._confirm_event.wait(timeout=300.0)
+                    # Block until the user answers or cancels -- no timeout,
+                    # matching the CLI/GUI prompts (see _get_sudo_password).
+                    self._confirm_event.wait()
                     if self._cancelled:
                         break
                     result = self._confirm_result
