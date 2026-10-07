@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.11.4
 
 - **Web tool-confirmation, `ask_user_question`, and sudo prompts no longer expire.** The web worker gave the confirmation/question prompts a hardcoded 300 s and the sudo prompt 120 s, after which it silently treated the wait as a *decline* — the tool did not run ("Tool execution was declined by user." / "User cancelled the question.") and the browser modal was left open on a turn that had already moved on. The CLI and GUI prompts wait indefinitely, so the web worker now does too: each wait blocks until the user answers or cancels. Stop still interrupts a pending prompt. There is no new setting — the behaviour simply matches the other surfaces.
 
