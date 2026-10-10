@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.11.5
 
 - **The token count advances during a turn, not only when it ends.** The sidebar's "Tokens: N in / M out" label and the web navbar badge only updated on `final_response`, so a long agentic turn showed a stale count until control returned to the user. `tool_request` and `question_request` events now carry the turn's running usage, and the GUI and web UI add it to the persisted chat total, so the count ticks after every model round. The value is display-only: the authoritative total is still written once, by `add_usage` on the final response, so repeated events cannot double-count and a failed turn leaves the stored total untouched.
 - **Harness notices and turn errors no longer masquerade as assistant messages.** The context-recovery line and the failed-turn error text were appended as ordinary assistant messages, so they carried the "Assistant 🤖" label and read as answers. Both now render on their own highlighted card via new `notice` and `error` roles in `ChatView`, using fixed light/dark `notice_*` (info) and `error_*` (danger) surfaces — Bootstrap's `alert-info`/`alert-danger` colours, so the desktop matches the web. The tokens live only in the base themes, so every accent keeps them. The Rust and C++ editions get the same roles and colours, and their web UIs now show the same highlighted alert the Python web already had for context recovery (they previously rendered a plain grey status line that vanished on the next event).
