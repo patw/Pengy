@@ -60,6 +60,8 @@ img {{ max-width: 600px; }}
 .reasoning-card {{ border:1px solid {theme['reasoning_border']}; padding:6px 10px; margin:6px 0; background-color:{theme['reasoning_bg']}; }}
 .reasoning-link {{ color:{theme['reasoning_fg']}; text-decoration:none; font-weight:bold; }}
 .reasoning-body {{ color:{theme['muted']}; font-size:0.85em; white-space:pre-wrap; word-wrap:break-word; margin-top:4px; }}
+.notice-card {{ border:1px solid {theme['notice_border']}; padding:6px 10px; margin:6px 0; background-color:{theme['notice_bg']}; color:{theme['notice_fg']}; }}
+.error-card {{ border:1px solid {theme['error_border']}; padding:6px 10px; margin:6px 0; background-color:{theme['error_bg']}; color:{theme['error_fg']}; }}
 h1 {{ font-size:1.4em; }}
 h2 {{ font-size:1.3em; }}
 h3 {{ font-size:1.1em; }}
@@ -351,6 +353,13 @@ class ChatView(QTextBrowser):
                 msg["declined"] = content.get("declined", False)
                 # Mutated in place: its "(running…)" header is now stale.
                 self._invalidate(idx)
+        elif role in ("notice", "error"):
+            # A harness card (info notice / failed-turn error), not something the
+            # model said. Rendered on its own surface so it does not carry the
+            # "Assistant" label and read as an answer.
+            if content:
+                self._messages.append({"role": role, "content": content})
+                self._html_cache.append(None)
         if render:
             self._render()
 
@@ -479,6 +488,14 @@ class ChatView(QTextBrowser):
             return "".join(parts)
         if role == "tool_block":
             return self._render_tool_block(msg)
+        if role in ("notice", "error"):
+            # Harness cards share one shape; only the class (and so the theme
+            # colours) differs between an info notice and a failed turn.
+            return (
+                f'<div class="{role}-card">'
+                f'{self._escape_html(str(msg.get("content", "")))}'
+                '</div>'
+            )
         return ""
 
     def _render_reasoning_block(self, idx: int, reasoning: str) -> str:

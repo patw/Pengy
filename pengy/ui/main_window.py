@@ -674,10 +674,21 @@ class MainWindow(QMainWindow):
         if not isinstance(response, dict) or "type" not in response:
             return
 
+        # Tick the token count during the turn: intermediate events carry the
+        # running turn usage, and a live total is more useful than one that only
+        # appears once control returns to the user. The persisted chat total is
+        # the base and is not written here, so this is idempotent across a turn's
+        # events and a failed turn leaves the display untouched.
+        self._update_live_tokens(session, response)
+
         if response["type"] == "final_response":
             self._handle_final_response(session, response)
         elif response["type"] == "context_compacted":
-            session.chat_view.append_message("assistant", response.get("message", "Context recovery — full history retained."))
+            # A harness notice, not an assistant turn: render it in its own
+            # highlighted card (see ChatView's "notice" role) instead of the
+            # Assistant bubble it used to be shown as.
+            session.chat_view.append_message(
+                "notice", response.get("message", "Context recovery — full history retained."))
         elif response["type"] == "retrying":
             # 429/529 backoff: surface it instead of hanging silently.
             if session is self._tab_for_chat(self.active_chat_id):
@@ -759,7 +770,7 @@ class MainWindow(QMainWindow):
         session = self._tab_for_chat(chat_id)
         if not session:
             return
-        session.chat_view.append_message("assistant", f"Error: {error_msg}")
+        session.chat_view.append_message("error", f"Error: {error_msg}")
         # The run died mid-turn: the last assistant message may hold tool_calls
         # with no result behind them, which 400s on the next request.
         if session.chat:
@@ -1009,6 +1020,28 @@ class MainWindow(QMainWindow):
             worker.send_sudo_password(password if accepted and password else None)
 
     # ── Final response handling ───────────────────────────────────
+
+    def _update_live_tokens(self, session: _TabSession, response: dict):
+        """Show cumulative token usage including the in-flight turn.
+
+        ``tool_request`` / ``question_request`` events carry the turn's running
+        usage, so the sidebar count can advance after every model round instead
+        of only when the turn ends. The persisted ``chat["usage"]`` total is the
+        base and is *not* mutated here, so repeated events cannot double-count
+        and the authoritative total is still written by ``add_usage`` in
+        ``_handle_final_response``.
+        """
+        usage = response.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            return
+        base = session.chat.get("usage") if isinstance(session.chat, dict) else None
+        base = base if isinstance(base, dict) else {}
+        prompt = base.get("prompt_tokens", 0) + usage.get("prompt_tokens", 0)
+        completion = base.get("completion_tokens", 0) + usage.get("completion_tokens", 0)
+        session.prompt_tokens = prompt
+        session.completion_tokens = completion
+        if session is self._tab_for_chat(self.active_chat_id):
+            self.chat_history.update_token_usage(prompt, completion)
 
     def _handle_final_response(self, session: _TabSession, response: dict):
         """Handle the final text response from the LLM."""

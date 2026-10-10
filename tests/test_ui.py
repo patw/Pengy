@@ -1140,3 +1140,213 @@ class TestChatWorkerQuestionEvent:
         assert errors == []
         assert len(finals) == 1
         assert "answered" in finals[0]["content"]
+
+
+class TestLiveTokenPreview:
+    """The sidebar token count advances during a turn, not only when it ends.
+
+    ``_update_live_tokens`` is the single choke point the worker-response
+    dispatcher calls for every event, so it must add the running turn usage to
+    the persisted total without ever writing that total (a mid-turn write would
+    double-count, since ``add_usage`` adds the same turn again at the end).
+    """
+
+    @staticmethod
+    def _harness():
+        from pengy.ui.main_window import MainWindow
+
+        class _History:
+            def __init__(self):
+                self.calls = []
+
+            def update_token_usage(self, prompt, completion):
+                self.calls.append((prompt, completion))
+
+        class _Harness:
+            def __init__(self):
+                self.chat_history = _History()
+                self.open_tabs = {}
+                self.active_chat_id = None
+
+            _tab_for_chat = lambda self, cid: self.open_tabs.get(cid)
+
+            def update_live(self, session, response):
+                MainWindow._update_live_tokens(self, session, response)
+
+        return _Harness()
+
+    @staticmethod
+    def _session(chat_usage, active=True):
+        from types import SimpleNamespace
+
+        session = SimpleNamespace(
+            chat={"usage": dict(chat_usage)} if chat_usage is not None else {},
+            prompt_tokens=0,
+            completion_tokens=0,
+        )
+        return session
+
+    def test_preview_adds_turn_usage_to_persisted_total(self):
+        h = self._harness()
+        session = self._session({"prompt_tokens": 1000, "completion_tokens": 500,
+                                 "total_tokens": 1500})
+        h.open_tabs = {"c1": session}
+        h.active_chat_id = "c1"
+
+        h.update_live(session, {"usage": {"prompt_tokens": 10,
+                                          "completion_tokens": 5, "total_tokens": 15}})
+
+        assert (session.prompt_tokens, session.completion_tokens) == (1010, 505)
+        assert h.chat_history.calls[-1] == (1010, 505)
+        # Persisted total untouched — the preview must not write it.
+        assert session.chat["usage"]["total_tokens"] == 1500
+
+    def test_repeated_events_do_not_double_count(self):
+        h = self._harness()
+        session = self._session({"prompt_tokens": 1000, "completion_tokens": 500,
+                                 "total_tokens": 1500})
+        h.open_tabs = {"c1": session}
+        h.active_chat_id = "c1"
+        turn = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+        h.update_live(session, {"usage": turn})
+        h.update_live(session, {"usage": turn})
+
+        assert (session.prompt_tokens, session.completion_tokens) == (1010, 505)
+
+    def test_inactive_tab_updates_state_without_touching_the_label(self):
+        h = self._harness()
+        session = self._session({"prompt_tokens": 1000, "completion_tokens": 500,
+                                 "total_tokens": 1500})
+        h.open_tabs = {"c1": session}
+        h.active_chat_id = "other"
+
+        h.update_live(session, {"usage": {"prompt_tokens": 10,
+                                          "completion_tokens": 5, "total_tokens": 15}})
+
+        assert (session.prompt_tokens, session.completion_tokens) == (1010, 505)
+        assert h.chat_history.calls == []
+
+    def test_event_without_usage_is_ignored(self):
+        h = self._harness()
+        session = self._session(None)
+        h.open_tabs = {"c1": session}
+        h.active_chat_id = "c1"
+
+        h.update_live(session, {"type": "tool_result"})
+
+        assert (session.prompt_tokens, session.completion_tokens) == (0, 0)
+        assert h.chat_history.calls == []
+
+
+class TestHarnessCards:
+    """Harness cards (a context-recovery notice, a failed-turn error) must not
+    render as assistant messages -- they used to get the "Assistant" label and
+    read as an answer."""
+
+    @pytest.fixture
+    def view(self, qapp):
+        from pengy.ui.chat_view import ChatView
+        v = ChatView()
+        yield v
+        v.deleteLater()
+
+    @pytest.mark.parametrize("role,cls,text", [
+        ("notice", "notice-card", "Context recovery — full history retained."),
+        ("error", "error-card", "Error: API error (HTTP 500): boom"),
+    ])
+    def test_card_renders_as_its_own_surface(self, view, role, cls, text):
+        view.append_message(role, text, render=False)
+        html = view._build_html()
+        assert f'class="{cls}"' in html
+        assert text in html
+        # Not attributed to the assistant, and not a markdown body. (The CSS
+        # block always mentions .role-assistant, so match the rendered tag.)
+        assert 'class="role-assistant"' not in html
+
+    @pytest.mark.parametrize("role", ["notice", "error"])
+    def test_card_content_is_escaped(self, view, role):
+        view.append_message(role, "<b>boom</b>", render=False)
+        html = view._build_html()
+        assert "&lt;b&gt;boom&lt;/b&gt;" in html
+        assert "<b>boom</b>" not in html
+
+    @pytest.mark.parametrize("role", ["notice", "error"])
+    def test_card_is_cached_like_other_messages(self, view, role):
+        view.append_message(role, "hi", render=False)
+        assert len(view._html_cache) == len(view._messages) == 1
+        cached = view._build_html()
+        view._invalidate_all()
+        assert cached == view._build_html()
+
+    @pytest.mark.parametrize("role", ["notice", "error"])
+    def test_empty_card_is_dropped(self, view, role):
+        view.append_message(role, "", render=False)
+        assert view._messages == []
+
+
+def test_card_tokens_survive_every_accent_merge():
+    """notice_*/error_* live only in the base themes, so every accent keeps them.
+
+    If an accent surface ever starts defining them (or get_theme stops merging
+    the base first), the cards would lose their colour on that accent.
+    """
+    from pengy.ui.theme import get_theme, ACCENT_NAMES
+
+    for mode in ("light", "dark"):
+        for accent in ACCENT_NAMES:
+            theme = get_theme({"theme_mode": mode, "theme_accent": accent})
+            for prefix in ("notice", "error"):
+                for key in (f"{prefix}_bg", f"{prefix}_border", f"{prefix}_fg"):
+                    assert theme.get(key), f"{key} missing for {mode}/{accent}"
+
+
+class TestContextCompactedNotice:
+    """A context_compacted event with no message must still show a notice.
+
+    Context recovery emits a `message`; the lighter tool-output compaction path
+    emits none. Every edition must fall back to the same text rather than
+    silently dropping the notice -- the Rust/C++ GUIs used to require a
+    non-empty message and so showed nothing for that path.
+    """
+
+    def _dispatch(self, qapp, response):
+        from types import SimpleNamespace
+        from pengy.ui.chat_view import ChatView
+        from pengy.ui.main_window import MainWindow
+
+        view = ChatView()
+        session = SimpleNamespace(chat={}, chat_view=view,
+                                  prompt_tokens=0, completion_tokens=0)
+
+        class _Harness:
+            active_chat_id = "c1"
+            _update_live_tokens = MainWindow._update_live_tokens
+            _on_worker_response = MainWindow._on_worker_response
+
+            def _tab_for_chat(self, cid):
+                return self.open_tabs.get(cid)
+
+            def _sender_chat_id(self):
+                return "c1"
+
+        h = _Harness()
+        h.open_tabs = {"c1": session}
+        h.chat_history = SimpleNamespace(update_token_usage=lambda *a: None)
+        h._on_worker_response(response)
+        msgs = list(view._messages)
+        view.deleteLater()
+        return msgs
+
+    def test_missing_message_still_shows_the_notice(self, qapp):
+        msgs = self._dispatch(qapp, {"type": "context_compacted",
+                                     "attempt": 1, "max_attempts": 2,
+                                     "chars_removed": 1234})
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "notice"
+        assert msgs[0]["content"] == "Context recovery — full history retained."
+
+    def test_event_message_is_preferred(self, qapp):
+        text = "Context recovery — history summary; 41,200 fewer characters."
+        msgs = self._dispatch(qapp, {"type": "context_compacted", "message": text})
+        assert [m["content"] for m in msgs] == [text]

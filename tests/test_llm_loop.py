@@ -366,6 +366,58 @@ class TestToolLoop:
         assert usage["completion_tokens"] == 50
         assert usage["total_tokens"] == 350
 
+    def test_intermediate_events_carry_running_turn_usage(self, stub, client, tmp_path):
+        """tool_request/question_request report usage so the UI can tick live.
+
+        The count must not wait for final_response: the value on the first
+        round's tool_request is that round's running total, and the second
+        round's is the accumulated total -- matching the final_response total.
+        """
+        f = tmp_path / "a.txt"
+        f.write_text("x")
+        stub.queue(
+            completion(usage=(100, 20),
+                       tool_calls=[tool_call("tc1", "read_file", {"path": str(f)})]),
+            completion(usage=(50, 10),
+                       tool_calls=[tool_call("tc2", "read_file", {"path": str(f)})]),
+            completion(content="done", usage=(200, 30)),
+        )
+        events = collect_auto(client.chat(
+            [{"role": "user", "content": "go"}], tool_confirmation="all"))
+
+        requests = [e for e in events if e["type"] == "tool_request"]
+        assert len(requests) == 2
+        # Round 1: just that round. Round 2: 100+50 / 20+10 accumulated.
+        assert (requests[0]["usage"]["prompt_tokens"],
+                requests[0]["usage"]["completion_tokens"]) == (100, 20)
+        assert (requests[1]["usage"]["prompt_tokens"],
+                requests[1]["usage"]["completion_tokens"]) == (150, 30)
+        # final_response still reports the whole turn (350/60).
+        final = events[-1]
+        assert final["type"] == "final_response"
+        assert final["usage"]["total_tokens"] == 410
+
+    def test_question_request_carries_usage(self, stub, client):
+        """The ask_user_question round has no tool_request, so it carries usage itself."""
+        stub.queue(
+            completion(usage=(70, 7), tool_calls=[
+                tool_call("q1", "ask_user_question", {"questions": [
+                    {"header": "H", "question": "Q?", "options": [
+                        {"label": "A", "description": "a"}]}]})]),
+            completion(content="done", usage=(30, 3)),
+        )
+        gen = client.chat([{"role": "user", "content": "go"}], tool_confirmation="all")
+        events = []
+        for ev in gen:
+            events.append(ev)
+            if ev["type"] == "question_request":
+                gen.send({"answered": True, "answers": ["A"]})
+            if ev["type"] == "final_response":
+                break
+        q = next(e for e in events if e["type"] == "question_request")
+        assert q["usage"]["prompt_tokens"] == 70
+        assert q["usage"]["completion_tokens"] == 7
+
     def test_malformed_arguments_fall_back_to_empty(self, stub, client):
         stub.queue(
             completion(tool_calls=[tool_call("tc1", "read_file", "{not json!")]),

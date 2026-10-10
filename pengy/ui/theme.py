@@ -31,6 +31,18 @@ BASE_THEMES: dict[str, dict[str, str]] = {
         "reasoning_bg": "#fff9f0",
         "reasoning_border": "#e0caa0",
         "reasoning_fg": "#8b6914",
+        # System notices (context recovery, etc.). A fixed "info" surface, not an
+        # accent tint -- it must read the same on every accent, and it matches
+        # the web UI's Bootstrap alert-info. Base themes only; no accent variant
+        # overrides these, so they survive get_theme()'s surface merge.
+        "notice_bg": "#cff4fc",
+        "notice_border": "#b6effb",
+        "notice_fg": "#055160",
+        # Failed-turn card (Bootstrap alert-danger colours). Base themes only,
+        # for the same reason as notice_*.
+        "error_bg": "#f8d7da",
+        "error_border": "#f1aeb5",
+        "error_fg": "#58151c",
         "user_label": "#0b3d91",
         "assistant_label": "#0f6b3f",
         "pygments_style": "friendly",
@@ -56,6 +68,15 @@ BASE_THEMES: dict[str, dict[str, str]] = {
         "reasoning_bg": "#1e1608",
         "reasoning_border": "#4a3812",
         "reasoning_fg": "#d4a835",
+        # See the light theme: a fixed info surface matching the web's
+        # alert-info (Bootstrap's dark-mode alert-info colours).
+        "notice_bg": "#032830",
+        "notice_border": "#055160",
+        "notice_fg": "#6edff6",
+        # See the light theme.
+        "error_bg": "#2c0b0e",
+        "error_border": "#58151c",
+        "error_fg": "#ea868f",
         "user_label": "#89b4fa",
         "assistant_label": "#a6e3a1",
         "pygments_style": "monokai",

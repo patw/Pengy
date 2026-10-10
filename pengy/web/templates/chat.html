@@ -971,6 +971,9 @@ function handleEvent(data) {
 
     case 'tool_request':
       hideThinking();
+      // Intermediate rounds carry the running turn usage: advance the badge now
+      // instead of waiting for final_response.
+      if (data.cumulative_usage) updateCumulativeTokens(data.cumulative_usage);
       appendToolRequest(data);
       if (!data.auto_approved) {
         pendingToolCallId = data.tool_call_id;
@@ -985,6 +988,7 @@ function handleEvent(data) {
 
     case 'question_request':
       hideThinking();
+      if (data.cumulative_usage) updateCumulativeTokens(data.cumulative_usage);
       appendToolRequest({...data, auto_approved: false});
       showQuestionModal(data);
       break;

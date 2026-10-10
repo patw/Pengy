@@ -489,6 +489,23 @@ class WebWorker:
             return None
         return self._sudo_result
 
+    def _live_usage(self, response: dict) -> dict:
+        """Preview the chat's cumulative usage including this in-flight turn.
+
+        Intermediate events carry the turn's running usage; adding it to the
+        persisted total lets the navbar badge advance after every model round
+        instead of only at ``final_response``. The persisted total is not written
+        here, so a failed turn leaves no trace and the authoritative value is
+        still produced by ``add_usage`` on the final response.
+        """
+        usage = response.get("usage") or {}
+        base = self._chat.get("usage") if isinstance(self._chat, dict) else None
+        base = base if isinstance(base, dict) else {}
+        return {
+            key: base.get(key, 0) + usage.get(key, 0)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        }
+
     def _run(self):
         config = self._config
         chat = self._chat
@@ -575,6 +592,7 @@ class WebWorker:
                         "tool_call_id": tool_call_id,
                         "safe_id": _safe_id(tool_call_id),
                         "auto_approved": auto_approved,
+                        "cumulative_usage": self._live_usage(response),
                     })
 
                     if not skip_confirm:
@@ -603,6 +621,7 @@ class WebWorker:
                         "questions": questions,
                         "tool_call_id": tool_call_id,
                         "safe_id": _safe_id(tool_call_id),
+                        "cumulative_usage": self._live_usage(response),
                     })
                     self._confirm_event.clear()
                     # Block until the user answers or cancels -- no timeout,

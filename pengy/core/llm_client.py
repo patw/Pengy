@@ -862,6 +862,11 @@ class LLMClient:
                             "args": tool_args,
                             "tool_call_id": tool_call.id,
                             "questions": questions,
+                            # Running turn usage so the UI can tick the token
+                            # count before the turn ends (see final_response).
+                            # Copied: the accumulator is mutated in place on the
+                            # next round, so a retained reference would drift.
+                            "usage": dict(accumulated_usage),
                         }
                         if response and response.get("answered"):
                             answers = response.get("answers", [])
@@ -901,7 +906,8 @@ class LLMClient:
 
                     if skip_confirm:
                         yield {"type": "tool_request", "name": tool_name,
-                               "args": tool_args, "tool_call_id": tool_call.id}
+                               "args": tool_args, "tool_call_id": tool_call.id,
+                               "usage": dict(accumulated_usage)}
                         result = _run_tool(tool_name, tool_args, tool_context)
                         current_messages.append({
                             "role": "tool",
@@ -913,7 +919,8 @@ class LLMClient:
                                "content": result, "declined": False}
                     else:
                         confirm = yield {"type": "tool_request", "name": tool_name,
-                                         "args": tool_args, "tool_call_id": tool_call.id}
+                                         "args": tool_args, "tool_call_id": tool_call.id,
+                                         "usage": dict(accumulated_usage)}
                         if confirm and confirm.get("confirmed"):
                             result = _run_tool(tool_name, tool_args, tool_context)
                             current_messages.append({

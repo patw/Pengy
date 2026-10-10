@@ -1336,6 +1336,60 @@ class TestMidTurnAssistantText:
         assert not [e for e in events if e["type"] == "assistant_message"]
 
 
+class TestLiveTokenUpdates:
+    """Intermediate events preview the cumulative total so the badge ticks mid-turn."""
+
+    def _run(self, monkeypatch, turn_usage):
+        from pengy.core.chat_manager import create_chat, get_chat
+        from pengy.web import app as app_mod
+
+        chat = create_chat()
+        chat["messages"].append({"role": "user", "content": "go"})
+        # A prior turn's total the preview must build on, not overwrite.
+        chat["usage"] = {"prompt_tokens": 1000, "completion_tokens": 500,
+                         "total_tokens": 1500}
+        app_mod.save_chat(chat)
+
+        events = [
+            {"type": "assistant_tool_calls", "message": _TOOL_CALL_EVENTS[0]["message"]},
+            {**_TOOL_CALL_EVENTS[1], "usage": turn_usage},
+            _TOOL_CALL_EVENTS[2],
+            {"type": "final_response", "content": "done", "message": None,
+             "usage": turn_usage},
+        ]
+
+        class _LLM(_FakeLLM):
+            def __init__(self, **kwargs):
+                super().__init__(events)
+
+        monkeypatch.setattr(app_mod, "LLMClient", _LLM)
+        worker = WebWorker(chat, {"model": "gpt-4o", "tool_confirmation": "all"})
+        worker._run()
+        return worker._events, get_chat(chat["id"])
+
+    def test_tool_request_previews_cumulative_usage(self, tmp_dirs, monkeypatch):
+        events, saved = self._run(
+            monkeypatch,
+            {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+        req = next(e for e in events if e["type"] == "tool_request")
+        assert req["cumulative_usage"] == {
+            "prompt_tokens": 1010, "completion_tokens": 505, "total_tokens": 1515,
+        }
+        # The persisted total is written once, by add_usage on the final response
+        # -- the mid-turn preview must not double it.
+        assert saved["usage"]["total_tokens"] == 1515
+
+    def test_final_response_agrees_with_the_preview(self, tmp_dirs, monkeypatch):
+        events, _ = self._run(
+            monkeypatch,
+            {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+        req = next(e for e in events if e["type"] == "tool_request")
+        final = next(e for e in events if e["type"] == "final_response")
+        assert final["cumulative_usage"] == req["cumulative_usage"]
+
+
 class TestAskUserQuestionFlow:
     """The web UI must surface question_request and route answers back."""
 
