@@ -1472,11 +1472,16 @@ class PengyCLI:
 
                 elif rtype == "question_request":
                     expecting_api_call = False
-                    answers = self._handle_question(response)
-                    if answers is not None:
-                        send_value = {"answered": True, "tool_call_id": response["tool_call_id"], "answers": answers}
+                    if not sys.stdin.isatty():
+                        # Headless (piped/scripted) run: nobody can answer, so
+                        # tell the model to decide rather than "cancelled".
+                        send_value = {"unavailable": True}
                     else:
-                        send_value = None
+                        answers = self._handle_question(response)
+                        if answers is not None:
+                            send_value = {"answered": True, "tool_call_id": response["tool_call_id"], "answers": answers}
+                        else:
+                            send_value = None
 
                 elif rtype == "question_result":
                     expecting_api_call = True

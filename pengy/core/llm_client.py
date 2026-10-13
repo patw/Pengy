@@ -11,6 +11,7 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 
 from pengy.core import tools as _tools_mod
 from pengy.core.context_recovery import Recovery, SUMMARY_PROMPT
+from pengy.core.tool_args import parse_raw_arguments
 
 _REASONING_MESSAGE_FIELDS = (
     "reasoning_content",
@@ -350,6 +351,16 @@ def _run_tool(name: str, args: dict, context=None) -> str:
         return f"Tool error: {exc[0]}"
     return result[0]
 
+
+
+# Sent back for ask_user_question when the frontend has no user to ask
+# (CLI with no TTY): unlike a cancel, the model should carry on.  Identical in
+# the Rust and C++ editions.
+NO_USER_ANSWER = (
+    "No user is available to answer (non-interactive run). If what you found makes one "
+    "option clearly the most reasonable, take it and state that assumption in your reply. "
+    "If it would be a pure guess, leave that part undone and say what you need."
+)
 
 
 def _format_question_answers(questions: list[dict], answers: list[str]) -> str:
@@ -847,15 +858,30 @@ class LLMClient:
 
                 for tool_call in assistant_msg.tool_calls:
                     tool_name = tool_call.function.name
-                    try:
-                        tool_args = json.loads(tool_call.function.arguments)
-                    except json.JSONDecodeError:
-                        tool_args = {}
+                    # Malformed JSON is kept (not replaced by {}) so the tool
+                    # layer can tell the model its call didn't parse.
+                    tool_args = parse_raw_arguments(tool_call.function.arguments)
 
                     # ask_user_question is a special harness-level tool — it always
                     # pauses for user input regardless of tool_confirmation mode.
                     if tool_name == "ask_user_question":
-                        questions = tool_args.get("questions", [])
+                        tool_args, arg_error = _tools_mod.validate_question_arguments(tool_args)
+                        if arg_error:
+                            current_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": arg_error,
+                            })
+                            yield {
+                                "type": "tool_result",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_name,
+                                "args": tool_args,
+                                "content": arg_error,
+                                "declined": False,
+                            }
+                            continue
+                        questions = tool_args["questions"]
                         response = yield {
                             "type": "question_request",
                             "name": tool_name,
@@ -883,17 +909,21 @@ class LLMClient:
                                 "content": result_text,
                             }
                         else:
+                            # A headless run (no one to ask) is not a refusal:
+                            # tell the model to decide and say what it assumed.
+                            unanswered = (NO_USER_ANSWER if response and response.get("unavailable")
+                                          else "User cancelled the question.")
                             current_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
-                                "content": "User cancelled the question.",
+                                "content": unanswered,
                             })
                             yield {
                                 "type": "tool_result",
                                 "tool_call_id": tool_call.id,
                                 "name": tool_name,
                                 "args": tool_args,
-                                "content": "User cancelled the question.",
+                                "content": unanswered,
                                 "declined": True,
                             }
                         continue

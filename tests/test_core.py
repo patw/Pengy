@@ -1028,7 +1028,7 @@ class TestTools:
                 {"kind": "patch", "old": "hello", "new": "goodbye"},
             ]}],
         })
-        assert "unknown kind" in result
+        assert "must be one of replace, insert_after, delete" in result
         assert text.read_text() == "hello"
 
     def test_directory_tree(self):
@@ -1475,7 +1475,7 @@ class TestTodowrite:
             {"content": "Task A", "status": "done"},
         ]
         result = execute_tool("todowrite", {"todos": todos})
-        assert "invalid status" in result
+        assert "todos[0].status: must be one of pending, in_progress, completed" in result
 
     def test_rejects_empty_content(self):
         from pengy.core.tools import execute_tool
@@ -1828,9 +1828,10 @@ class TestPlatformTools:
         fns = self._by_name(win)
         assert fns["run_bash"]["parameters"]["required"] == ["command", "host"]
         assert "remote" in fns["run_bash"]["description"]
-        for name in ("download_file", "fetch_url", "glob"):
-            assert "run_bash" not in fns[name]["description"]
-            assert "run_powershell" in fns[name]["description"]
+        # No other schema may send the model to run_bash for local work.
+        for name, fn in fns.items():
+            if name != "run_bash":
+                assert "run_bash" not in fn["description"] or name == "run_powershell", name
         # Adapting must not mutate the shared base schemas.
         assert repr(tools._BASE_TOOLS) == base_snapshot
 

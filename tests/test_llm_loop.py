@@ -418,7 +418,51 @@ class TestToolLoop:
         assert q["usage"]["prompt_tokens"] == 70
         assert q["usage"]["completion_tokens"] == 7
 
-    def test_malformed_arguments_fall_back_to_empty(self, stub, client):
+    def test_unanswerable_question_tells_model_to_decide(self, stub, client):
+        """A headless frontend sends {"unavailable": True}: the model is told to
+        choose and state its assumption, not that the user cancelled."""
+        from pengy.core.llm_client import NO_USER_ANSWER
+        stub.queue(
+            completion(tool_calls=[
+                tool_call("q1", "ask_user_question", {"questions": [
+                    {"header": "H", "question": "Q?", "options": [
+                        {"label": "A", "description": "a"}]}]})]),
+            completion(content="done"),
+        )
+        gen = client.chat([{"role": "user", "content": "go"}], tool_confirmation="all")
+        ev = next(gen)
+        while ev["type"] != "question_request":
+            ev = next(gen)
+        result = gen.send({"unavailable": True})
+        assert result["type"] == "tool_result"
+        assert result["content"] == NO_USER_ANSWER
+        rest = list(gen)
+        assert rest[-1]["type"] == "final_response"
+
+    @pytest.mark.parametrize("args", [
+        # questions as a string holding broken JSON (seen from a local model)
+        {"questions": '[{"header": "H", "question": "Q?", "options": [{"label": "A"]}]'},
+        {"questions": []},
+        "{not json!",
+    ])
+    def test_malformed_question_is_reported_not_asked(self, stub, client, args):
+        """ask_user_question bypasses execute_tool, so it is schema-checked
+        separately: a malformed call goes back to the model, never to the user."""
+        stub.queue(
+            completion(tool_calls=[tool_call("q1", "ask_user_question", args)]),
+            completion(content="done"),
+        )
+        events = collect_auto(client.chat(
+            [{"role": "user", "content": "go"}], tool_confirmation="all"))
+        assert not any(e["type"] == "question_request" for e in events)
+        result = next(e for e in events if e["type"] == "tool_result")
+        assert result["content"].startswith("Error: ")
+        assert "ask_user_question" in result["content"]
+        assert events[-1]["type"] == "final_response"
+
+    def test_malformed_arguments_are_reported_not_run(self, stub, client):
+        # Malformed JSON used to become {} and the tool ran with no arguments;
+        # now the model is told its call didn't parse, and nothing runs.
         stub.queue(
             completion(tool_calls=[tool_call("tc1", "read_file", "{not json!")]),
             completion(content="done"),
@@ -426,12 +470,25 @@ class TestToolLoop:
         events = collect_auto(client.chat(
             [{"role": "user", "content": "go"}], tool_confirmation="all"))
         req = next(e for e in events if e["type"] == "tool_request")
-        assert req["args"] == {}
+        assert req["args"] == {"_raw_arguments": "{not json!"}
         result = next(e for e in events if e["type"] == "tool_result")
-        # read_file with no path returns an error string, not an exception
         assert result["declined"] is False
-        assert isinstance(result["content"], str)
+        assert "were not valid JSON" in result["content"]
+        assert "{not json!" in result["content"]
         assert next(e for e in events if e["type"] == "final_response")
+
+    def test_double_encoded_arguments_are_decoded(self, stub, client, tmp_path):
+        target = tmp_path / "f.txt"
+        target.write_text("hello")
+        inner = json.dumps({"path": str(target)})
+        stub.queue(
+            completion(tool_calls=[tool_call("tc1", "read_file", json.dumps(inner))]),
+            completion(content="done"),
+        )
+        events = collect_auto(client.chat(
+            [{"role": "user", "content": "go"}], tool_confirmation="all"))
+        result = next(e for e in events if e["type"] == "tool_result")
+        assert "hello" in result["content"]
 
     def test_api_error_raises_and_resets_client(self, stub, client):
         # Empty queue → stub returns HTTP 500; client must raise, not hang

@@ -21,6 +21,7 @@ from pathlib import Path
 from ddgs import DDGS
 
 from pengy.core.image_utils import preprocess as _preprocess_image
+from pengy.core.tool_args import normalize_arguments
 
 _user_agent = "PengyAgent/1.0"
 
@@ -417,21 +418,21 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a text file. Returns the whole file by default; very large files are truncated to the output limit, with a header telling you how to continue with offset/limit. Pass offset and limit to read one line range instead, which is how to page through a file too large to return at once. Use read_image for images — this tool cannot decode binary data.",
+            "description": "Read a text file. Long files are truncated with a header saying how to continue using offset/limit. Use read_image for images.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The file path to read",
+                        "description": "File path",
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "1-based line number to start reading from. Omit to start at the beginning.",
+                        "description": "First line to read (1-based)",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of lines to return, counting from offset. Omit to read to the end of the file.",
+                        "description": "Maximum number of lines",
                     },
                 },
                 "required": ["path"],
@@ -442,13 +443,13 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_image",
-            "description": "Look at an image file — a screenshot, photo, diagram, or a chart/render produced by an earlier command. The image is added to the conversation so you can see it directly and describe or judge what it shows; use this instead of read_file, which cannot decode image data. Supports PNG, JPEG, GIF, WebP, BMP and TIFF; large images are downscaled automatically.",
+            "description": "Look at an image file (PNG, JPEG, GIF, WebP, BMP, TIFF); it is attached so you can see it.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The path of the image file to look at",
+                        "description": "Image file path",
                     },
                 },
                 "required": ["path"],
@@ -459,17 +460,17 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write content to a file, replacing it entirely if it already exists. Parent directories are created automatically, so there is no need to mkdir first. To change part of an existing file use replace_in_file instead of rewriting the whole thing.",
+            "description": "Create or overwrite a file. Parent directories are created.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The file path to write to",
+                        "description": "File path",
                     },
                     "content": {
                         "type": "string",
-                        "description": "The content to write to the file",
+                        "description": "Full file content",
                     },
                 },
                 "required": ["path", "content"],
@@ -480,21 +481,25 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "replace_in_file",
-            "description": "Perform an exact string replacement in an existing file. The old_str must match exactly one occurrence in the file — if zero or multiple matches are found, the edit is rejected with a clear error. This is the preferred way to make targeted edits instead of rewriting an entire file.",
+            "description": "Replace exact text in a file. old_str must match exactly one place (include surrounding lines to make it unique) unless replace_all=true.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The file path to edit",
+                        "description": "File path",
                     },
                     "old_str": {
                         "type": "string",
-                        "description": "The exact text to find and replace. Must match exactly one location in the file, including whitespace and indentation.",
+                        "description": "Exact text to replace, including whitespace",
                     },
                     "new_str": {
                         "type": "string",
-                        "description": "The text to replace it with. Use an empty string to delete.",
+                        "description": "Replacement text (empty to delete)",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every occurrence",
                     },
                 },
                 "required": ["path", "old_str", "new_str"],
@@ -505,28 +510,28 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "apply_changes",
-            "description": "Apply a bounded, transactional set of exact-text edits across files. Every operation is validated in memory before anything is written — if validation fails, nothing is changed. Use dry_run=true to preview the unified diff before writing. Limits: at most 20 files, 100 operations total, and ~1 MB of content.",
+            "description": "Apply several exact-text edits across existing files, all or nothing. dry_run=true returns the unified diff without writing.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "changes": {
                         "type": "array",
-                        "description": "Files and exact-text operations to apply.",
+                        "description": "Per file: path and operations. An operation is replace (old, new), delete (old) or insert_after (anchor, text); old/anchor must match expected_matches times (default 1)",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "path": {"type": "string", "description": "File path to edit"},
+                                "path": {"type": "string", "description": "File path"},
                                 "operations": {
                                     "type": "array",
                                     "items": {
                                         "type": "object",
                                         "properties": {
                                             "kind": {"type": "string", "enum": ["replace", "insert_after", "delete"]},
-                                            "old": {"type": "string", "description": "Exact text to match for replace/delete"},
-                                            "anchor": {"type": "string", "description": "Exact text after which to insert"},
+                                            "old": {"type": "string", "description": "Exact text for replace/delete"},
+                                            "anchor": {"type": "string", "description": "Exact text to insert after"},
                                             "new": {"type": "string", "description": "Replacement text"},
                                             "text": {"type": "string", "description": "Text to insert"},
-                                            "expected_matches": {"type": "integer", "description": "Expected exact match count; defaults to 1"},
+                                            "expected_matches": {"type": "integer", "description": "Required match count (default 1)"},
                                         },
                                         "required": ["kind"],
                                     },
@@ -535,10 +540,10 @@ _BASE_TOOLS = [
                             "required": ["path", "operations"],
                         },
                     },
-                    "dry_run": {"type": "boolean", "description": "Validate and return a diff without writing files (default: false)"},
+                    "dry_run": {"type": "boolean", "description": "Preview only; nothing is written"},
                     "postconditions": {
                         "type": "array",
-                        "description": "Optional content checks evaluated before writing.",
+                        "description": "Optional {path, contains, does_not_contain} checks on the edited text; a failed check cancels every edit",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -558,25 +563,25 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run a command with bash. The command is non-interactive: stdin is closed, so anything that prompts or waits for input (a password prompt, an editor, `read`) will fail rather than wait — pass non-interactive flags instead. Set cwd to run the command in a specific working directory (defaults to the current directory). To run something as root, include an explicit `sudo ...` in the command AND set elevated=true; Pengy then prompts for the user's password separately. elevated=true does NOT elevate on its own — a command with elevated=true but no `sudo` is rejected, so every elevation stays an explicit, auditable sudo call. Do not set elevated merely because the text or arguments mention the word sudo. To run on a remote machine, set host instead of writing `ssh host ...` yourself; only commands run via host can use sudo with a password prompt on that machine. Commands are killed once the configured tool timeout elapses.",
+            "description": "Run a bash command and return its output. Non-interactive: stdin is closed. For root, write sudo in the command and set elevated=true. To run on another machine set host (don't call ssh yourself). Killed after the tool timeout.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The bash command to execute",
+                        "description": "Bash command",
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Optional working directory to run the command in",
+                        "description": "Working directory",
                     },
                     "host": {
                         "type": "string",
-                        "description": "Run the command on this remote host over ssh instead of locally. Use the ssh destination the user uses (an ~/.ssh/config alias, host, or user@host); key-based login must already work. cwd, if given, is a path on the remote host. For root on the remote host, include `sudo ...` in the command and set elevated=true exactly as for a local command; Pengy prompts for that host's sudo password. Do NOT wrap the command in ssh yourself.",
+                        "description": "ssh destination (key login must already work)",
                     },
                     "elevated": {
                         "type": "boolean",
-                        "description": "Set true only when this command intentionally invokes sudo. Omit or set false for ordinary commands, including commands that merely print, search, or otherwise mention the word sudo.",
+                        "description": "true when the command uses sudo",
                     },
                 },
                 "required": ["command"],
@@ -587,17 +592,17 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web using DuckDuckGo",
+            "description": "Search the web; returns titles, URLs and snippets.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query",
+                        "description": "Search query",
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "Maximum number of results to return (default: 5)",
+                        "description": "Number of results (default 5)",
                     },
                 },
                 "required": ["query"],
@@ -608,25 +613,25 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "download_file",
-            "description": "Download a file from a URL to disk, streaming to the target directory and returning the saved path and byte size. Existing files of the same name are overwritten. Set max_size_mb to opt into large downloads (0 = no limit). For auth headers, resume, mirrors, or non-HTTP sources, use run_bash with curl or wget.",
+            "description": "Download a URL to a file and return the saved path.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "The URL of the file to download",
+                        "description": "URL to download",
                     },
                     "filename": {
                         "type": "string",
-                        "description": "Optional filename to save as; defaults to the name from the URL",
+                        "description": "File name (default: from the URL)",
                     },
                     "dir": {
                         "type": "string",
-                        "description": "Directory to save into (default: ~/Downloads). Created if missing.",
+                        "description": "Directory to save into (default ~/Downloads)",
                     },
                     "max_size_mb": {
                         "type": "integer",
-                        "description": "Maximum download size in MB. Defaults to the configured download limit; 0 = no limit.",
+                        "description": "Size limit in MB (default: the configured limit; 0 = none)",
                     },
                 },
                 "required": ["url"],
@@ -637,17 +642,17 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "fetch_url",
-            "description": "Fetch a URL and return its text content. Works for documentation and web pages (HTML is stripped to plain text) and for JSON or plain-text endpoints, including local ones such as http://127.0.0.1:8080/api/status. Returns the body only — use run_bash with curl if you need status codes or response headers. Large responses are truncated to the configured tool output limit; pass max_chars to return more (0 = no limit).",
+            "description": "Fetch a URL and return the body as text (HTML is converted to text).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "The URL to fetch",
+                        "description": "URL to fetch",
                     },
                     "max_chars": {
                         "type": "integer",
-                        "description": "Maximum characters to return. Defaults to the configured tool output limit; 0 returns everything (up to the 2 MB response cap).",
+                        "description": "Maximum characters returned (0 = no limit)",
                     },
                 },
                 "required": ["url"],
@@ -658,17 +663,17 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "run_python",
-            "description": "Execute Python code in a fresh subprocess. Nothing persists between calls — variables, imports and state from an earlier call are gone, so each call must stand on its own. Only what you print() comes back; a bare expression returns nothing. Set cwd to run in a specific working directory. The process is killed once the configured tool timeout elapses.",
+            "description": "Run Python code in a fresh process; only printed output comes back. Killed after the tool timeout.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "The Python code to execute",
+                        "description": "Python source",
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Optional working directory to run the code in",
+                        "description": "Working directory",
                     },
                 },
                 "required": ["code"],
@@ -679,21 +684,21 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "directory_tree",
-            "description": "Show a visual tree of the directory structure, useful for understanding project layout quickly. Skips common noise directories like .git, node_modules, __pycache__ by default.",
+            "description": "Show a directory tree; use it to get oriented in an unfamiliar project. Skips .git, node_modules and similar.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The directory path to show the tree for",
+                        "description": "Directory",
                     },
                     "max_depth": {
                         "type": "integer",
-                        "description": "Maximum depth to recurse (default: 3)",
+                        "description": "Depth limit (default 3)",
                     },
                     "show_hidden": {
                         "type": "boolean",
-                        "description": "Whether to show hidden files/directories starting with '.' (default: false)",
+                        "description": "Include dot-files",
                     },
                 },
                 "required": ["path"],
@@ -704,14 +709,14 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_multiple_files",
-            "description": "Read multiple files at once, returning each with a clear header. Use this when you know you need to inspect several files to reduce round-trips.",
+            "description": "Read several text files in one call.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "List of file paths to read",
+                        "description": "File paths",
                     },
                 },
                 "required": ["paths"],
@@ -722,33 +727,37 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_content",
-            "description": "Search for text in files under a directory. Returns matching lines with file path, line number, and optional surrounding context. Useful for finding where symbols, strings, or patterns appear in a codebase. The pattern is matched literally by default — regex metacharacters are escaped automatically; set regex=true to interpret it as a regular expression. Skips binary files and common noise directories.",
+            "description": "Search file contents under a directory or in a file. Literal text unless regex=true. Skips binary files and .git, node_modules and similar.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "The text to search for. Matched literally by default — metacharacters like '.', '*', '(', '[' are escaped automatically. Set regex=true to interpret it as a regular expression instead.",
+                        "description": "Text (or regex) to find",
                     },
                     "regex": {
                         "type": "boolean",
-                        "description": "Treat pattern as a regular expression instead of a literal string (default: false)",
+                        "description": "Treat pattern as a regular expression",
                     },
                     "path": {
                         "type": "string",
-                        "description": "The directory or file to search in",
+                        "description": "Directory or file to search",
                     },
                     "file_glob": {
                         "type": "string",
-                        "description": "Optional glob to filter files, e.g. '*.py' or '*.{js,ts}'. Defaults to all text files.",
+                        "description": "Only files matching this glob, e.g. *.py or src/**/*.ts",
                     },
                     "context_lines": {
                         "type": "integer",
-                        "description": "Number of lines of context to show before and after each match (default: 0)",
+                        "description": "Lines of context around each match",
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "Maximum number of matches to return (default: 50)",
+                        "description": "Maximum matches (default 50)",
+                    },
+                    "ignore_case": {
+                        "type": "boolean",
+                        "description": "Case-insensitive match",
                     },
                 },
                 "required": ["pattern", "path"],
@@ -760,17 +769,17 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "Find files matching a glob pattern. Returns sorted file paths with sizes. Use ** for recursive search (e.g. 'src/**/*.py'). Noise directories are always skipped: .git, node_modules, __pycache__, .venv/venv, build, dist and target. Prefer this over run_bash('find ...') or run_bash('ls ...'). Results are capped at 200 paths.",
+            "description": "Find files by glob pattern; ** matches any depth. Skips hidden and build/vendor directories; at most 200 results.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "The glob pattern to match against file paths. Supports ** for recursive matching, * for any characters, ? for single character.",
+                        "description": "Glob, e.g. src/**/*.py",
                     },
                     "path": {
                         "type": "string",
-                        "description": "The directory to search in (default: current working directory)",
+                        "description": "Directory to search (default: current)",
                     },
                 },
                 "required": ["pattern"],
@@ -781,7 +790,7 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "todowrite",
-            "description": "Create and update a structured task list for tracking progress during complex multi-step operations. Send the COMPLETE list every time — do not send incremental updates. At most one task must be in_progress at any time — it is fine to have none. Mark tasks completed immediately after finishing them. Use imperative forms for content (e.g. 'Run tests', 'Add JWT middleware').",
+            "description": "Keep a task list for multi-step work. Send the whole list each time; at most one task in_progress.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -792,17 +801,17 @@ _BASE_TOOLS = [
                             "properties": {
                                 "content": {
                                     "type": "string",
-                                    "description": "Imperative task description, e.g. 'Run the tests'",
+                                    "description": "Task, imperative (e.g. 'Run the tests')",
                                 },
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"],
-                                    "description": "Current task status — at most one task should be in_progress",
+                                    "description": "pending, in_progress or completed",
                                 },
                             },
                             "required": ["content", "status"],
                         },
-                        "description": "The complete list of tasks with their current statuses",
+                        "description": "All tasks with their status",
                     },
                 },
                 "required": ["todos"],
@@ -813,7 +822,7 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "ask_user_question",
-            "description": "Ask the user one or more multiple-choice questions to clarify requirements, gather preferences, or resolve ambiguity. Use this when instructions are vague, multiple valid approaches exist, or you need a decision before proceeding. Each question includes a header, the question text, and a list of options with descriptions.",
+            "description": "Ask the user multiple-choice questions. Use it instead of guessing when the request is ambiguous, or when what you found contradicts what the user said.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -824,11 +833,11 @@ _BASE_TOOLS = [
                             "properties": {
                                 "header": {
                                     "type": "string",
-                                    "description": "Short category label for this question, e.g. 'Auth strategy'",
+                                    "description": "Short label, e.g. 'Auth'",
                                 },
                                 "question": {
                                     "type": "string",
-                                    "description": "The question to ask the user",
+                                    "description": "The question",
                                 },
                                 "options": {
                                     "type": "array",
@@ -837,21 +846,21 @@ _BASE_TOOLS = [
                                         "properties": {
                                             "label": {
                                                 "type": "string",
-                                                "description": "Short answer label shown to the user, e.g. 'JWT'",
+                                                "description": "Choice label",
                                             },
                                             "description": {
                                                 "type": "string",
-                                                "description": "One-line explanation of what this option means",
+                                                "description": "One-line explanation of the choice",
                                             },
                                         },
                                         "required": ["label", "description"],
                                     },
-                                    "description": "List of mutually exclusive options for the user to choose from",
+                                    "description": "The choices",
                                 },
                             },
                             "required": ["header", "question", "options"],
                         },
-                        "description": "One or more questions to ask the user. Multi-question forms let the user navigate between questions before submitting all answers at once.",
+                        "description": "Questions, each with a header, question text and options",
                     },
                 },
                 "required": ["questions"],
@@ -967,14 +976,6 @@ def _remote_only_run_bash(schema: dict) -> dict:
     }
 
 
-# Other schemas that point the model at run_bash for local work.
-_WINDOWS_DESCRIPTION_SWAPS = {
-    "download_file": ("use run_bash with curl or wget", "use run_powershell with curl.exe"),
-    "fetch_url": ("use run_bash with curl", "use run_powershell with curl.exe"),
-    "glob": ("run_bash('find ...') or run_bash('ls ...')", "run_powershell('Get-ChildItem ...')"),
-}
-
-
 def _platform_tools(base: list, windows: bool, powershell_label: str = "",
                     is_admin: bool = False) -> list:
     """Return the tool list the model sees on this platform."""
@@ -987,11 +988,6 @@ def _platform_tools(base: list, windows: bool, powershell_label: str = "",
             tools.append(_run_powershell_schema(powershell_label, is_admin))
             tools.append(_remote_only_run_bash(schema))
             continue
-        swap = _WINDOWS_DESCRIPTION_SWAPS.get(name)
-        if swap:
-            fn = schema["function"]
-            schema = {**schema, "function": {
-                **fn, "description": fn["description"].replace(*swap)}}
         tools.append(schema)
     return tools
 
@@ -1000,6 +996,20 @@ TOOLS = _platform_tools(
     _BASE_TOOLS, _IS_WINDOWS, _powershell_label(_POWERSHELL),
     _windows_is_admin() if _IS_WINDOWS else False,
 )
+_TOOL_PARAMETERS = {t["function"]["name"]: t["function"]["parameters"] for t in TOOLS}
+
+
+def validate_question_arguments(arguments) -> tuple[dict, str | None]:
+    """Schema-check ask_user_question, which the harness handles instead of
+    execute_tool, so a malformed call reaches the model as an error rather
+    than reaching the user as an empty or broken prompt."""
+    arguments, arg_error = normalize_arguments(
+        "ask_user_question", arguments, _TOOL_PARAMETERS["ask_user_question"])
+    if not arg_error and not arguments.get("questions"):
+        arg_error = ("Error: invalid arguments for ask_user_question; nothing was run.\n"
+                     "- questions: must contain at least one question")
+    return arguments, arg_error
+
 
 def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = None) -> str:
     """Execute a tool and return the result.
@@ -1008,6 +1018,11 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
     module-level context when not supplied (CLI/Web).
     """
     ctx = context or _default_context
+    if name == "ask_user_question":
+        return "ask_user_question must be handled by the harness — it should never reach execute_tool directly."
+    arguments, arg_error = normalize_arguments(name, arguments, _TOOL_PARAMETERS.get(name))
+    if arg_error:
+        return arg_error
     if name == "read_file":
         return _read_file(
             arguments["path"],
@@ -1019,7 +1034,8 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
     elif name == "write_file":
         return _write_file(arguments["path"], arguments["content"])
     elif name == "replace_in_file":
-        return _replace_in_file(arguments["path"], arguments["old_str"], arguments["new_str"])
+        return _replace_in_file(arguments["path"], arguments["old_str"], arguments["new_str"],
+                                arguments.get("replace_all", False))
     elif name == "apply_changes":
         return _apply_changes(
             arguments.get("changes", []),
@@ -1068,6 +1084,7 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
             arguments.get("context_lines", 0),
             arguments.get("max_results", 50),
             arguments.get("regex", False),
+            arguments.get("ignore_case", False),
         )
     elif name == "glob":
         return _glob(
@@ -1076,8 +1093,6 @@ def execute_tool(name: str, arguments: dict, context: "ToolContext | None" = Non
         )
     elif name == "todowrite":
         return _todowrite(arguments["todos"])
-    elif name == "ask_user_question":
-        return "ask_user_question must be handled by the harness — it should never reach execute_tool directly."
     else:
         return f"Unknown tool: {name}"
 
@@ -1185,12 +1200,122 @@ def _read_image(path: str, ctx: "ToolContext" = None) -> str:
         return f"Error reading image: {e}"
 
 
+class _StagedWrite:
+    """A file write staged to a temp file beside its target, then renamed over it.
+
+    Every edit tool writes through this so a failed write (disk full, quota,
+    signal) can never truncate or delete the file being edited: the target is
+    only ever replaced by an atomic rename of a complete, flushed temp file.
+    The rename keeps the target's permission bits (and owner, where allowed) and
+    follows symlinks so the link itself survives and its target is edited.
+    If the directory doesn't allow creating a temp file but the target itself
+    is writable, it falls back to a checked in-place write.  Keep identical in
+    the Rust (``StagedWrite``) and C++ (``StagedWrite``) editions.
+    """
+
+    def __init__(self, path, data: bytes):
+        self.path = path
+        self.target = Path(os.path.realpath(Path(path).expanduser()))
+        self.data = data
+        self.temp: Path | None = None
+        self.in_place = False
+
+    def stage(self) -> None:
+        if self.target.is_dir():
+            raise IsADirectoryError(f"{self.path} is a directory")
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            st = self.target.stat()
+        except FileNotFoundError:
+            st = None
+        # A rename only needs a writable directory; still refuse a target the
+        # user made read-only, as a plain open() for writing would.
+        if st is not None and not os.access(self.target, os.W_OK):
+            raise PermissionError(f"Permission denied: {self.path}")
+        self.temp = self.target.with_name(
+            f".{self.target.name}.pengy-tmp-{os.getpid()}-{threading.get_ident()}")
+        try:
+            # 0o666 lets the umask decide a new file's mode, like a plain open().
+            fd = os.open(self.temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+        except PermissionError:
+            self.temp = None
+            if st is not None and os.access(self.target, os.W_OK):
+                self.in_place = True
+                return
+            raise
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(self.data)
+                out.flush()
+                os.fsync(out.fileno())
+            if st is not None:
+                os.chmod(self.temp, st.st_mode & 0o7777)
+                try:
+                    os.chown(self.temp, st.st_uid, st.st_gid)
+                except (OSError, AttributeError):
+                    pass
+        except BaseException:
+            self.discard()
+            raise
+
+    def commit(self) -> None:
+        if self.in_place:
+            with open(self.target, "r+b") as out:
+                out.write(self.data)
+                out.truncate()
+                out.flush()
+                os.fsync(out.fileno())
+            return
+        os.replace(self.temp, self.target)
+        self.temp = None
+
+    def discard(self) -> None:
+        if self.temp is not None:
+            try:
+                self.temp.unlink()
+            except OSError:
+                pass
+            self.temp = None
+
+
+def _write_atomic(path, text: str) -> None:
+    """Stage and commit a single UTF-8 text write (see ``_StagedWrite``)."""
+    staged = _StagedWrite(path, text.encode("utf-8"))
+    staged.stage()
+    try:
+        staged.commit()
+    finally:
+        staged.discard()
+
+
+def _read_text_exact(path) -> str:
+    """Read a UTF-8 file without newline translation, so CRLF survives an edit."""
+    return Path(path).expanduser().read_bytes().decode("utf-8")
+
+
+def _match_newlines(content: str, old: str, new: str) -> tuple[str, str]:
+    """Adapt LF-typed *old*/*new* to a CRLF file.
+
+    Models type edits with LF even for CRLF files (read_file shows them as
+    LF), so an exact-text edit typed with ``\\n`` would never match.  When *old* has no
+    match as typed, has no CR of its own, and the file uses CRLF, retry with
+    CRLF line endings and write *new* the same way, so the file keeps its
+    line-ending style instead of being silently converted.
+    """
+    if old in content or "\n" not in old or "\r" in old or "\r\n" not in content:
+        return old, new
+    crlf_old = old.replace("\n", "\r\n")
+    if crlf_old not in content:
+        return old, new
+    if "\r" not in new:
+        new = new.replace("\n", "\r\n")
+    return crlf_old, new
+
+
 def _write_file(path: str, content: str) -> str:
     """Write content to file."""
     try:
-        p = Path(path).expanduser()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        _write_atomic(path, content)
         return f"Successfully wrote to {path}"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -1200,8 +1325,9 @@ def _write_file(path: str, content: str) -> str:
 # replace_in_file
 # ---------------------------------------------------------------------------
 
-def _replace_in_file(path: str, old_str: str, new_str: str) -> str:
-    """Replace an exact string in a file.  old_str must match exactly once."""
+def _replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = False) -> str:
+    """Replace an exact string in a file.  old_str must match exactly once,
+    unless *replace_all*, which replaces every occurrence."""
     try:
         p = Path(path).expanduser()
         if not p.exists():
@@ -1215,7 +1341,8 @@ def _replace_in_file(path: str, old_str: str, new_str: str) -> str:
                 "To insert text, include the surrounding lines that identify where to insert."
             )
 
-        content = p.read_text(encoding="utf-8")
+        content = _read_text_exact(p)
+        old_str, new_str = _match_newlines(content, old_str, new_str)
 
         count = content.count(old_str)
         if count == 0:
@@ -1224,6 +1351,9 @@ def _replace_in_file(path: str, old_str: str, new_str: str) -> str:
                 f"Tip: read the file first to get the exact text. "
                 f"Leading/trailing whitespace and indentation must match exactly."
             )
+        elif replace_all:
+            _write_atomic(p, content.replace(old_str, new_str))
+            return f"✅ Replaced {count} occurrence(s) in {path}."
         elif count > 1:
             # Find precise line numbers for each occurrence
             pos = 0
@@ -1237,13 +1367,13 @@ def _replace_in_file(path: str, old_str: str, new_str: str) -> str:
             return (
                 f"Error: old_str matches {count} locations in {path}.\n\n"
                 f"Matches found on lines: {found_lines}\n\n"
-                f"Make old_str longer or more specific so it matches exactly one location. "
-                f"Include more surrounding context to disambiguate."
+                f"Make old_str longer or more specific, or set replace_all=true to "
+                f"replace every occurrence."
             )
 
         # Exactly one match — perform the replacement
         new_content = content.replace(old_str, new_str, 1)
-        p.write_text(new_content, encoding="utf-8")
+        _write_atomic(p, new_content)
 
         # Report what we did
         old_line = content[:content.index(old_str)].count("\n") + 1
@@ -1253,7 +1383,7 @@ def _replace_in_file(path: str, old_str: str, new_str: str) -> str:
         # Show a snippet of the change
         def numbered(text: str, start: int) -> str:
             return "\n".join(
-                f"{start + i:4d} │ {line}"
+                f"{start + i:4d} │ {line.rstrip(chr(13))}"
                 for i, line in enumerate(text.split("\n"))
             )
 
@@ -1311,7 +1441,7 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
                 raise ValueError("file not found")
             if not path.is_file():
                 raise ValueError("not a file")
-            original = path.read_text(encoding="utf-8")
+            original = _read_text_exact(path)
             current = original
             operations = change.get("operations")
             if not isinstance(operations, list) or not operations:
@@ -1335,6 +1465,7 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
                         raise ValueError(f"operation {op_index}: new must be a string")
                     if len(old) > _MAX_CHANGE_BLOCK or len(new) > _MAX_CHANGE_BLOCK:
                         raise ValueError(f"operation {op_index}: text block exceeds {_MAX_CHANGE_BLOCK} bytes")
+                    old, new = _match_newlines(current, old, new)
                     count = current.count(old)
                     if count != expected:
                         raise ValueError(f"operation {op_index}: old matches {count} locations; expected {expected}")
@@ -1345,6 +1476,7 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
                         raise ValueError(f"operation {op_index}: old must be non-empty")
                     if len(old) > _MAX_CHANGE_BLOCK:
                         raise ValueError(f"operation {op_index}: text block exceeds {_MAX_CHANGE_BLOCK} bytes")
+                    old, _ = _match_newlines(current, old, "")
                     count = current.count(old)
                     if count != expected:
                         raise ValueError(f"operation {op_index}: old matches {count} locations; expected {expected}")
@@ -1357,6 +1489,7 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
                         raise ValueError(f"operation {op_index}: text must be a string")
                     if len(anchor) > _MAX_CHANGE_BLOCK or len(text) > _MAX_CHANGE_BLOCK:
                         raise ValueError(f"operation {op_index}: text block exceeds {_MAX_CHANGE_BLOCK} bytes")
+                    anchor, text = _match_newlines(current, anchor, text)
                     count = current.count(anchor)
                     if count != expected:
                         raise ValueError(f"operation {op_index}: anchor matches {count} locations; expected {expected}")
@@ -1400,28 +1533,37 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
     diff_parts = []
     for path, (original, current) in prepared.items():
         if original != current:
-            diff_parts.extend(difflib.unified_diff(
-                original.splitlines(keepends=True), current.splitlines(keepends=True),
-                fromfile=str(path), tofile=str(path),
-            ))
+            # A last line without "\n" would otherwise glue onto the next diff
+            # line ("-a+b"); terminate every line, like the Rust/C++ editions.
+            diff_parts.extend(
+                line if line.endswith("\n") else line + "\n"
+                for line in difflib.unified_diff(
+                    original.splitlines(keepends=True), current.splitlines(keepends=True),
+                    fromfile=str(path), tofile=str(path),
+                )
+            )
     diff = "".join(diff_parts)
     if dry_run:
         return f"Dry run: no changes applied.\nFiles: {len(prepared)}\n\n{diff}".rstrip()
 
+    # Stage every file before replacing any, so a write failure (disk full,
+    # permissions) leaves all targets untouched; only the renames remain after.
+    staged = [_StagedWrite(path, current.encode("utf-8"))
+              for path, (original, current) in prepared.items() if original != current]
     try:
-        for path, (_, current) in prepared.items():
-            temp = path.with_name(f".{path.name}.pengy-tmp-{os.getpid()}-{threading.get_ident()}")
-            temp.write_text(current, encoding="utf-8")
-            os.replace(temp, path)
+        for item in staged:
+            item.stage()
     except OSError as exc:
-        # Best effort cleanup; validation still guarantees no writes before this point.
-        for path in prepared:
-            temp = path.with_name(f".{path.name}.pengy-tmp-{os.getpid()}-{threading.get_ident()}")
-            try:
-                temp.unlink()
-            except OSError:
-                pass
-        return f"Error: write failed after validation; changes may be partially applied: {exc}"
+        for item in staged:
+            item.discard()
+        return f"Error: write failed; no changes applied: {exc}"
+    try:
+        for item in staged:
+            item.commit()
+    except OSError as exc:
+        for item in staged:
+            item.discard()
+        return f"Error: rename failed after validation; changes may be partially applied: {exc}"
 
     return f"Applied changes to {len(prepared)} file(s).\n\n{diff}".rstrip()
 
@@ -2108,9 +2250,12 @@ def _download_file(url: str, filename: str | None = None,
     The size cap defaults to the configured limit and can be overridden per
     call; 0 or negative means no limit.  A stall timeout (rather than the tool
     timeout) lets large transfers finish, and the partial file is removed on
-    any failure.
+    any failure.  The body streams into a hidden temp file that is renamed
+    over *dest* only once complete, so a failed download never touches an
+    existing file of the same name.
     """
     dest = None
+    temp = None
     try:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in ("http", "https"):
@@ -2141,7 +2286,8 @@ def _download_file(url: str, filename: str | None = None,
         total = 0
         exceeded = False
         with urllib.request.urlopen(req, timeout=_DOWNLOAD_STALL_TIMEOUT) as resp:
-            with open(dest, "wb") as out:
+            temp = dest.with_name(f".{dest.name}.pengy-dl-{os.getpid()}-{threading.get_ident()}")
+            with open(temp, "wb") as out:
                 while True:
                     chunk = resp.read(64 * 1024)
                     if not chunk:
@@ -2153,11 +2299,12 @@ def _download_file(url: str, filename: str | None = None,
                     out.write(chunk)
 
         if exceeded:
-            _safe_unlink(dest)
+            _safe_unlink(temp)
             return f"Error: Download exceeds maximum size of {_format_size(limit_bytes)}."
+        os.replace(temp, dest)
         return f"Downloaded to {dest} ({total:,} bytes)"
     except Exception as e:
-        _safe_unlink(dest)
+        _safe_unlink(temp)
         return f"Error downloading file: {e}"
 
 
@@ -2464,54 +2611,74 @@ def _read_multiple_files(paths: list[str]) -> str:
 # search_content
 # ---------------------------------------------------------------------------
 
-# Common text file extensions to limit searches
-_TEXT_EXTENSIONS = {
-    ".py", ".pyi", ".pyx", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx",
-    ".rs", ".go", ".java", ".kt", ".scala", ".swift",
-    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
-    ".rb", ".rake", ".php", ".pl", ".pm",
-    ".sh", ".bash", ".zsh", ".fish",
-    ".html", ".htm", ".css", ".scss", ".sass", ".less",
-    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
-    ".xml", ".svg", ".rss",
-    ".md", ".markdown", ".rst", ".txt", ".tex",
-    ".sql", ".r", ".jl", ".lua", ".zig", ".nim", ".ex", ".exs",
-    ".cmake", ".make", ".mk", ".dockerfile", ".env",
-    ".gitignore", ".editorconfig",
+# search_content decides text vs binary by content (a NUL byte in the first
+# 8 KB), not by an extension allowlist: an allowlist silently hid whole
+# languages (.cs, .vue, .tf, .ps1), logs and extensionless scripts, and the
+# model got "No matches" with no hint that files were never searched.  The
+# extensions below are only a fast path to skip known binaries unread.
+_SEARCH_BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tif", ".tiff",
+    ".pdf", ".zip", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".7z", ".rar", ".tar",
+    ".jar", ".war", ".class", ".pyc", ".pyo", ".o", ".obj", ".a", ".lib",
+    ".so", ".dylib", ".dll", ".exe", ".bin", ".wasm", ".whl", ".deb", ".rpm",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp3", ".mp4", ".wav", ".flac",
+    ".ogg", ".mkv", ".mov", ".avi", ".webm", ".sqlite", ".db", ".iso", ".dmg",
 }
+_SEARCH_MAX_FILE_BYTES = 10 * 1024 * 1024
+_SEARCH_SNIFF_BYTES = 8192
 
 
-def _is_likely_text(entry: Path) -> bool:
-    """Guess whether a file is a text file based on extension and name."""
-    if entry.suffix.lower() in _TEXT_EXTENSIONS:
-        return True
-    # Also match files with no extension that are commonly text
-    name = entry.name.lower()
-    if name in {"makefile", "dockerfile", "license", "changelog", "authors", "todo"}:
-        return True
-    return False
+def _search_skip_reason(entry: Path) -> str | None:
+    """Return ``"binary"``/``"large"`` if *entry* shouldn't be searched, else None."""
+    if entry.suffix.lower() in _SEARCH_BINARY_EXTENSIONS:
+        return "binary"
+    try:
+        if entry.stat().st_size > _SEARCH_MAX_FILE_BYTES:
+            return "large"
+        with open(entry, "rb") as f:
+            if b"\0" in f.read(_SEARCH_SNIFF_BYTES):
+                return "binary"
+    except OSError:
+        return "binary"
+    return None
+
+
+# Hidden directories are searched (.github, .config and .vscode hold real
+# content and a model asking "which files mention X" expects them); only the
+# known-noise list is pruned.  Keep identical in the Rust and C++ editions.
+_SEARCH_EXTRA_SKIP_DIRS = {".venv", ".cache"}
 
 
 def _should_skip_search_dir(dirname: str) -> bool:
     """Return True if this directory should be skipped during search."""
-    if dirname.startswith("."):
-        return True
-    if dirname in _ALWAYS_SKIP_DIRS:
+    if dirname in _ALWAYS_SKIP_DIRS or dirname in _SEARCH_EXTRA_SKIP_DIRS:
         return True
     if dirname.endswith(_ALWAYS_SKIP_SUFFIXES):
         return True
     return False
 
 
-def _matches_glob(name: str, glob: str | None) -> bool:
-    """Check if a filename matches the given glob pattern."""
+def _matches_glob(name: str, glob: str | None, rel: str | None = None) -> bool:
+    """Check if a file matches *glob*.
+
+    A glob without ``/`` matches the file name (``*.py``); one with ``/`` matches
+    the path relative to the search root (``src/*.py``, ``**/test_*.py``), with a
+    leading ``**/`` also matching at the root.  ``*.{js,ts}`` brace lists expand.
+    """
     if glob is None:
         return True
-    # Support brace expansion like *.{js,ts}
-    if "{" in glob and "}" in glob:
-        patterns = _expand_braces(glob)
-        return any(fnmatch.fnmatch(name, p) for p in patterns)
-    return fnmatch.fnmatch(name, glob)
+    patterns = _expand_braces(glob) if "{" in glob and "}" in glob else [glob]
+    for p in patterns:
+        if "/" not in p:
+            if fnmatch.fnmatch(name, p):
+                return True
+            continue
+        target = rel if rel is not None else name
+        if fnmatch.fnmatch(target, p):
+            return True
+        if p.startswith("**/") and fnmatch.fnmatch(target, p[3:]):
+            return True
+    return False
 
 
 def _expand_braces(pattern: str) -> list[str]:
@@ -2525,7 +2692,7 @@ def _expand_braces(pattern: str) -> list[str]:
 
 def _search_content(pattern: str, path: str, file_glob: str | None,
                     context_lines: int, max_results: int,
-                    regex: bool = False) -> str:
+                    regex: bool = False, ignore_case: bool = False) -> str:
     """Search for text in files — literal by default, regex when requested."""
     try:
         root = Path(path).expanduser().resolve()
@@ -2536,20 +2703,21 @@ def _search_content(pattern: str, path: str, file_glob: str | None,
 
     # Literal by default so metacharacters in code symbols (".", "(", "[", "*",
     # ...) don't silently become regex syntax; regex=true opts into regex.
+    flags = re.IGNORECASE if ignore_case else 0
     if regex:
         try:
-            compiled = re.compile(pattern)
+            compiled = re.compile(pattern, flags)
         except re.error as e:
             return f"Error: Invalid regex pattern: {e}"
     else:
-        compiled = re.compile(re.escape(pattern))
+        compiled = re.compile(re.escape(pattern), flags)
 
     context_lines = max(0, min(context_lines, 10))
     max_results = max(1, min(max_results, 200))
 
     results: list[str] = []
     files_searched = 0
-    files_skipped = 0
+    skipped = {"binary": 0, "large": 0}
     truncated = False
 
     # If the path is a single file, search just that file
@@ -2574,12 +2742,14 @@ def _search_content(pattern: str, path: str, file_glob: str | None,
             for fname in filenames:
                 if fname in _ALWAYS_SKIP_FILES:
                     continue
-                if not _matches_glob(fname, file_glob):
+                filepath = current_dir / fname
+                rel = filepath.relative_to(root).as_posix()
+                if not _matches_glob(fname, file_glob, rel):
                     continue
 
-                filepath = current_dir / fname
-                if not _is_likely_text(filepath):
-                    files_skipped += 1
+                reason = _search_skip_reason(filepath)
+                if reason:
+                    skipped[reason] += 1
                     continue
 
                 files_searched += 1
@@ -2600,12 +2770,14 @@ def _search_content(pattern: str, path: str, file_glob: str | None,
         pass
 
     if not results:
-        summary = f"No matches found for '{pattern}' in {path}"
-        if files_searched:
-            summary += f" (searched {files_searched} files"
-            if files_skipped:
-                summary += f", skipped {files_skipped} binary/non-matching files"
-            summary += ")"
+        summary = f"No matches found for '{pattern}' in {path} (searched {files_searched} files"
+        if skipped["binary"]:
+            summary += f"; skipped {skipped['binary']} binary"
+        if skipped["large"]:
+            summary += f"; skipped {skipped['large']} over 10 MB"
+        summary += ")"
+        if file_glob and not files_searched and not any(skipped.values()):
+            summary += f". No file matched file_glob '{file_glob}'."
         return summary
 
     out = "\n\n".join(results)
@@ -2758,15 +2930,26 @@ def _glob(pattern: str, path: str | None = None) -> str:
     search_dir = root if root.is_dir() else root.parent
 
     try:
-        matches = list(search_dir.glob(pattern))
+        # pathlib has no {a,b} braces; expand them (as search_content does)
+        # so "*.{js,ts}" works here too, matching the Rust and C++ editions.
+        seen = set()
+        matches = []
+        for sub in (_expand_braces(pattern) if "{" in pattern and "}" in pattern else [pattern]):
+            for m in search_dir.glob(sub):
+                if m not in seen:
+                    seen.add(m)
+                    matches.append(m)
     except Exception as e:
         return f"Error with glob pattern '{pattern}': {e}"
 
     # A pattern whose final component starts with "." is asking for hidden
     # entries.  Testing the whole pattern would miss "**/.config" or "src/.env",
     # since those start with "*" and "s".
-    last_component = pattern.replace("\\", "/").rstrip("/").split("/")[-1]
-    wants_hidden = last_component.startswith(".")
+    segments = pattern.replace("\\", "/").rstrip("/").split("/")
+    wants_hidden = segments[-1].startswith(".")
+    # Hidden *directories* are walked only when the pattern names one
+    # (".github/**/*.yml"), matching the Rust and C++ editions.
+    wants_hidden_dirs = any(seg.startswith(".") and seg not in (".", "..") for seg in segments[:-1])
 
     # Filter out noise directories and their contents
     filtered = []
@@ -2776,6 +2959,8 @@ def _glob(pattern: str, path: str | None = None) -> str:
         # name made the common ".env" *file* unfindable.
         parts = m.relative_to(search_dir).parts
         if any(p in _GLOB_SKIP_CONTENTS for p in parts[:-1]):
+            continue
+        if not wants_hidden_dirs and any(p.startswith(".") for p in parts[:-1]):
             continue
         if m.is_dir() and m.name in _GLOB_SKIP_CONTENTS:
             continue
@@ -2788,8 +2973,8 @@ def _glob(pattern: str, path: str | None = None) -> str:
     if not filtered:
         return f"No files matching '{pattern}' in {search_dir}"
 
-    # Sort: directories first, then by name
-    filtered.sort(key=lambda p: (not p.is_dir(), p.name.lower()))
+    # Sort: directories first, then by relative path (as the Rust/C++ editions do)
+    filtered.sort(key=lambda p: (not p.is_dir(), p.relative_to(search_dir).as_posix()))
 
     max_results = 200
     lines = []
@@ -2850,7 +3035,7 @@ def _todowrite(todos: list[dict]) -> str:
     if in_progress_count > 1:
         return (
             f"Error: {in_progress_count} tasks marked in_progress. "
-            f"Exactly one task must be in_progress at a time."
+            f"At most one task may be in_progress at a time."
         )
 
     # Format and echo back

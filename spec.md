@@ -496,7 +496,15 @@ image content parts at request time; persisted history stays compact.
 
 All tools are defined in `tools.py` as OpenAI function-calling schemas (`TOOLS`) and executed via `execute_tool(name, arguments)`.
 
+**Descriptions.** Tool and parameter descriptions state only the contract a model wouldn't assume (what comes back, limits, what is skipped); "don't do X" guidance lives in the error a mistake produces, which costs tokens only when the mistake happens. Every sentence must be true of the tool — a description that promises behaviour one edition lacks is a bug. The schemas (names, parameters, all description strings, nested ones included) are byte-identical across the three editions. A canary eval on a local Qwen model (24 tasks) showed the terse set (−32% schema tokens) with no loss in pass rate.
+
 Tool argument previews are shown in the chat view truncated to 40 characters: `🔧 Using tool: web_search [query=latest Python news…]`.
+
+**Argument validation.** Before any handler runs, `execute_tool` checks the arguments against the tool's own JSON schema (`tool_args.normalize_arguments`; `tool_args.rs` / `Tools::normalizeArguments` in the ports). Unambiguous slips are coerced silently: a numeric string or integral float for an integer, `"true"`/`"false"` (any case) or `0`/`1` for a boolean, a single value where an array is expected, a JSON-encoded string where an array or object is expected, and an enum value in the wrong case. `null` counts as an absent key. Anything else rejects the whole call and nothing runs: an unknown key at any depth (the error lists the valid keys, sorted, and names a top-level key used in a nested object as "a top-level argument"), a missing required key, or a value that can't be coerced. Malformed tool-call JSON is reported to the model ("were not valid JSON") instead of running the tool with `{}`, and one level of double encoding is unwrapped. `ask_user_question` never reaches `execute_tool`; the harness checks it against the same schema first (`tools.validate_question_arguments`), and an empty `questions` list is also rejected, so a malformed call goes back to the model as an error instead of reaching the user as an empty or broken form. The messages are identical across editions.
+
+**Safe writes.** `write_file`, `replace_in_file` and `apply_changes` never write a target in place. Each writes a hidden temp file beside the target (`.<name>.pengy-tmp-…`), checks every write, syncs it, copies the target's permission bits (and owner where allowed), and renames it over the target, so a failed write (disk full, quota) leaves the original intact and no stray file. Symlinks are followed: the link survives and its target is edited. A target the user made read-only is refused ("Permission denied"), as a plain open would; if the directory doesn't allow a temp file but the target is writable, the write falls back to a checked in-place write.
+
+**Line endings.** Files are read without newline translation. When an exact-text edit (`old_str`, `old`, `anchor`) has no match as typed, contains `\n` but no `\r`, and the file uses CRLF, it is retried with CRLF line endings and the replacement text is written the same way, so editing a Windows file never converts it to LF.
 
 ### `read_file(path)`
 Reads a local file. Expands `~`. Returns file contents or an error string.
@@ -510,10 +518,10 @@ Large images are bounded by the configured image limits.
 Reads up to 20 files at once, each under a clear header. The per-file budget equals `tool_output_max_chars`; the total batch budget is five times that value. `0` disables these output limits. Binary files are rejected with a clear error.
 
 ### `write_file(path, content)`
-Writes content to a file. Creates parent directories as needed. Returns success or error.
+Writes content to a file (see Safe writes). Creates parent directories as needed. Returns success or error.
 
-### `replace_in_file(path, old_str, new_str)`
-Performs an exact string replacement in an existing file. `old_str` must match **exactly one occurrence** — if zero or multiple matches are found, the edit is rejected with specific line-number diagnostics. This is the preferred tool for targeted edits (safer than full rewrites).
+### `replace_in_file(path, old_str, new_str, replace_all=False)`
+Performs an exact string replacement in an existing file. `old_str` must match **exactly one occurrence** — if zero or multiple matches are found, the edit is rejected with specific line-number diagnostics, and the multiple-match error points at `replace_all`. With `replace_all=true` every occurrence is replaced and the reply is `✅ Replaced N occurrence(s) in <path>.` (zero matches is still an error). This is the preferred tool for targeted edits (safer than full rewrites).
 
 ### `apply_changes(changes, dry_run=False, postconditions=[])`
 Applies a bounded, **transactional** set of exact-text edits across multiple files. Every operation is validated in memory first; if any one fails, **no file is written**. Use this instead of a sequence of `replace_in_file` calls when an edit must land atomically across files.
@@ -528,9 +536,9 @@ Each entry in `changes` is `{path, operations[]}`. Each operation has a `kind`:
 
 Every operation also accepts `expected_matches` (positive int, default `1`); the operation fails unless the match count is exactly that. `dry_run=true` returns the unified diff without writing. `postconditions` is a list of `{path, contains?, does_not_contain?}` checks evaluated *before* any write; a failed check aborts the whole transaction.
 
-Safety limits (rejected with an error if exceeded): 20 files, 100 total operations, 1,000,000 total bytes, 256,000 bytes per individual text block. Paths are expanded, resolved to absolute, and must already exist; duplicate paths in one call are rejected (combine the operations instead).
+Safety limits (rejected with an error if exceeded): 20 files, 100 total operations, 1,000,000 total bytes, 256,000 bytes per individual text block. Paths are expanded, resolved to absolute with symlinks followed, and must already exist; duplicate paths in one call — including two spellings of one file, or a file and a link to it — are rejected (combine the operations instead). Each entry accepts only `path` and `operations`; `dry_run` or `postconditions` inside an entry is rejected by argument validation rather than ignored.
 
-Returns the unified diff on success.
+Writing is two-phase: every changed file is staged to a temp file first (a staging failure discards all temps and reports "no changes applied"), then the temps are renamed over their targets. Returns a unified diff (difflib format, 3 lines of context, every line newline-terminated) on success and for `dry_run`, in all editions.
 
 ### `run_bash(command, cwd=None, elevated=False, host=None)`
 Executes a bash command via `subprocess.Popen` in its own process group. An optional `cwd` is expanded and must name an existing directory. Timeout configurable via `tool_timeout` (default 300s). Captures stdout and stderr.
@@ -564,7 +572,7 @@ Writes code to a temp file and executes it with the interpreter running Pengy (`
 Searches the web using DuckDuckGo (`ddgs`). 5-second hard timeout on the search call. Returns numbered results with title, URL, and snippet.
 
 ### `download_file(url, filename=None, dir=None, max_size_mb=None)`
-Streams an HTTP(S) file to `dir` (default `~/Downloads/`), deriving the filename from the URL when needed. Existing same-name files are overwritten. The default size cap is `download_max_mb` (100 MB); `max_size_mb=0` disables the cap. Uses the configured `user_agent`, removes partial files on failure, and uses a 120-second no-data stall timeout.
+Streams an HTTP(S) file to `dir` (default `~/Downloads/`), deriving the filename from the URL when needed. The body streams into a hidden temp file that replaces `dest` only once complete: an existing same-name file is overwritten by a successful download and never touched by a failed one (HTTP error, size cap, stall, write error). The default size cap is `download_max_mb` (100 MB); `max_size_mb=0` disables the cap. Uses the configured `user_agent` and a 120-second no-data stall timeout.
 
 ### `fetch_url(url, max_chars=None)`
 Fetches a URL and returns its text content. HTML is stripped to readable text (scripts, styles, and head removed via `HTMLParser`). Responses are limited by `tool_output_max_chars` by default; `max_chars` overrides the limit and `0` disables it (subject to the 2 MB response cap).
@@ -572,17 +580,23 @@ Fetches a URL and returns its text content. HTML is stripped to readable text (s
 ### `directory_tree(path, max_depth=3, show_hidden=False)`
 Shows a visual tree of the directory structure. Skips common noise directories (`.git`, `node_modules`, `__pycache__`, etc.) by default. Entries capped at 500; output capped at 40,000 characters. Uses Unicode box-drawing characters (├── └── │).
 
-### `search_content(pattern, path, file_glob=None, context_lines=0, max_results=50, regex=False)`
-Searches for text in files under a directory. Matching is literal by default; set `regex=true` to interpret the pattern as a regular expression (invalid regexes return an error). Returns matching lines with file path, line number, context lines, and a `▸` marker on matched lines. Results are grouped into contiguous regions to avoid duplicate context. Skips binary files and common noise directories.
+### `search_content(pattern, path, file_glob=None, context_lines=0, max_results=50, regex=False, ignore_case=False)`
+Searches for text in files under a directory. Matching is literal by default; set `regex=true` to interpret the pattern as a regular expression (invalid regexes return an error). Returns matching lines with file path, line number, context lines, and a `▸` marker on matched lines. Results are grouped into contiguous regions to avoid duplicate context. Matching is case-sensitive unless `ignore_case=true`.
+
+Every file is a candidate regardless of extension: a file is skipped only if it has a known binary extension, contains a NUL byte in its first 8 KB, or is over 10 MB. (An extension allowlist used to hide whole languages — `.cs`, `.vue`, `.tf`, `.ps1` — plus logs and extensionless scripts, and the model got "No matches".) Hidden directories and files are searched (`.github`, `.config`, `.env`); only the noise directories (`.git`, `node_modules`, `__pycache__`, tool caches, `.venv`, `.cache`, `*.egg-info`) are pruned, and never the search root itself. Files are visited in sorted order. `file_glob` matches the file name when it has no `/` (`*.py`, `*.{js,ts}`) and the path relative to the root when it does (`src/*.py`, `**/test_*.py`). A no-match reply always reports how many files were searched and how many were skipped as binary or over 10 MB, and says when `file_glob` matched no file at all.
 
 ### `glob(pattern, path=None)`
-Finds files matching a glob pattern. Supports `**` for recursive search (e.g. `src/**/*.py`). Respects `.gitignore`-style skip directories (`node_modules`, `__pycache__`, `.git`, `venv`, `build`, `dist`, `target`, etc.). Returns up to 200 matching paths sorted by name with file sizes. Prefer this over `run_bash('find ...')` or `run_bash('ls ...')` — it's faster, safer, and respects project boundaries.
+Finds files matching a glob pattern against the whole relative path: `*` and `?` stay within one path segment, `**/` spans any number of directories, `{a,b}` lists alternatives. Skips `.gitignore`-style directories (`node_modules`, `__pycache__`, `.git`, `venv`, `build`, `dist`, `target`, etc.). Hidden directories are walked only when the pattern names one (`.github/**/*.yml`), hidden files only when the last segment starts with `.` (`**/.env`). Returns up to 200 matches, directories first (with a trailing `/`), then by path, files with human-readable sizes. Prefer this over `run_bash('find ...')` or `run_bash('ls ...')` — it's faster, safer, and respects project boundaries.
 
 ### `todowrite(todos)`
 Creates and updates a structured task list for tracking progress during complex multi-step operations. The LLM must send the **complete** list every time — not incremental updates. At most one task may be `in_progress` at any time (zero is allowed); tasks may be `pending`, `in_progress`, or `completed`. The tool validates these rules and echoes back the formatted list with status icons (`[ ]`, `[→]`, `[✓]`). This gives the LLM a persistent scratchpad that survives context window limits and tool-call round-trips.
 
 ### `ask_user_question(questions)`
 Asks the user one or more multiple-choice questions to clarify requirements, gather preferences, or resolve ambiguity. Each question includes a short header, the question text, and a list of options with descriptions. This tool should be used when instructions are vague, multiple valid approaches exist, or the LLM needs a decision before proceeding. The harness handles rendering the form and returning the user's choices — this tool should never reach `execute_tool` directly.
+
+The description says when to use it: instead of guessing when the request is ambiguous, or when what the model found contradicts what the user said. (An eval of wrong-premise requests — wrong file, wrong setting, "delete this unused file" when it is used — showed this cue is what makes local models push back instead of complying.)
+
+**No user to ask.** A CLI run without a TTY on stdin (`pengy-cli "…" < /dev/null`, scripts, CI) has nobody to answer, and a cancel would be wrong: models read "User cancelled" as a refusal and stop with nothing done. The frontend sends `{"unavailable": true}` instead, and the model gets `NO_USER_ANSWER`: take the clearly most reasonable option and state the assumption, but leave a pure guess undone and say what is needed. The wording was chosen by eval: "choose and continue" made the model invent a target value for "change the currency"; this version still acts where the repo makes one answer clear ("bump the timeout" → 60, stated) and stops where it doesn't. The text is identical in all three editions.
 
 ---
 
