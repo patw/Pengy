@@ -63,6 +63,12 @@ _MAX_INTERNAL_RETRIES = 1
 # should not cost three waits.
 _MAX_UNREACHABLE_RETRIES = 3
 
+# A 200 that carries no usable answer (no choices at all) is the shape a proxy
+# answers when it loses its upstream mid-generation, so it gets one retry --
+# the same reasoning as a 500: a blip is worth riding out, a deterministic
+# answer is not worth three more full-cost attempts.
+_MAX_EMPTY_RETRIES = 1
+
 # Only context errors get a size-reduction retry; generic bad requests do not.
 _MAX_CONTEXT_RETRIES = 4
 _CONTEXT_ERROR_CODES = {
@@ -555,10 +561,64 @@ def _generation_limit_message(content: str | None, has_tool_calls: bool,
     return message
 
 
+def _no_choices_help() -> str:
+    """A 200 that carries no choices: the endpoint answered and produced nothing."""
+    return (
+        "The endpoint answered with no choices in the response, so there is no answer to "
+        "deliver. Pengy retried once. This is the endpoint, not your request: the usual "
+        "causes are a proxy that lost its upstream mid-generation, an engine that died "
+        "while answering, or a model name the endpoint does not serve. "
+        "Nothing was added to the chat."
+    )
+
+
+def _empty_reply_help(message, finish_reason: str | None, usage=None) -> str:
+    """A 200 whose message has neither content nor tool calls.
+
+    Names the causes that are actually observed, because "empty response" alone is
+    not actionable.  The reasoning-budget case is documented in the field (BotTalk
+    ff4f1c1f): a reasoning model whose whole output allowance goes to reasoning
+    tokens answers with empty content and finish_reason=stop.
+    """
+    reasoning = (_get_msg_field(message, "reasoning_content")
+                 or _get_msg_field(message, "reasoning"))
+    completion = _completion_tokens(usage)
+    counts = f" (completion {completion:,} tokens)" if completion is not None else ""
+    lines = [
+        f"The model returned an empty reply{counts}: no content and no tool calls, so "
+        "the turn has no answer. Nothing was added to the chat.",
+        "Usual causes: a content filter that wiped the answer; a proxy that lost its "
+        "upstream mid-generation; a reasoning model that spent the whole output "
+        "allowance on reasoning tokens.",
+    ]
+    if reasoning:
+        lines.append("This reply carried reasoning text and no answer, which points at "
+                     "the reasoning budget: raise output_token_limit, lower "
+                     "reasoning_effort, or choose a non-reasoning model.")
+    lines.append(f"The provider reported finish_reason={finish_reason or 'unset'}. "
+                 "Pengy did not retry: an empty answer is the endpoint's shape, not a blip.")
+    return " ".join(lines)
+
+
 class GenerationLimitError(RuntimeError):
     """A truncated completion is a failed turn, never a completed answer."""
 
     kind = "truncated"
+    exit_code = 1
+
+
+class EmptyResponseError(RuntimeError):
+    """The endpoint answered 200 and produced nothing usable.
+
+    Two shapes, one failure: no ``choices`` at all, and a choice whose message
+    has neither content nor tool calls.  Both used to end the turn as a
+    *completed answer* — the CLI exited 0 and the chat stored a blank assistant
+    message, which the next turn reads back as something the model said.
+
+    ``kind``/``exit_code`` let callers classify it without string matching.
+    """
+
+    kind = "empty"
     exit_code = 1
 
 
@@ -887,7 +947,10 @@ class LLMClient:
                 for key in accumulated_usage:
                     accumulated_usage[key] += getattr(reply.usage, key, 0) or 0
             if cancel_fn and cancel_fn(): raise _Cancelled()
-            choice = reply.choices[0]
+            summary_choices = getattr(reply, "choices", None) or []
+            if not summary_choices:
+                raise RuntimeError("Context summary request returned no choices; original history retained.")
+            choice = summary_choices[0]
             if choice.finish_reason != "stop" or choice.message.tool_calls or not (choice.message.content or "").strip():
                 raise RuntimeError("Context summary was incomplete; original history retained. Try a new chat or adjust the provider's reasoning/output budget.")
             return choice.message.content
@@ -928,7 +991,25 @@ class LLMClient:
                     # here on, a connection failure means it went away mid-work.
                     self._endpoint_answered = True
                     request_seconds = time.perf_counter() - request_started
-                    choice = response.choices[0]
+                    # A 200 with no choices is the shape a proxy answers when it
+                    # loses its upstream mid-generation, so it gets one retry (the
+                    # 500 reasoning: ride out a blip, do not pay three full-cost
+                    # attempts for a deterministic answer).  Python used to raise
+                    # IndexError here -- "list index out of range" -- where Rust and
+                    # C++ already said "No choices in API response".
+                    choices = getattr(response, "choices", None) or []
+                    if not choices:
+                        if transient_retries < _MAX_EMPTY_RETRIES:
+                            notice = RuntimeError(_no_choices_help())
+                            if not (yield from self._pause_after_transient(
+                                    transient_retries, _MAX_EMPTY_RETRIES, "empty",
+                                    notice, cancel_fn, accumulated_usage)):
+                                return
+                            transient_retries += 1
+                            continue
+                        self._reset_client()
+                        raise EmptyResponseError(_no_choices_help())
+                    choice = choices[0]
                     if _length_suggests_context_pressure(choice, response.usage, output_token_limit):
                         if response.usage:
                             for key in accumulated_usage:
@@ -1251,6 +1332,14 @@ class LLMClient:
                         })
                     current_messages.append({"role": "user", "content": parts})
             else:
+                # An empty answer is not an answer.  It used to end the turn as a
+                # completed reply: the CLI exited 0 and the chat stored a blank
+                # assistant message that the next turn reads back as something the
+                # model said.  Report it as the provider anomaly it is, so an
+                # unattended run fails loudly instead of quietly.
+                if not (assistant_msg.content or "").strip():
+                    raise EmptyResponseError(_empty_reply_help(
+                        assistant_msg, choice.finish_reason, response.usage))
                 yield {"type": "final_response", "content": assistant_msg.content,
                        "message": _serialize_assistant_message(assistant_msg, preserve_reasoning),
                        "usage": accumulated_usage,

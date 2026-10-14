@@ -1456,7 +1456,7 @@ class PengyCLI:
                     # status, so the label stands alone there.
                     expecting_api_call = True
                     label = {"timeout": "Timeout", "server": "Server error",
-                             "unreachable": "Unreachable"}.get(
+                             "unreachable": "Unreachable", "empty": "Empty response"}.get(
                         response.get("reason"), "Overloaded")
                     status = response.get("status_code", "?")
                     head = label if status in (0, "?") else f"{label} (HTTP {status})"

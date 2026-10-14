@@ -694,7 +694,7 @@ class MainWindow(QMainWindow):
             # route): surface the wait instead of hanging silently.
             if session is self._tab_for_chat(self.active_chat_id):
                 label = {"timeout": "Timeout", "server": "Server error",
-                         "unreachable": "Unreachable"}.get(
+                         "unreachable": "Unreachable", "empty": "Empty response"}.get(
                     response.get("reason"), "Overloaded")
                 self.chat_history.set_retrying(
                     "{} — retrying in {:.1f}s ({}/{})".format(

@@ -792,6 +792,17 @@ help must arrive immediately. These failures are instant, so those retries cost 
 informative — a transport failure carries no provider message — the error that *started* the
 chain is the one reported, so "HTTP 500: boom" is not replaced by "connection refused".
 
+**A 200 that carries no usable answer is a failed turn, not a completed answer.** Two shapes:
+no `choices` at all, and a message with neither content nor tool calls. The first is retried
+`_MAX_EMPTY_RETRIES = 1` time (a proxy that lost its upstream mid-generation is a blip; a
+deterministic empty answer is not worth three full-cost attempts) and then reported. The
+second is never retried and never stored as an assistant turn — it is reported as an anomaly
+(`kind: "empty"`) that exits non-zero, so an unattended run fails loudly. The message names
+the observed causes (content filter, proxy that lost its upstream, a reasoning model whose
+whole output allowance went to reasoning tokens) and points at the knobs that fix the last
+one. `finish_reason=length` stays on the generation-limit path; an empty message *with* tool
+calls is a normal round.
+
 Anything else (400, 401, 403, 404, 422, context limits) is the request's fault and fails
 immediately: no amount of waiting makes the explanatory message arrive faster.
 
@@ -813,10 +824,10 @@ made to wait it out. Cancelling during backoff yields a normal final response
 
 Each retry emits a `retrying` event so the UI can show progress; it carries `attempt`,
 `max_attempts`, `delay_secs`, `status_code`, and `message`, plus `reason` — `"timeout"`,
-`"server"` or `"unreachable"` for the transient shapes above, absent for 429/529 — so the
-frontends can label them ("Timeout", "Server error", "Unreachable", "Overloaded"). A
-client-side timeout or a transport failure reports `status_code: 0`. The HTTP client is
-recreated between attempts.
+`"server"`, `"unreachable"` or `"empty"` for the transient shapes above, absent for 429/529 —
+so the frontends can label them ("Timeout", "Server error", "Unreachable", "Empty response",
+"Overloaded"). A client-side timeout or a transport failure reports `status_code: 0`. The HTTP
+client is recreated between attempts.
 
 ### Token usage
 
