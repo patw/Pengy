@@ -778,8 +778,27 @@ because five attempts at the 300 s default would hang a turn for ~25 minutes. Th
 summary request shares this budget. Once it is spent, the ordinary timeout message is raised
 unchanged.
 
-A plain connection failure (refused, DNS, TLS) is **not** a timeout and is never retried: the
-endpoint is not there, and retrying only delays the "is your server running?" help.
+**5xx and dropped routes are transient too.** HTTP **502** and **503** (proxy/upstream not
+available right now — a restart, a rolling deploy, a crashed worker) get
+`_MAX_TRANSIENT_RETRIES = 3`; HTTP **500** gets `_MAX_INTERNAL_RETRIES = 1`, because a 500 is
+often the request's own fault and should not cost three waits. A **connection failure**
+(refused, DNS, TLS) is retried `_MAX_UNREACHABLE_RETRIES = 3` times **only after this endpoint
+has answered at least once in the session** — mid-task that means a restart or a dropped
+route, while first contact means the endpoint is not there and the "is your server running?"
+help must arrive immediately. These failures are instant, so those retries cost seconds, not
+`llm_timeout`.
+
+**A retry never changes the reported failure.** When a retry itself fails with nothing more
+informative — a transport failure carries no provider message — the error that *started* the
+chain is the one reported, so "HTTP 500: boom" is not replaced by "connection refused".
+
+Anything else (400, 401, 403, 404, 422, context limits) is the request's fault and fails
+immediately: no amount of waiting makes the explanatory message arrive faster.
+
+**Mid-turn persistence is best effort.** `save_chat_progress` reports a failed write
+(`False`) rather than raising, and the CLI/web report it once per run and continue: the
+model's answer and the tool results are already real, so a full disk must not throw a
+finished turn away.
 
 Delay for attempt *n* (0-indexed):
 
@@ -793,9 +812,11 @@ made to wait it out. Cancelling during backoff yields a normal final response
 (`"Request cancelled during backoff."`), not an error.
 
 Each retry emits a `retrying` event so the UI can show progress; it carries `attempt`,
-`max_attempts`, `delay_secs`, `status_code`, and `message`, plus `reason: "timeout"` for the
-timeout path (absent for 429/529) so the frontends can label the two differently. A
-client-side timeout reports `status_code: 0`. The HTTP client is recreated between attempts.
+`max_attempts`, `delay_secs`, `status_code`, and `message`, plus `reason` — `"timeout"`,
+`"server"` or `"unreachable"` for the transient shapes above, absent for 429/529 — so the
+frontends can label them ("Timeout", "Server error", "Unreachable", "Overloaded"). A
+client-side timeout or a transport failure reports `status_code: 0`. The HTTP client is
+recreated between attempts.
 
 ### Token usage
 

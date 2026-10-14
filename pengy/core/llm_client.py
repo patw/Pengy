@@ -47,6 +47,22 @@ _MAX_TIMEOUT_RETRIES = 3
 # upstream that ran out of time, which is the same failure seen from the client.
 _TIMEOUT_STATUSES = {408, 504}
 
+# ── Transient server errors, and routes that drop mid-task ───────
+# 502 and 503 say "the proxy or upstream is not available right now" -- a
+# restart, a rolling deploy, a worker crash.  That is the same busy-endpoint
+# failure a timeout is, and a ten-second blip used to kill a multi-hour task.
+# 500 is often *deterministic* (our request trips a provider bug), so it gets
+# one retry rather than three: cheap insurance, no long chain.
+_TRANSIENT_STATUSES = {502, 503}
+_MAX_TRANSIENT_RETRIES = 3
+_MAX_INTERNAL_RETRIES = 1
+# A connection failure *after* this endpoint has answered in this session is a
+# dropped route -- server restart, OOM kill, sleep/wake, a VM's address changing
+# -- not a misconfigured endpoint.  First contact keeps failing fast: that is
+# the case the "is your server running?" help is written for, and a wrong URL
+# should not cost three waits.
+_MAX_UNREACHABLE_RETRIES = 3
+
 # Only context errors get a size-reduction retry; generic bad requests do not.
 _MAX_CONTEXT_RETRIES = 4
 _CONTEXT_ERROR_CODES = {
@@ -268,15 +284,83 @@ def _is_timeout_error(exc: BaseException) -> bool:
     return False
 
 
-def _timeout_delay(attempt: int, exc: BaseException) -> float:
-    """Backoff before a timeout retry.
+def _retry_delay(attempt: int, exc: BaseException) -> float:
+    """Backoff before a transient retry.
 
-    A 408/504 answer may carry Retry-After; the SDK's own deadline has no
-    response object, so it falls back to the plain exponential ladder.
+    A provider answer may carry Retry-After; the SDK's own deadline and a
+    connection failure have no response object, so they fall back to the plain
+    exponential ladder.
     """
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", {}) if response is not None else {}
     return _backoff_delay(attempt, _retry_after_delay(getattr(exc, "status_code", 0), headers))
+
+
+def _transient_budget(status_code: int) -> int | None:
+    """Retry budget for a provider status meaning "not available right now".
+
+    ``None`` means the status is not transient: a 400/401/404 is the request's
+    fault and must fail immediately, with no waits in the way of the message
+    that explains it.
+    """
+    if status_code in _TIMEOUT_STATUSES:
+        return _MAX_TIMEOUT_RETRIES
+    if status_code in _TRANSIENT_STATUSES:
+        return _MAX_TRANSIENT_RETRIES
+    if status_code == 500:
+        return _MAX_INTERNAL_RETRIES
+    return None
+
+
+def _is_dropped_route(exc: BaseException) -> bool:
+    """A connection failure that is worth re-sending *mid-session*.
+
+    Refused / DNS / TLS failures are instant, so retrying them costs seconds,
+    not ``llm_timeout``.  The gate is the endpoint having answered at least
+    once, which is what separates "my server restarted" from "my URL is wrong".
+    """
+    return isinstance(exc, APIConnectionError) and not isinstance(exc, APITimeoutError)
+
+
+def _chain_failure(chain_error: BaseException | None, exc: BaseException) -> BaseException:
+    """Which error to report when a retry chain ends in failure.
+
+    A transport failure carries no provider message, so reporting it after a
+    chain that started with "HTTP 500: boom" would *lose* the diagnosis -- the
+    retry would change what the user is told about a failure they care about.
+    When the chain has a status-bearing error, that is the one to report; a
+    later failure that is itself specific (a 401 mid-chain, say) still wins.
+    """
+    if chain_error is not None and getattr(exc, "status_code", None) is None:
+        return chain_error
+    return exc
+
+
+def _transient_retry(exc: BaseException, endpoint_answered: bool) -> tuple[int, str] | None:
+    """Decide whether to re-send a failed request: ``(budget, reason)`` or None.
+
+    One classification point for every shape, so the turn request and the
+    context-summary request cannot drift apart:
+
+    - the SDK's deadline, 408, 504  -> ``"timeout"``
+    - 502, 503                      -> ``"server"``
+    - 500                           -> ``"server"``, one attempt only
+    - refused / DNS / TLS           -> ``"unreachable"``, and only once this
+      endpoint has answered in this session
+    - anything else (400, 401, 404, context limits, ...) -> ``None``: the
+      request is the problem, and no amount of waiting will make the
+      explanatory message arrive faster.
+    """
+    if _is_timeout_error(exc):
+        return _MAX_TIMEOUT_RETRIES, "timeout"
+    if isinstance(exc, APIStatusError):
+        budget = _transient_budget(exc.status_code)
+        if not budget:
+            return None
+        return budget, ("timeout" if exc.status_code in _TIMEOUT_STATUSES else "server")
+    if _is_dropped_route(exc):
+        return (_MAX_UNREACHABLE_RETRIES, "unreachable") if endpoint_answered else None
+    return None
 
 
 def _sleep_interruptible(seconds: float, is_cancelled: Callable[[], bool] | None):
@@ -658,6 +742,11 @@ class LLMClient:
         self.model = model
         self.llm_timeout = llm_timeout
         self._client = None
+        # Set once this endpoint has answered a request.  It is what lets a
+        # connection failure be read as "my server restarted" (retry it) rather
+        # than "my URL is wrong" (say so immediately), and it survives
+        # _reset_client() because that only rebuilds the HTTP client.
+        self._endpoint_answered = False
 
     @property
     def client(self):
@@ -682,28 +771,30 @@ class LLMClient:
     def _reset_client(self):
         self._client = None
 
-    def _pause_after_timeout(self, attempt: int, exc: BaseException,
-                             cancel_fn: Callable[[], bool] | None,
-                             accumulated_usage: dict):
-        """Announce one timeout retry, sleep out, reset the pooled client.
+    def _pause_after_transient(self, attempt: int, max_attempts: int, reason: str,
+                               exc: BaseException,
+                               cancel_fn: Callable[[], bool] | None,
+                               accumulated_usage: dict):
+        """Announce one transient-failure retry, sleep out, reset the pooled client.
 
-        Yields the ``retrying`` event, then the cancellation notice when the
-        user cancels during the sleep; returns whether the caller should re-send
-        the request.  *attempt* is the number of timeout retries already spent
-        (0-based), so the ladder matches the 429/529 path: 1s, 2s, 4s.  Shared by
+        *attempt* is the number of retries already spent (0-based), so the ladder
+        matches the 429/529 path: 1s, 2s, 4s.  *reason* is what the frontends
+        label ("timeout", "server", "unreachable").  Yields the ``retrying``
+        event, then the cancellation notice when the user cancels during the
+        sleep; returns whether the caller should re-send the request.  Shared by
         the turn request and the context-summary request so every frontend sees
-        one shape of timeout event.
+        one shape of event.
         """
-        delay = _timeout_delay(attempt, exc)
+        delay = _retry_delay(attempt, exc)
         message = exc.message if isinstance(exc, APIStatusError) else str(exc)
         yield {
             "type": "retrying",
-            "reason": "timeout",
+            "reason": reason,
             "attempt": attempt + 1,
-            "max_attempts": _MAX_TIMEOUT_RETRIES,
+            "max_attempts": max_attempts,
             "delay_secs": round(delay, 1),
             "status_code": getattr(exc, "status_code", 0),
-            "message": message or "Request timed out",
+            "message": message or "Request failed",
         }
         try:
             _sleep_interruptible(delay, cancel_fn)
@@ -768,7 +859,8 @@ class LLMClient:
                              {"role": "user", "content": source}],
                 output_token_parameter: 2048,
             }
-            summary_timeouts = 0
+            summary_retries = 0
+            summary_chain = None
             # The summary is part of this turn, so a provider timeout gets the
             # same retry budget here as the turn request itself -- a big
             # conversation's prefill is exactly what blows llm_timeout on a slow
@@ -778,14 +870,18 @@ class LLMClient:
             while True:
                 try:
                     reply = self.client.chat.completions.create(**summary_kwargs)
+                    self._endpoint_answered = True
                     break
-                except (APITimeoutError, APIStatusError) as exc:
-                    if not _is_timeout_error(exc) or summary_timeouts >= _MAX_TIMEOUT_RETRIES:
-                        if isinstance(exc, APIStatusError):
-                            raise RuntimeError("Context summary request failed; original history retained. " + str(exc)) from exc
-                        raise _translate_api_error(exc, self.base_url) from exc
-                    summary_timeouts += 1
-                    _sleep_interruptible(_timeout_delay(summary_timeouts - 1, exc), cancel_fn)
+                except (APITimeoutError, APIConnectionError, APIStatusError) as exc:
+                    transient = _transient_retry(exc, self._endpoint_answered)
+                    if transient is None or summary_retries >= transient[0]:
+                        reported = _chain_failure(summary_chain, exc)
+                        if isinstance(reported, APIStatusError):
+                            raise RuntimeError("Context summary request failed; original history retained. " + str(reported)) from reported
+                        raise _translate_api_error(reported, self.base_url) from reported
+                    summary_retries += 1
+                    summary_chain = summary_chain or exc
+                    _sleep_interruptible(_retry_delay(summary_retries - 1, exc), cancel_fn)
                     self._reset_client()
             if reply.usage:
                 for key in accumulated_usage:
@@ -806,8 +902,12 @@ class LLMClient:
                 request_messages.append({"role": "user", "content": image_rejection})
             context_retries = 0
             rate_retries = 0
-            timeout_retries = 0
-            # ── API call with 429 / 529 / timeout exponential backoff ──────
+            transient_retries = 0
+            # The failure that started this retry chain.  Reported when a retry
+            # itself fails with nothing more informative, so the retries never
+            # change what the user is told about the failure they care about.
+            chain_error = None
+            # ── API call with backoff: 429/529, timeouts, 5xx, dropped routes ──
             while True:
                 if cancel_fn and cancel_fn():
                     raise _Cancelled()
@@ -824,6 +924,9 @@ class LLMClient:
                         request_kwargs[output_token_parameter] = output_token_limit
                     request_started = time.perf_counter()
                     response = self.client.chat.completions.create(**request_kwargs)
+                    # The endpoint is reachable and speaking our protocol. From
+                    # here on, a connection failure means it went away mid-work.
+                    self._endpoint_answered = True
                     request_seconds = time.perf_counter() - request_started
                     choice = response.choices[0]
                     if _length_suggests_context_pressure(choice, response.usage, output_token_limit):
@@ -890,16 +993,23 @@ class LLMClient:
                             f"{context_retries} tool-output reductions. The full tool outputs "
                             "remain in chat history. Try a shorter request or a larger-context model."
                         ) from e
-                    if _is_timeout_error(e):
-                        # 408 / 504 — the endpoint answered, saying it ran out of
-                        # time.  Same backoff ladder as 429/529, own budget.
-                        if timeout_retries >= _MAX_TIMEOUT_RETRIES:
+                    transient = _transient_retry(e, self._endpoint_answered)
+                    if transient is not None:
+                        # The endpoint answered, saying it is not available right
+                        # now: 408/504 (out of time), 502/503 (proxy/upstream
+                        # gone), or 500 (one attempt, since a 500 is often the
+                        # request's fault).  Same ladder as 429/529.
+                        budget, reason = transient
+                        if transient_retries >= budget:
                             self._reset_client()
-                            raise _translate_api_error(e, self.base_url) from e
-                        if not (yield from self._pause_after_timeout(
-                                timeout_retries, e, cancel_fn, accumulated_usage)):
+                            raise _translate_api_error(_chain_failure(chain_error, e),
+                                                       self.base_url) from e
+                        chain_error = chain_error or e
+                        if not (yield from self._pause_after_transient(
+                                transient_retries, budget, reason, e,
+                                cancel_fn, accumulated_usage)):
                             return
-                        timeout_retries += 1
+                        transient_retries += 1
                         continue
                     if e.status_code not in _RETRYABLE_STATUSES or rate_retries >= _MAX_RETRIES:
                         self._reset_client()
@@ -936,13 +1046,41 @@ class LLMClient:
                     # or single-slot endpoint usually answers on the next attempt.
                     # Once the budget is spent the user gets the ordinary timeout
                     # message, unchanged.
-                    if timeout_retries >= _MAX_TIMEOUT_RETRIES:
+                    budget, reason = _transient_retry(e, self._endpoint_answered)
+                    if transient_retries >= budget:
                         self._reset_client()
-                        raise _translate_api_error(e, self.base_url) from e
-                    if not (yield from self._pause_after_timeout(
-                            timeout_retries, e, cancel_fn, accumulated_usage)):
+                        raise _translate_api_error(_chain_failure(chain_error, e),
+                                                   self.base_url) from e
+                    chain_error = chain_error or e
+                    if not (yield from self._pause_after_transient(
+                            transient_retries, budget, reason, e,
+                            cancel_fn, accumulated_usage)):
                         return
-                    timeout_retries += 1
+                    transient_retries += 1
+                    continue
+                except APIConnectionError as e:
+                    # Refused / DNS / TLS.  Gated on the endpoint having answered
+                    # before: mid-task that means a restart or a dropped route and
+                    # is worth seconds, not a verdict.  On first contact it means
+                    # the endpoint is not there at all, and the "is your server
+                    # running?" help must arrive immediately, not after three
+                    # waits.  These failures are instant, so the retries are cheap.
+                    transient = _transient_retry(e, self._endpoint_answered)
+                    if transient is None:
+                        self._reset_client()
+                        raise _translate_api_error(_chain_failure(chain_error, e),
+                                                   self.base_url) from e
+                    budget, reason = transient
+                    if transient_retries >= budget:
+                        self._reset_client()
+                        raise _translate_api_error(_chain_failure(chain_error, e),
+                                                   self.base_url) from e
+                    chain_error = chain_error or e
+                    if not (yield from self._pause_after_transient(
+                            transient_retries, budget, reason, e,
+                            cancel_fn, accumulated_usage)):
+                        return
+                    transient_retries += 1
                     continue
                 except _Cancelled:
                     yield {
@@ -952,7 +1090,8 @@ class LLMClient:
                     return
                 except Exception as exc:
                     self._reset_client()
-                    raise _translate_api_error(exc, self.base_url) from exc
+                    raise _translate_api_error(_chain_failure(chain_error, exc),
+                                               self.base_url) from exc
 
             # Accumulate token usage across all calls in this turn
             if response.usage:

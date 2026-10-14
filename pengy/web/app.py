@@ -391,6 +391,7 @@ class WebWorker:
         self._sudo_result: str | None = None
         self._done = False
         self._cancelled = False
+        self._save_warned = False  # report a failed mid-turn save once, not per write
         self._yolo_this_turn = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         # Scope sudo credentials and active processes to this worker; web
@@ -489,6 +490,22 @@ class WebWorker:
             return None
         return self._sudo_result
 
+    def _save_progress(self, chat: dict) -> None:
+        """Mid-turn persistence: a failed write is reported, never fatal.
+
+        By this point the model has answered and the tools have run, so a full
+        disk must not throw a finished turn away.  The user is told once per run
+        that history is no longer being saved; the answer still arrives.
+        """
+        if not save_chat_progress(chat) and not self._save_warned:
+            self._save_warned = True
+            self._put_event({
+                "type": "notice",
+                "message": "Chat history is not being saved (disk full, or the chat "
+                           "directory is not writable). Continuing; the answer will "
+                           "still be shown.",
+            })
+
     def _live_usage(self, response: dict) -> dict:
         """Preview the chat's cumulative usage including this in-flight turn.
 
@@ -562,7 +579,7 @@ class WebWorker:
                 if rtype == "assistant_tool_calls":
                     self._yolo_this_turn = False
                     chat["messages"].append(response["message"])
-                    save_chat_progress(chat)
+                    self._save_progress(chat)
                     # The assistant often narrates before calling tools.  That
                     # text is persisted (and shows up on reload) but the live
                     # stream dropped it, so mid-turn commentary only appeared
@@ -646,7 +663,7 @@ class WebWorker:
                         "tool_call_id": response["tool_call_id"],
                         "content": content,
                     })
-                    save_chat_progress(chat)
+                    self._save_progress(chat)
                     self._put_event({
                         "type": "tool_result",
                         "tool_call_id": response["tool_call_id"],
@@ -664,7 +681,7 @@ class WebWorker:
                         "tool_call_id": response["tool_call_id"],
                         "content": content,
                     })
-                    save_chat_progress(chat)
+                    self._save_progress(chat)
                     display = content if len(content) <= 3000 else content[:3000] + "\n… [truncated]"
                     self._put_event({
                         "type": "tool_result",
@@ -679,7 +696,7 @@ class WebWorker:
                     content = response.get("content") or ""
                     chat["messages"].append(response.get("message") or {"role": "assistant", "content": content})
                     cumulative_usage = add_usage(chat, response.get("usage"))
-                    save_chat_progress(chat)
+                    self._save_progress(chat)
                     self._put_event({
                         "type": "final_response",
                         "html": _render_md(content),

@@ -20,7 +20,7 @@ from pathlib import Path
 from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
-    load_index, get_chat, create_chat, save_chat, delete_chat,
+    load_index, get_chat, create_chat, save_chat, save_chat_progress, delete_chat,
     clean_dangling_tool_calls, elide_old_tool_results, redact_last_message,
     add_usage,
 )
@@ -269,6 +269,7 @@ class PengyCLI:
         self.llm_client: LLMClient | None = None
         self.current_chat: dict | None = None
         self._no_save = no_save
+        self._save_warned = False  # report a failed mid-turn save once, not per write
         self._output_mode = "pretty"  # pretty | raw | json | silent
         self._turn_error = None  # set by _report_turn_error, read by single-shot mode
         self._update_llm_client()
@@ -1383,11 +1384,18 @@ class PengyCLI:
     def _save_progress(self, chat: dict):
         """Persist mid-turn, so a crash can't take the turn's tool calls with it.
 
-        One small per-chat file write; the whole store is not touched.
+        One small per-chat file write; the whole store is not touched.  A failed
+        write is reported once and the turn continues: the model's answer and the
+        tool results are already real, and losing them to a full disk is the
+        worse outcome.
         """
         if self._no_save:
             return
-        save_chat(chat)
+        if not save_chat_progress(chat) and not self._save_warned:
+            self._save_warned = True
+            self._print_stderr("Chat history is not being saved (disk full, or the "
+                               "chat directory is not writable). Continuing; the "
+                               "answer will still be shown.")
 
     def _drive_generator(self, messages: list[dict], chat: dict):
         """Drive the LLMClient.chat() generator, handling tool confirmations.
@@ -1442,11 +1450,14 @@ class PengyCLI:
                             response.get("max_attempts", 0)))
 
                 elif rtype == "retrying":
-                    # 429/529 overload and provider timeouts — surface the wait
-                    # instead of hanging silently.  A client-side timeout carries
-                    # no HTTP status, so the label stands alone there.
+                    # Backoff on a transient failure — overload, provider
+                    # timeout, 5xx, or a route that dropped mid-task.  A
+                    # client-side timeout and a connection failure carry no HTTP
+                    # status, so the label stands alone there.
                     expecting_api_call = True
-                    label = "Timeout" if response.get("reason") == "timeout" else "Overloaded"
+                    label = {"timeout": "Timeout", "server": "Server error",
+                             "unreachable": "Unreachable"}.get(
+                        response.get("reason"), "Overloaded")
                     status = response.get("status_code", "?")
                     head = label if status in (0, "?") else f"{label} (HTTP {status})"
                     self.console.print(
@@ -1526,7 +1537,12 @@ class PengyCLI:
                 # assistant message can hold tool_calls with no result behind
                 # them (the API 400s on that next request).
                 chat["messages"] = clean_dangling_tool_calls(chat["messages"])
-                save_chat(chat)
+                try:
+                    save_chat(chat)
+                except OSError as exc:
+                    # The turn is over and its answer has been shown; a save
+                    # failure must not turn a finished run into a traceback.
+                    self._print_stderr(f"Chat history could not be saved: {exc}")
 
     def _report_turn_error(self, exc: BaseException) -> None:
         """Report a failed turn without lying about it.

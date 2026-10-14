@@ -1,21 +1,26 @@
-"""Provider-timeout auto-retry: 408/504 answers and the SDK's own deadline.
+"""Transient endpoint failures: what gets retried, what fails fast, what must not kill the run.
 
 Pengy asks for the whole reply in one non-streaming request, so a timeout is the
 failure most often caused by a busy endpoint rather than a bad request -- and
-until now it was the one failure with no recovery: the OpenAI client is built
-with ``max_retries=0`` and only 429/529 were retried, so a single timeout ended
-the turn.
+until the retry work it was the one failure with no recovery: the OpenAI client
+is built with ``max_retries=0`` and only 429/529 were retried, so a single
+timeout ended the turn.
 
-These tests pin the new contract:
+These tests pin the contract that replaced it:
 
-- 408 and 504 answers are retried with the same backoff ladder as 429/529.
-- ``APITimeoutError`` (our own ``llm_timeout`` deadline, no HTTP status) is retried.
-- The budget is ``_MAX_TIMEOUT_RETRIES`` per request, then the ordinary timeout
-  message is raised unchanged -- the retry is invisible on success, and the
-  give-up text is the one the user already knows.
-- The context-summary request gets the same budget.
-- Negative controls: connection refused, 400 and 401 are NOT retried, and 429
-  keeps its own 5-attempt "Overloaded" budget.
+- 408/504 answers and ``APITimeoutError`` (our own ``llm_timeout``) are retried,
+  budget ``_MAX_TIMEOUT_RETRIES``.
+- 502/503 (proxy/upstream gone) are retried, budget ``_MAX_TRANSIENT_RETRIES``;
+  500 gets ``_MAX_INTERNAL_RETRIES`` -- one, because a 500 is often the request's
+  own fault.
+- A connection failure is retried only once this endpoint has answered in this
+  session (``_endpoint_answered``): mid-task that means a restart or a dropped
+  route, first contact means the endpoint is not there and the help must arrive
+  immediately.
+- The context-summary request shares the budget.
+- Budget spent -> the ordinary error message, unchanged.
+- Negative controls: 400/401 and a first-contact refusal are never retried, and
+  429/529 keep their own 5-attempt "Overloaded" budget.
 """
 from __future__ import annotations
 
@@ -25,13 +30,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
-from openai import APITimeoutError, APIStatusError
+from openai import APIConnectionError, APITimeoutError, APIStatusError
 
 import openai.resources.chat.completions as completions_resource
 from pengy.core.llm_client import (
-    LLMClient, _MAX_TIMEOUT_RETRIES, _TIMEOUT_STATUSES, _is_timeout_error,
+    LLMClient, _MAX_INTERNAL_RETRIES, _MAX_TIMEOUT_RETRIES, _MAX_TRANSIENT_RETRIES,
+    _MAX_UNREACHABLE_RETRIES, _TIMEOUT_STATUSES, _TRANSIENT_STATUSES,
+    _is_timeout_error, _transient_retry,
 )
-from tests.test_llm_loop import collect_auto, completion
+from tests.test_llm_loop import collect_auto, completion, tool_call
 
 
 TIMEOUT_BODY = {"error": {"message": "Request timed out", "type": "timeout"}}
@@ -94,6 +101,11 @@ class Wire:
         headers = reply[2] if len(reply) > 2 else {}
         self.httpd.repeat = (reply[0], body, headers)
 
+    def stop(self):
+        """Take the endpoint away: later connects are refused, as after a restart."""
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
     def close(self):
         self.httpd.shutdown()
         self.httpd.server_close()
@@ -144,6 +156,33 @@ def raise_timeouts(wire: Wire, monkeypatch, times: int):
 
 def test_timeout_statuses_are_the_documented_pair():
     assert _TIMEOUT_STATUSES == {408, 504}
+
+
+def test_transient_statuses_are_proxy_and_upstream_gone():
+    assert _TRANSIENT_STATUSES == {502, 503}
+    assert _MAX_INTERNAL_RETRIES == 1
+
+
+def test_classification_names_budget_and_reason_for_every_shape(wire):
+    def status_error(code: int) -> APIStatusError:
+        response = type("R", (), {"status_code": code, "headers": {}, "request": None})()
+        return APIStatusError(f"HTTP {code}", response=response, body={})
+
+    deadline = APITimeoutError(httpx.Request("POST", wire.base_url))
+    refused = APIConnectionError(request=httpx.Request("POST", wire.base_url))
+
+    assert _transient_retry(status_error(408), False) == (_MAX_TIMEOUT_RETRIES, "timeout")
+    assert _transient_retry(status_error(504), False) == (_MAX_TIMEOUT_RETRIES, "timeout")
+    assert _transient_retry(deadline, False) == (_MAX_TIMEOUT_RETRIES, "timeout")
+    assert _transient_retry(status_error(502), False) == (_MAX_TRANSIENT_RETRIES, "server")
+    assert _transient_retry(status_error(503), False) == (_MAX_TRANSIENT_RETRIES, "server")
+    assert _transient_retry(status_error(500), False) == (_MAX_INTERNAL_RETRIES, "server")
+    # A dropped route is only transient once we have spoken to this endpoint.
+    assert _transient_retry(refused, False) is None
+    assert _transient_retry(refused, True) == (_MAX_UNREACHABLE_RETRIES, "unreachable")
+    # The request's own fault never gets a wait in front of its explanation.
+    for code in (400, 401, 403, 404, 422, 429, 501, 505):
+        assert _transient_retry(status_error(code), True) is None
 
 
 def test_classification_covers_both_shapes_and_excludes_the_rest(wire):
@@ -213,7 +252,7 @@ def test_backoff_ladder_and_retry_after_are_honoured(wire, client, no_sleep):
 
 
 def test_429_keeps_its_own_overload_budget(wire, client, no_sleep):
-    """The pre-existing 429 path must not be swept into the timeout budget."""
+    """The pre-existing 429 path must not be swept into the transient budget."""
     wire.repeat(429, {"error": {"message": "Too Many Requests"}})
     events: list = []
     with pytest.raises(APIStatusError) as raised:
@@ -225,6 +264,107 @@ def test_429_keeps_its_own_overload_budget(wire, client, no_sleep):
     assert all("reason" not in n for n in notices)
     assert all(n["max_attempts"] == 5 for n in notices)
     assert raised.value.status_code == 429
+
+
+# ── 5xx: the proxy or the upstream is not here right now ─────────────────────
+
+@pytest.mark.parametrize("status", [502, 503])
+def test_server_error_is_retried_and_the_turn_completes(wire, client, no_sleep, status):
+    """A proxy/upstream restart answers 502/503 for seconds; the turn rides it out."""
+    wire.queue((status, {"error": {"message": "Bad gateway"}}),
+               (200, completion(content="recovered")))
+    events = collect_auto(client.chat([{"role": "user", "content": "go"}]))
+
+    notices = retrying_events(events)
+    assert len(notices) == 1
+    assert notices[0]["reason"] == "server"
+    assert notices[0]["status_code"] == status
+    assert notices[0]["max_attempts"] == _MAX_TRANSIENT_RETRIES
+    assert events[-1]["content"] == "recovered"
+    assert len(wire.requests) == 2
+
+
+def test_internal_server_error_gets_one_retry_only(wire, client, no_sleep):
+    """A 500 is often the request's own fault, so it buys one retry, not a chain."""
+    wire.repeat(500, {"error": {"message": "Internal server error"}})
+    events: list = []
+    with pytest.raises(APIStatusError) as raised:
+        for event in client.chat([{"role": "user", "content": "go"}]):
+            events.append(event)
+
+    notices = retrying_events(events)
+    assert len(notices) == _MAX_INTERNAL_RETRIES
+    assert notices[0]["max_attempts"] == _MAX_INTERNAL_RETRIES
+    assert raised.value.status_code == 500
+    assert len(wire.requests) == _MAX_INTERNAL_RETRIES + 1
+
+
+def test_server_error_budget_is_spent_then_the_usual_message(wire, client, no_sleep):
+    wire.repeat(503, {"error": {"message": "Service Unavailable"}})
+    events: list = []
+    with pytest.raises(APIStatusError) as raised:
+        for event in client.chat([{"role": "user", "content": "go"}]):
+            events.append(event)
+
+    assert len(retrying_events(events)) == _MAX_TRANSIENT_RETRIES
+    assert raised.value.status_code == 503
+    assert len(wire.requests) == _MAX_TRANSIENT_RETRIES + 1
+
+
+# ── A route that drops mid-task ───────────────────────────────────────────────
+
+def test_mid_task_refusal_is_retried(wire, client, no_sleep):
+    """The endpoint answered, ran a tool, then died: that is a restart, not a typo."""
+    wire.queue((200, completion(tool_calls=[
+        tool_call("t1", "read_file", {"path": "does-not-exist.txt"})])))
+    events: list = []
+    with pytest.raises(RuntimeError) as raised:
+        for event in client.chat([{"role": "user", "content": "go"}], tool_confirmation="all"):
+            events.append(event)
+            if event["type"] == "tool_result":
+                wire.stop()  # the endpoint goes away before the follow-up request
+
+    assert client._endpoint_answered is True
+    notices = retrying_events(events)
+    assert len(notices) == _MAX_UNREACHABLE_RETRIES
+    assert all(n["reason"] == "unreachable" for n in notices)
+    assert all(n["status_code"] == 0 for n in notices)
+    # Budget spent: the ordinary unreachable help, unchanged.
+    assert "Nothing answered" in str(raised.value)
+
+
+def test_a_retry_that_fails_does_not_replace_the_original_error(wire, client, no_sleep):
+    """Retrying must never change what the user is told about the failure.
+
+    The chain started with the provider's own 500 ("boom").  The retry then hit
+    a closed port, and reporting *that* would throw away the diagnosis the user
+    needed -- a transport failure carries no provider message.
+    """
+    wire.queue((500, {"error": {"message": "boom"}}))
+    events: list = []
+    with pytest.raises(Exception) as raised:
+        for event in client.chat([{"role": "user", "content": "go"}]):
+            events.append(event)
+            if event["type"] == "retrying":
+                wire.stop()  # the retry itself cannot get through
+
+    assert len(retrying_events(events)) == 1
+    message = str(raised.value)
+    assert "boom" in message, message
+    assert "Nothing answered" not in message, message
+
+
+def test_first_contact_refusal_is_not_retried(monkeypatch):
+    """'Is your server running?' help must arrive immediately, not after 3 waits."""
+    dead = LLMClient(base_url="http://127.0.0.1:1/v1", api_key="k", model="m")
+    monkeypatch.setattr("pengy.core.llm_client._sleep_interruptible",
+                        lambda seconds, is_cancelled: pytest.fail("must not sleep"))
+    events: list = []
+    with pytest.raises(RuntimeError) as raised:
+        for event in dead.chat([{"role": "user", "content": "go"}]):
+            events.append(event)
+    assert not retrying_events(events)
+    assert "Nothing answered" in str(raised.value)
 
 
 # ── Our own llm_timeout deadline (no HTTP status at all) ──────────────────────
@@ -278,19 +418,6 @@ def test_cancel_during_timeout_backoff_stops_the_turn(wire, client):
 
 
 # ── Negative controls: failures that must stay fast ───────────────────────────
-
-def test_connection_refused_is_not_retried(monkeypatch):
-    """'Is your server running?' help must arrive immediately, not after 3 retries."""
-    dead = LLMClient(base_url="http://127.0.0.1:1/v1", api_key="k", model="m")
-    monkeypatch.setattr("pengy.core.llm_client._sleep_interruptible",
-                        lambda seconds, is_cancelled: pytest.fail("must not sleep"))
-    events: list = []
-    with pytest.raises(RuntimeError) as raised:
-        for event in dead.chat([{"role": "user", "content": "go"}]):
-            events.append(event)
-    assert not retrying_events(events)
-    assert "Nothing answered" in str(raised.value)
-
 
 @pytest.mark.parametrize("status,body", [
     (400, {"error": {"message": "Invalid request"}}),

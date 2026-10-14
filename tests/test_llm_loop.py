@@ -491,10 +491,14 @@ class TestToolLoop:
         assert "hello" in result["content"]
 
     def test_api_error_raises_and_resets_client(self, stub, client):
-        # Empty queue → stub returns HTTP 500; client must raise, not hang
+        # Empty queue → stub returns HTTP 500; client must raise, not hang.
+        # A 500 now buys one retry, so the generator yields the retry notice
+        # before the failure surfaces -- drive it to the end, not just the
+        # first event.
         gen = client.chat([{"role": "user", "content": "hi"}])
         with pytest.raises(Exception):
-            next(gen)
+            for _ in gen:
+                pass
 
 
 # ── Tests: read_image attachment ───────────────────────────────────────────────

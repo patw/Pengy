@@ -690,10 +690,12 @@ class MainWindow(QMainWindow):
             session.chat_view.append_message(
                 "notice", response.get("message", "Context recovery — full history retained."))
         elif response["type"] == "retrying":
-            # 429/529 overload and provider timeouts: surface the wait instead of
-            # hanging silently.
+            # Backoff on a transient failure (overload, timeout, 5xx, dropped
+            # route): surface the wait instead of hanging silently.
             if session is self._tab_for_chat(self.active_chat_id):
-                label = "Timeout" if response.get("reason") == "timeout" else "Overloaded"
+                label = {"timeout": "Timeout", "server": "Server error",
+                         "unreachable": "Unreachable"}.get(
+                    response.get("reason"), "Overloaded")
                 self.chat_history.set_retrying(
                     "{} — retrying in {:.1f}s ({}/{})".format(
                         label,

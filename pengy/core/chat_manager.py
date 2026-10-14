@@ -1,5 +1,6 @@
 """Chat history management for Pengy."""
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -9,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 from pengy.core.config import get_config_dir
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -393,22 +396,33 @@ def save_chat(chat: dict) -> None:
     _update_index_entry(chat)
 
 
-def save_chat_progress(chat: dict) -> None:
+def save_chat_progress(chat: dict) -> bool:
     """Save an in-flight chat without clobbering out-of-band metadata edits.
 
     A worker holds its own snapshot of the chat dict for the whole run, so a
     rename that lands mid-run (a different copy, saved by another thread) would
-    be overwritten by the worker's next write. Adopt the on-disk title first;
+    be overwritten by the worker's next write.  Adopt the on-disk title first;
     messages still come from the worker's copy, which is the newer one.
+
+    Returns ``False`` when the write failed.  Mid-turn persistence is not a
+    precondition of the turn: the model's work is done and the tools have
+    already run, so a full disk must not end the run and throw that away.  The
+    caller reports it; the web worker already applied this policy to its final
+    save ("never let a save failure mask the run").
     """
     if not chat or not chat.get("id"):
-        return
+        return True
     on_disk = _safe_json_load(_chat_file(chat["id"]), expect=dict)
     if on_disk:
         title = on_disk.get("title")
         if title and title != chat.get("title"):
             chat["title"] = title
-    save_chat(chat)
+    try:
+        save_chat(chat)
+        return True
+    except OSError as exc:
+        logger.warning("Mid-turn save failed for chat %s: %s", chat.get("id"), exc)
+        return False
 
 
 def get_chat(chat_id: str) -> dict | None:
