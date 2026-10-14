@@ -598,6 +598,11 @@ The description says when to use it: instead of guessing when the request is amb
 
 **No user to ask.** A CLI run without a TTY on stdin (`pengy-cli "…" < /dev/null`, scripts, CI) has nobody to answer, and a cancel would be wrong: models read "User cancelled" as a refusal and stop with nothing done. The frontend sends `{"unavailable": true}` instead, and the model gets `NO_USER_ANSWER`: take the clearly most reasonable option and state the assumption, but leave a pure guess undone and say what is needed. The wording was chosen by eval: "choose and continue" made the model invent a target value for "change the currency"; this version still acts where the repo makes one answer clear ("bump the timeout" → 60, stated) and stops where it doesn't. The text is identical in all three editions.
 
+**No user to confirm.** The same rule applies to tool confirmation: a headless frontend sends
+`unavailable: true` and the model gets `NO_USER_CONFIRM` — explicitly *not* a refusal, so the
+run carries on where the choice is clear and never claims the tool ran. Aborting the run at the
+first write tool, and auto-approving it, are both wrong.
+
 ---
 
 #### Why These Three Tools?
@@ -631,6 +636,7 @@ LLM responds with tool call(s)
               ├── Execute              → execute → feed result → loop
               ├── Yes to all this turn → execute (yolo for rest of this LLM round-trip) → loop
               └── Cancel / Decline     → "Tool execution was declined by user." → loop
+              └── No user available    → NO_USER_CONFIRM (headless: not a refusal) → loop
 ```
 
 Both the GUI and CLI "Yes to all this turn" auto-approves all remaining tool calls
@@ -802,6 +808,18 @@ the observed causes (content filter, proxy that lost its upstream, a reasoning m
 whole output allowance went to reasoning tokens) and points at the knobs that fix the last
 one. `finish_reason=length` stays on the generation-limit path; an empty message *with* tool
 calls is a normal round.
+
+**A prompt nobody can answer is announced, not stranded.** A confirm/question/sudo prompt
+waits indefinitely **while a frontend is attached** — it must not expire under a user who
+stepped away (v1.11.4 removed the silent expiry for that reason). With no viewer attached, the
+web run emits a `notice` each minute and stops the run **with a notice** after a 30-minute
+lease: a worker blocked forever on a prompt nobody can see keeps its thread alive and leaves
+the chat showing an active task forever.
+
+A **headless CLI run** (no TTY: cron, script, CI) has nobody to confirm a tool. It must not
+abort the run, and must not auto-approve the tool; it declines and reports `NO_USER_CONFIRM`
+("no user is available", explicitly not a refusal), so the model carries on where the choice
+is clear. A real user decline keeps the "declined by user" wording.
 
 Anything else (400, 401, 403, 404, 422, context limits) is the request's fault and fails
 immediately: no amount of waiting makes the explanatory message arrive faster.

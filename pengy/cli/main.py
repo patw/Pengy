@@ -270,6 +270,7 @@ class PengyCLI:
         self.current_chat: dict | None = None
         self._no_save = no_save
         self._save_warned = False  # report a failed mid-turn save once, not per write
+        self._no_user_notice = False  # report the headless-confirmation notice once
         self._output_mode = "pretty"  # pretty | raw | json | silent
         self._turn_error = None  # set by _report_turn_error, read by single-shot mode
         self._update_llm_client()
@@ -1819,6 +1820,19 @@ class PengyCLI:
         if (tc == "all" or self._yolo_this_turn
                 or (tc == "safe" and tools.is_readonly_tool(response.get("name", "")))):
             return {"confirmed": True, "tool_call_id": response["tool_call_id"]}
+
+        if not sys.stdin.isatty():
+            # Headless (cron, script, CI): nobody can answer.  Aborting the whole
+            # run here threw away hours of work over one write tool, and "declined
+            # by user" made models read it as a refusal and stop.  Tell the model
+            # the truth and let it carry on.
+            if not self._no_user_notice:
+                self._no_user_notice = True
+                self._print_stderr("No terminal to confirm tool calls (non-interactive "
+                                   "run). The model is being told; use /config "
+                                   "tool_confirmation all|safe to run tools unattended.")
+            return {"confirmed": False, "unavailable": True,
+                    "tool_call_id": response["tool_call_id"]}
 
         while True:
             try:

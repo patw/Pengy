@@ -40,6 +40,13 @@ app = Flask(__name__)
 _workers: dict[str, "WebWorker"] = {}
 _workers_lock = threading.Lock()
 
+# Prompt lease (see WebWorker._await_user): a confirm/question/sudo prompt waits
+# indefinitely while a browser is attached, is announced each minute when nobody
+# is, and the run is stopped with a notice after the lease expires.
+_PROMPT_POLL_SECONDS = 25.0
+_PROMPT_NOTICE_SECONDS = 60.0
+_PROMPT_LEASE_SECONDS = 1800.0
+
 # Completed streams remain available briefly so a reconnecting browser can
 # consume the terminal event.  Persisted chat history is authoritative after
 # this grace period.
@@ -391,7 +398,10 @@ class WebWorker:
         self._sudo_result: str | None = None
         self._done = False
         self._cancelled = False
-        self._save_warned = False  # report a failed mid-turn save once, not per write
+        self._save_warned = False  # report a failed mid-turn save once, not per run
+        # Attached SSE consumers.  The prompt lease keys on this: a prompt waits
+        # forever while someone is watching, and is bounded when nobody is.
+        self._viewers = 0
         self._yolo_this_turn = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         # Scope sudo credentials and active processes to this worker; web
@@ -453,39 +463,78 @@ class WebWorker:
         """
         deadline = time.monotonic() + timeout
         index = start_index
-        while True:
-            event = None
-            with self._events_lock:
-                if index < len(self._events):
-                    event = self._events[index]
-                    index += 1
-                elif self._done:
-                    return
-                else:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        # This connection expired, not the worker. A control
-                        # event is deliberately absent from the replay log.
-                        event = {"type": "stream_rotate"}
+        # A viewer is attached for the lifetime of this generator: the worker's
+        # prompt lease keys on it (see _await_user).
+        self._viewers += 1
+        try:
+            while True:
+                event = None
+                with self._events_lock:
+                    if index < len(self._events):
+                        event = self._events[index]
+                        index += 1
+                    elif self._done:
+                        return
                     else:
-                        notified = self._new_event.wait(timeout=min(remaining, 25.0))
-                        if not notified:
-                            event = {"type": "keepalive"}
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            # This connection expired, not the worker. A control
+                            # event is deliberately absent from the replay log.
+                            event = {"type": "stream_rotate"}
+                        else:
+                            notified = self._new_event.wait(timeout=min(remaining, 25.0))
+                            if not notified:
+                                event = {"type": "keepalive"}
 
-            # Deliberately outside the mutex; see docstring above.
-            if event is not None:
-                yield event
-                if event.get("type") in ("final_response", "error", "stream_rotate"):
-                    return
+                # Deliberately outside the mutex; see docstring above.
+                if event is not None:
+                    yield event
+                    if event.get("type") in ("final_response", "error", "stream_rotate"):
+                        return
+        finally:
+            self._viewers -= 1
+
+    def _await_user(self, event: threading.Event) -> None:
+        """Wait for the user to answer a prompt, announcing that we are waiting.
+
+        While a browser is attached this waits indefinitely: a prompt must not
+        expire out from under a user who stepped away (v1.11.4 removed the silent
+        expiry for exactly that reason).  With no viewer attached, a notice is
+        emitted each minute, and after ``_PROMPT_LEASE_SECONDS`` the run is
+        cancelled *with a notice* -- a worker blocked forever on a prompt nobody
+        can see keeps its thread alive and leaves the chat showing an active task
+        forever, recoverable only by reopening the chat and pressing Stop.
+        """
+        waited = 0.0
+        next_notice = _PROMPT_NOTICE_SECONDS
+        while not event.wait(timeout=_PROMPT_POLL_SECONDS):
+            if self._cancelled:
+                return
+            waited += _PROMPT_POLL_SECONDS
+            if self._viewers > 0:
+                next_notice = waited + _PROMPT_NOTICE_SECONDS
+                continue
+            if waited >= _PROMPT_LEASE_SECONDS:
+                self._put_event({"type": "notice", "message":
+                    "No browser has been attached to this chat for "
+                    f"{int(_PROMPT_LEASE_SECONDS // 60)} minutes, so the waiting run is "
+                    "being stopped. Open the chat to answer prompts, then send the "
+                    "message again."})
+                self.cancel()
+                return
+            if waited >= next_notice:
+                self._put_event({"type": "notice", "message":
+                    "Waiting for you to answer in this chat — no browser is currently "
+                    "attached. Open the chat to continue, or press Stop."})
+                next_notice = waited + _PROMPT_NOTICE_SECONDS
 
     def _get_sudo_password(self, host: str | None = None) -> str | None:
         self._sudo_event.clear()
         # host is None for the local machine; the modal names a remote host.
         self._put_event({"type": "sudo_request", "host": host})
-        # Block until the user answers or cancels -- no timeout.  The CLI and GUI
-        # prompts wait indefinitely, and a hidden expiry here silently declined
-        # the command (and left the modal open) instead of matching them.
-        self._sudo_event.wait()
+        # Block until the user answers or cancels -- no silent expiry (see
+        # _await_user for the lease that bounds it when nobody is watching).
+        self._await_user(self._sudo_event)
         if self._cancelled:
             return None
         return self._sudo_result
@@ -617,9 +666,9 @@ class WebWorker:
                             send_value = {"confirmed": True, "tool_call_id": tool_call_id}
                         else:
                             self._confirm_event.clear()
-                            # Block until the user answers or cancels -- no timeout,
-                            # matching the CLI/GUI prompts (see _get_sudo_password).
-                            self._confirm_event.wait()
+                            # Block until the user answers or cancels -- no silent
+                            # expiry (see _await_user for the lease).
+                            self._await_user(self._confirm_event)
                             if self._cancelled:
                                 break
                             result = self._confirm_result

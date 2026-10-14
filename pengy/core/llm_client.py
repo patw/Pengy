@@ -493,6 +493,17 @@ NO_USER_ANSWER = (
     "If it would be a pure guess, leave that part undone and say what you need."
 )
 
+# Sent back for a tool call that needs confirmation when the frontend has nobody
+# to ask (a CLI run with no TTY on stdin -- cron, scripts, CI).  "Declined by
+# user" is a lie there and reads as a refusal, which made unattended runs stop
+# with nothing done; this tells the model to carry on where the choice is clear.
+NO_USER_CONFIRM = (
+    "No user is available to confirm this tool (non-interactive run). Do not treat this as "
+    "a refusal. If running this tool is clearly the right next step, say so in your reply "
+    "and continue without it; if it was optional, carry on with the rest of the task. "
+    "Never claim the tool ran."
+)
+
 
 def _format_question_answers(questions: list[dict], answers: list[str]) -> str:
     """Format question answers for the tool result message."""
@@ -1301,7 +1312,11 @@ class LLMClient:
                                    "name": tool_name, "args": tool_args,
                                    "content": result, "declined": False}
                         else:
-                            declined_msg = "Tool execution was declined by user."
+                            # A headless run (cron, script, CI) has nobody to ask.
+                            # "Declined by user" reads as a refusal and stopped the
+                            # whole run with nothing done; say what is actually true.
+                            declined_msg = (NO_USER_CONFIRM if confirm and confirm.get("unavailable")
+                                            else "Tool execution was declined by user.")
                             current_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
