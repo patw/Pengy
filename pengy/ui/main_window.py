@@ -38,7 +38,7 @@ class _TabSession:
     chat_view: ChatView
     worker: ChatWorker | None = None
     worker_thread: QThread | None = None
-    yolo_this_turn: bool = False
+    tools_approved_for_session: bool = False  # Memory-only; never saved to chat/config.
     thinking: bool = False
     tool_running: bool = False
     prompt_tokens: int = 0
@@ -571,8 +571,6 @@ class MainWindow(QMainWindow):
         if images is None:
             images = []
 
-        session.yolo_this_turn = False
-
         refs = []
         for image_path in images:
             try:
@@ -721,7 +719,7 @@ class MainWindow(QMainWindow):
             tc = self.config.get("tool_confirmation")
             skip_confirm = (
                 tc == "all"
-                or session.yolo_this_turn
+                or session.tools_approved_for_session
                 or (tc == "safe" and tools.is_readonly_tool(response.get("name", "")))
             )
             if skip_confirm:
@@ -733,7 +731,6 @@ class MainWindow(QMainWindow):
             else:
                 self._handle_tool_confirm(chat_id, session, response)
         elif response["type"] == "assistant_tool_calls":
-            session.yolo_this_turn = False
             # The narration the model wrote alongside its tool calls is
             # persisted and shows on reload, so it has to render live too —
             # before the tool cards, which is the order it was written in.
@@ -913,11 +910,11 @@ class MainWindow(QMainWindow):
             return
         dialog = ToolConfirmDialog(tool_info, self)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.confirmed:
-            if dialog.yolo_turn:
-                session.yolo_this_turn = True
+            if dialog.approve_session:
+                session.tools_approved_for_session = True
             session.worker.send_confirmation({
                 "confirmed": True,
-                "yolo_turn": dialog.yolo_turn,
+                "yolo_turn": False,  # Session approval is owned by the Qt frontend.
                 "tool_call_id": tool_info["tool_call_id"],
             })
         else:
@@ -1304,20 +1301,19 @@ class QuestionDialog(QDialog):
 
 
 class ToolConfirmDialog(QDialog):
-    """Dialog for confirming tool execution with Yes-to-all-this-turn."""
+    """Confirm one tool or approve tools for this tab until it is closed."""
 
     def __init__(self, tool_info: dict, parent=None):
         super().__init__(parent)
         self.confirmed = False
-        self.yolo_turn = False
+        self.approve_session = False
         self.setup_ui(tool_info)
 
     def setup_ui(self, tool_info: dict):
         """Build the confirmation dialog."""
         self.setWindowTitle(f"Confirm Tool: {tool_info['name']}")
         self.setModal(True)
-        self.resize(480, 320)
-        self.setMaximumWidth(600)
+        self.resize(840, 480)
 
         theme = self.parent()._theme if self.parent() is not None and hasattr(self.parent(), "_theme") else get_theme()
 
@@ -1355,16 +1351,18 @@ class ToolConfirmDialog(QDialog):
         execute_btn.clicked.connect(self._on_execute)
         btn_layout.addWidget(execute_btn)
 
-        yes_all_btn = QPushButton("Yes to All\nThis Turn")
-        yes_all_btn.setStyleSheet(f"""
+        approve_session_btn = QPushButton("Execute & Don't Ask Again\nThis Session")
+        approve_session_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {theme['warning']}; color: white; border: none;
                 border-radius: 6px; padding: 8px 14px; font-weight: bold;
             }}
             QPushButton:hover {{ background-color: {theme['warning_hover']}; }}
         """)
-        yes_all_btn.clicked.connect(self._on_yes_all)
-        btn_layout.addWidget(yes_all_btn)
+        approve_session_btn.setToolTip("Approve all future tools in this chat tab until it is closed or the app exits. "
+                               "Other tabs, questions, and sudo passwords still ask.")
+        approve_session_btn.clicked.connect(self._on_approve_session)
+        btn_layout.addWidget(approve_session_btn)
 
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setStyleSheet(f"""
@@ -1381,10 +1379,10 @@ class ToolConfirmDialog(QDialog):
 
     def _on_execute(self):
         self.confirmed = True
-        self.yolo_turn = False
+        self.approve_session = False
         self.accept()
 
-    def _on_yes_all(self):
+    def _on_approve_session(self):
         self.confirmed = True
-        self.yolo_turn = True
+        self.approve_session = True
         self.accept()

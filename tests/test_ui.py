@@ -1350,3 +1350,183 @@ class TestContextCompactedNotice:
         text = "Context recovery — history summary; 41,200 fewer characters."
         msgs = self._dispatch(qapp, {"type": "context_compacted", "message": text})
         assert [m["content"] for m in msgs] == [text]
+
+
+class TestToolConfirmDialog:
+    """The Qt tool-confirmation dialog: it must be big enough to read, and its
+    "don't ask again" choice must actually last.
+
+    It opened at 480x320, which was too small — a run_bash command or a JSON
+    argument body wrapped into a few cramped lines with the buttons crowding the
+    edge. It is now 840x480: 75% wider and 50% taller.
+
+    Separately, the approval flag was cleared on every model round, so approving
+    a bash call and then letting the model call bash again re-prompted even
+    though the user had asked not to be asked. The flag now belongs to the chat
+    tab and is never written to the chat or to config.
+    """
+
+    @pytest.fixture
+    def dialog(self, qapp):
+        from pengy.ui.main_window import ToolConfirmDialog
+
+        d = ToolConfirmDialog({"name": "run_bash",
+                               "args": {"command": "ls -la /Users/patw"},
+                               "tool_call_id": "tc1"})
+        yield d
+        d.deleteLater()
+        qapp.processEvents()
+
+    def test_dialog_is_enlarged(self, dialog):
+        # 75% wider (480 -> 840) and 50% taller (320 -> 480).
+        assert dialog.width() == 480 * 7 // 4 == 840
+        assert dialog.height() == 320 * 3 // 2 == 480
+        # A maximum-width cap narrower than the dialog silently undoes resize().
+        assert dialog.maximumWidth() >= dialog.width()
+
+    def test_arguments_are_visible(self, dialog):
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        edit = dialog.findChild(QPlainTextEdit)
+        assert edit is not None
+        assert edit.isReadOnly()
+        assert "ls -la /Users/patw" in edit.toPlainText()
+
+    def test_session_approval_button_explains_its_scope(self, dialog):
+        from PySide6.QtWidgets import QPushButton
+
+        approve = next(b for b in dialog.findChildren(QPushButton)
+                       if b.text() == "Execute & Don't Ask Again\nThis Session")
+        assert "chat tab" in approve.toolTip()
+
+    def test_execute_confirms_once_only(self, dialog):
+        from PySide6.QtWidgets import QPushButton
+
+        next(b for b in dialog.findChildren(QPushButton) if b.text() == "Execute").click()
+        assert dialog.confirmed is True
+        assert dialog.approve_session is False
+
+    def test_approve_button_reports_the_session_choice(self, dialog):
+        from PySide6.QtWidgets import QPushButton
+
+        next(b for b in dialog.findChildren(QPushButton)
+             if b.text().startswith("Execute & Don't Ask Again")).click()
+        assert dialog.confirmed is True
+        assert dialog.approve_session is True
+
+    # ── how the choice is honoured ────────────────────────────────
+
+    def _session(self, approved: bool):
+        """A _TabSession stand-in with a worker that records confirmations."""
+        from types import SimpleNamespace
+        from pengy.ui.chat_view import ChatView
+
+        sent: list = []
+        session = SimpleNamespace(
+            chat={"title": "chat"}, chat_view=ChatView(),
+            tools_approved_for_session=approved,
+            thinking=False, tool_running=False,
+            prompt_tokens=0, completion_tokens=0,
+            worker=SimpleNamespace(send_confirmation=sent.append),
+        )
+        return session, sent
+
+    def _harness(self, session):
+        """Just enough of MainWindow to run _on_worker_response's tool_request
+        branch, with _handle_tool_confirm recorded instead of shown."""
+        from types import SimpleNamespace
+        from pengy.ui.main_window import MainWindow
+
+        class _Harness:
+            active_chat_id = None
+            # Confirm every tool call: the dialog path, not YOLO or safe-only.
+            config = {"tool_confirmation": "none"}
+            tab_widget = SimpleNamespace(count=lambda: 0)
+            chat_history = SimpleNamespace(update_token_usage=lambda *a: None)
+            _update_live_tokens = MainWindow._update_live_tokens
+            _update_tab_title = MainWindow._update_tab_title
+            _on_worker_response = MainWindow._on_worker_response
+            asked: list = []
+
+            def _tab_for_chat(self, cid):
+                return self.open_tabs.get(cid)
+
+            def _sender_chat_id(self):
+                return "c1"
+
+            def _handle_tool_confirm(self, chat_id, sess, info):
+                self.asked.append(info["tool_call_id"])
+
+        h = _Harness()
+        h.asked = []
+        h.open_tabs = {"c1": session}
+        return h
+
+    def test_session_approval_survives_a_followup_bash_call(self, qapp, tmp_cfg):
+        """The reported bug: approve one bash call with "don't ask again";
+        a later bash call, after another model round, must not re-prompt."""
+        session, sent = self._session(approved=False)
+        session.chat = {"id": "c1", "title": "chat", "messages": []}
+        h = self._harness(session)
+
+        # Simulate accepting the session-approval button for the first request.
+        def approve_session(chat_id, sess, info):
+            h.asked.append(info["tool_call_id"])
+            sess.tools_approved_for_session = True
+            sent.append({"confirmed": True, "tool_call_id": info["tool_call_id"]})
+
+        h._handle_tool_confirm = approve_session
+        h._on_worker_response({"type": "tool_request", "name": "run_bash",
+                               "args": {"command": "pwd"}, "tool_call_id": "tc1"})
+        assert h.asked == ["tc1"]
+
+        # A followup model round must not clear the tab-scoped flag.
+        h._on_worker_response({"type": "assistant_tool_calls",
+                               "message": {"role": "assistant", "content": "",
+                                           "tool_calls": []}})
+        assert session.tools_approved_for_session is True
+
+        # This is the reported second bash call. It must be auto-approved by
+        # the front-end instead of opening another confirmation dialog.
+        h._on_worker_response({"type": "tool_request", "name": "run_bash",
+                               "args": {"command": "ls"}, "tool_call_id": "tc2"})
+        qapp.processEvents()  # the auto-confirm is posted with singleShot(0)
+
+        assert h.asked == ["tc1"]
+        assert len(sent) == 2
+        assert sent[1]["confirmed"] is True
+        assert sent[1]["tool_call_id"] == "tc2"
+        assert "tools_approved_for_session" not in session.chat
+        session.chat_view.deleteLater()
+
+    def test_without_approval_the_dialog_is_shown(self, qapp):
+        session, sent = self._session(approved=False)
+        h = self._harness(session)
+
+        h._on_worker_response({"type": "tool_request", "name": "run_bash",
+                               "args": {"command": "ls"}, "tool_call_id": "tc9"})
+        qapp.processEvents()
+
+        assert h.asked == ["tc9"]
+        assert sent == []
+        session.chat_view.deleteLater()
+
+    def test_approval_survives_a_new_message_but_not_a_new_tab(self, qapp, tmp_cfg):
+        """The approval lives on the tab: it is never cleared mid-chat, never
+        written to the chat record, and a fresh tab starts asking again."""
+        from pengy.ui.main_window import _TabSession
+
+        assert _TabSession(chat={}, chat_view=None).tools_approved_for_session is False
+
+        session, _ = self._session(approved=True)
+        session.chat = {"id": "c1", "title": "chat", "messages": []}
+        h = self._harness(session)
+
+        # A later model round must not clear it -- the old code reset the flag
+        # here (and in send_message), which is what re-prompted.
+        h._on_worker_response({"type": "assistant_tool_calls",
+                               "message": {"role": "assistant", "content": "",
+                                           "tool_calls": []}})
+        assert session.tools_approved_for_session is True
+        assert "tools_approved_for_session" not in session.chat
+        session.chat_view.deleteLater()
