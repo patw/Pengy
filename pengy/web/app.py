@@ -555,7 +555,7 @@ class WebWorker:
 
                 if rtype in ("retrying", "context_compacted"):
                     # Backoff sleep handled inside the generator; push event
-                    # through so the SSE stream shows "Overloaded, retrying…"
+                    # through so the SSE stream shows "Overloaded/Timeout, retrying…"
                     self._put_event(response)
                     continue
 

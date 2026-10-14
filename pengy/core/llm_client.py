@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from urllib.parse import urlparse
 
-from openai import APIConnectionError, APIStatusError, OpenAI
+from openai import APITimeoutError, APIConnectionError, APIStatusError, OpenAI
 
 from pengy.core import tools as _tools_mod
 from pengy.core.context_recovery import Recovery, SUMMARY_PROMPT
@@ -34,6 +34,18 @@ _BASE_DELAY = 1.0          # seconds
 _MAX_DELAY = 60.0          # cap
 _JITTER = 0.25             # ±25 %
 _RETRYABLE_STATUSES = {429, 529}
+
+# ── Provider / transport timeouts ────────────────────────────────
+# A timeout is the one failure that usually means "the endpoint was busy", not
+# "the request was wrong", so it gets a retry budget of its own.  The budget is
+# deliberately smaller than _MAX_RETRIES: Pengy asks for the whole reply in one
+# non-streaming request, so llm_timeout is total wall clock per attempt, and five
+# retries at the 300 s default would hang a turn for ~25 minutes before the user
+# saw the timeout message.  Cancel is polled during every backoff sleep.
+_MAX_TIMEOUT_RETRIES = 3
+# 408 Request Timeout, and 504 Gateway Timeout -- a proxy answering for an
+# upstream that ran out of time, which is the same failure seen from the client.
+_TIMEOUT_STATUSES = {408, 504}
 
 # Only context errors get a size-reduction retry; generic bad requests do not.
 _MAX_CONTEXT_RETRIES = 4
@@ -236,6 +248,35 @@ def _backoff_delay(attempt: int, retry_after: float | None) -> float:
         base = min(_BASE_DELAY * (2 ** attempt), _MAX_DELAY)
     jitter = base * _JITTER * (random.random() * 2.0 - 1.0)
     return max(0.1, base + jitter)
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    """Whether a failure means "the endpoint did not answer in time".
+
+    Two shapes reach Pengy: the SDK's own deadline (``APITimeoutError``, which
+    carries no HTTP status at all) and a provider that answers in time with a
+    timeout status (408, or 504 from a proxy).  Both are worth re-sending.
+
+    A plain ``APIConnectionError`` -- connection refused, DNS, TLS -- is
+    deliberately *not* a timeout: the endpoint is not there, and retrying it
+    only delays the "is your server running?" help Pengy already has for that.
+    """
+    if isinstance(exc, APITimeoutError):
+        return True
+    if isinstance(exc, APIStatusError):
+        return exc.status_code in _TIMEOUT_STATUSES
+    return False
+
+
+def _timeout_delay(attempt: int, exc: BaseException) -> float:
+    """Backoff before a timeout retry.
+
+    A 408/504 answer may carry Retry-After; the SDK's own deadline has no
+    response object, so it falls back to the plain exponential ladder.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", {}) if response is not None else {}
+    return _backoff_delay(attempt, _retry_after_delay(getattr(exc, "status_code", 0), headers))
 
 
 def _sleep_interruptible(seconds: float, is_cancelled: Callable[[], bool] | None):
@@ -641,6 +682,42 @@ class LLMClient:
     def _reset_client(self):
         self._client = None
 
+    def _pause_after_timeout(self, attempt: int, exc: BaseException,
+                             cancel_fn: Callable[[], bool] | None,
+                             accumulated_usage: dict):
+        """Announce one timeout retry, sleep out, reset the pooled client.
+
+        Yields the ``retrying`` event, then the cancellation notice when the
+        user cancels during the sleep; returns whether the caller should re-send
+        the request.  *attempt* is the number of timeout retries already spent
+        (0-based), so the ladder matches the 429/529 path: 1s, 2s, 4s.  Shared by
+        the turn request and the context-summary request so every frontend sees
+        one shape of timeout event.
+        """
+        delay = _timeout_delay(attempt, exc)
+        message = exc.message if isinstance(exc, APIStatusError) else str(exc)
+        yield {
+            "type": "retrying",
+            "reason": "timeout",
+            "attempt": attempt + 1,
+            "max_attempts": _MAX_TIMEOUT_RETRIES,
+            "delay_secs": round(delay, 1),
+            "status_code": getattr(exc, "status_code", 0),
+            "message": message or "Request timed out",
+        }
+        try:
+            _sleep_interruptible(delay, cancel_fn)
+        except _Cancelled:
+            yield {
+                "type": "final_response",
+                "content": "Request cancelled during backoff.",
+                "message": None,
+                "usage": accumulated_usage,
+            }
+            return False
+        self._reset_client()
+        return True
+
     def chat(self, messages: list[dict], tool_confirmation: str = "none",
              reasoning_effort: str = "", preserve_reasoning: bool = False,
              cancel_fn: Callable[[], bool] | None = None,
@@ -685,15 +762,31 @@ class LLMClient:
 
         def summarize(source):
             if cancel_fn and cancel_fn(): raise _Cancelled()
-            try:
-                reply = self.client.chat.completions.create(
-                    model=model or self.model,
-                    messages=[{"role": "system", "content": SUMMARY_PROMPT},
-                              {"role": "user", "content": source}],
-                    **{output_token_parameter: 2048},
-                )
-            except APIStatusError as exc:
-                raise RuntimeError("Context summary request failed; original history retained. " + str(exc)) from exc
+            summary_kwargs = {
+                "model": model or self.model,
+                "messages": [{"role": "system", "content": SUMMARY_PROMPT},
+                             {"role": "user", "content": source}],
+                output_token_parameter: 2048,
+            }
+            summary_timeouts = 0
+            # The summary is part of this turn, so a provider timeout gets the
+            # same retry budget here as the turn request itself -- a big
+            # conversation's prefill is exactly what blows llm_timeout on a slow
+            # engine, and losing the turn there is the worst place to lose it.
+            # No events are emitted: Recovery calls summarize() synchronously and
+            # cannot carry a yield.
+            while True:
+                try:
+                    reply = self.client.chat.completions.create(**summary_kwargs)
+                    break
+                except (APITimeoutError, APIStatusError) as exc:
+                    if not _is_timeout_error(exc) or summary_timeouts >= _MAX_TIMEOUT_RETRIES:
+                        if isinstance(exc, APIStatusError):
+                            raise RuntimeError("Context summary request failed; original history retained. " + str(exc)) from exc
+                        raise _translate_api_error(exc, self.base_url) from exc
+                    summary_timeouts += 1
+                    _sleep_interruptible(_timeout_delay(summary_timeouts - 1, exc), cancel_fn)
+                    self._reset_client()
             if reply.usage:
                 for key in accumulated_usage:
                     accumulated_usage[key] += getattr(reply.usage, key, 0) or 0
@@ -713,7 +806,8 @@ class LLMClient:
                 request_messages.append({"role": "user", "content": image_rejection})
             context_retries = 0
             rate_retries = 0
-            # ── API call with 429 / 529 exponential backoff ──────────
+            timeout_retries = 0
+            # ── API call with 429 / 529 / timeout exponential backoff ──────
             while True:
                 if cancel_fn and cancel_fn():
                     raise _Cancelled()
@@ -796,6 +890,17 @@ class LLMClient:
                             f"{context_retries} tool-output reductions. The full tool outputs "
                             "remain in chat history. Try a shorter request or a larger-context model."
                         ) from e
+                    if _is_timeout_error(e):
+                        # 408 / 504 — the endpoint answered, saying it ran out of
+                        # time.  Same backoff ladder as 429/529, own budget.
+                        if timeout_retries >= _MAX_TIMEOUT_RETRIES:
+                            self._reset_client()
+                            raise _translate_api_error(e, self.base_url) from e
+                        if not (yield from self._pause_after_timeout(
+                                timeout_retries, e, cancel_fn, accumulated_usage)):
+                            return
+                        timeout_retries += 1
+                        continue
                     if e.status_code not in _RETRYABLE_STATUSES or rate_retries >= _MAX_RETRIES:
                         self._reset_client()
                         # 401/403 → tell the user how to configure Pengy instead
@@ -825,6 +930,20 @@ class LLMClient:
                         }
                         return
                     self._reset_client()
+                except APITimeoutError as e:
+                    # The SDK's own deadline (llm_timeout) elapsed with no answer
+                    # at all.  This is the failure a retry actually fixes -- a busy
+                    # or single-slot endpoint usually answers on the next attempt.
+                    # Once the budget is spent the user gets the ordinary timeout
+                    # message, unchanged.
+                    if timeout_retries >= _MAX_TIMEOUT_RETRIES:
+                        self._reset_client()
+                        raise _translate_api_error(e, self.base_url) from e
+                    if not (yield from self._pause_after_timeout(
+                            timeout_retries, e, cancel_fn, accumulated_usage)):
+                        return
+                    timeout_retries += 1
+                    continue
                 except _Cancelled:
                     yield {
                         "type": "final_response", "content": "Request cancelled.",

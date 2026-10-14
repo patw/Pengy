@@ -1442,11 +1442,16 @@ class PengyCLI:
                             response.get("max_attempts", 0)))
 
                 elif rtype == "retrying":
-                    # 429/529 backoff — surface it instead of hanging silently.
+                    # 429/529 overload and provider timeouts — surface the wait
+                    # instead of hanging silently.  A client-side timeout carries
+                    # no HTTP status, so the label stands alone there.
                     expecting_api_call = True
+                    label = "Timeout" if response.get("reason") == "timeout" else "Overloaded"
+                    status = response.get("status_code", "?")
+                    head = label if status in (0, "?") else f"{label} (HTTP {status})"
                     self.console.print(
-                        "[yellow]Overloaded (HTTP {}) — retrying in {:.1f}s ({}/{})[/yellow]".format(
-                            response.get("status_code", "?"),
+                        "[yellow]{} — retrying in {:.1f}s ({}/{})[/yellow]".format(
+                            head,
                             response.get("delay_secs", 0),
                             response.get("attempt", 0),
                             response.get("max_attempts", 0),

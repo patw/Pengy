@@ -764,9 +764,22 @@ This is reactive recovery, not proactive token counting or a model-specific cont
 
 ### Retry and backoff
 
-Only **429** and **529** use exponential backoff. Up to `_MAX_RETRIES = 5` retries (6 attempts
-total); explicit context-limit failures instead use the separate reduction policy above. Other
-errors propagate immediately.
+**429** and **529** use exponential backoff: up to `_MAX_RETRIES = 5` retries (6 attempts
+total). Explicit context-limit failures instead use the separate reduction policy above.
+Other errors propagate immediately.
+
+**Provider and transport timeouts get their own, smaller budget.** A timeout is the failure
+that usually means the endpoint was *busy*, not that the request was wrong, and the request is
+non-streaming — `llm_timeout` is total wall clock per attempt. Three shapes are retried:
+HTTP **408** (Request Timeout), HTTP **504** (Gateway Timeout, a proxy answering for an
+upstream that ran out of time), and the SDK's own deadline (`APITimeoutError`, which carries
+no HTTP status). Up to `_MAX_TIMEOUT_RETRIES = 3` retries per request — deliberately below 5,
+because five attempts at the 300 s default would hang a turn for ~25 minutes. The context
+summary request shares this budget. Once it is spent, the ordinary timeout message is raised
+unchanged.
+
+A plain connection failure (refused, DNS, TLS) is **not** a timeout and is never retried: the
+endpoint is not there, and retrying only delays the "is your server running?" help.
 
 Delay for attempt *n* (0-indexed):
 
@@ -780,8 +793,9 @@ made to wait it out. Cancelling during backoff yields a normal final response
 (`"Request cancelled during backoff."`), not an error.
 
 Each retry emits a `retrying` event so the UI can show progress; it carries `attempt`,
-`max_attempts`, `delay_secs`, `status_code`, and `message`. The HTTP client is recreated between
-attempts.
+`max_attempts`, `delay_secs`, `status_code`, and `message`, plus `reason: "timeout"` for the
+timeout path (absent for 429/529) so the frontends can label the two differently. A
+client-side timeout reports `status_code: 0`. The HTTP client is recreated between attempts.
 
 ### Token usage
 
