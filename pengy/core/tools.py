@@ -543,7 +543,7 @@ _BASE_TOOLS = [
                     "dry_run": {"type": "boolean", "description": "Preview only; nothing is written"},
                     "postconditions": {
                         "type": "array",
-                        "description": "Optional {path, contains, does_not_contain} checks on the edited text; a failed check cancels every edit",
+                        "description": "Optional {path, contains, does_not_contain} plain-substring checks on a file's whole edited text, comments and strings included; a failed check cancels every edit",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -1404,6 +1404,31 @@ def _replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = 
         return f"Error replacing text in file: {e}"
 
 
+def _forbidden_text_location(content: str, needle: str) -> str:
+    """Where *needle* first occurs in *content*, for a failed ``does_not_contain``.
+
+    "at line N: <that line>", plus "(+K more)" for further matches.  The check
+    is a plain substring test, so the match is often in a comment or string the
+    caller didn't mean; showing the line makes that a one-look fix instead of
+    a blind retry.  A line longer than 160 characters is cut to a window around
+    the match.  Same text as the Rust and C++ editions.
+    """
+    pos = content.index(needle)
+    more = content.count(needle, pos + len(needle)) if needle else 0
+    line_no = content.count("\n", 0, pos) + 1
+    start = content.rfind("\n", 0, pos) + 1
+    end = content.find("\n", pos)
+    raw = content[start:] if end == -1 else content[start:end]
+    line = raw.strip()
+    lead = len(raw) - len(raw.lstrip())
+    col = min(max(pos - start - lead, 0), len(line))
+    if len(line) > 160:
+        lo = max(0, min(col - 60, len(line) - 160))
+        hi = min(lo + 160, len(line))
+        line = ("..." if lo > 0 else "") + line[lo:hi] + ("..." if hi < len(line) else "")
+    return f"at line {line_no}: {line}" + (f" (+{more} more)" if more else "")
+
+
 def _apply_changes(changes: list[dict], dry_run: bool = False,
                    postconditions: list[dict] | None = None) -> str:
     """Apply exact-text changes transactionally and return a reviewable diff."""
@@ -1522,8 +1547,11 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
             missing = condition.get("does_not_contain")
             if contains is not None and (not isinstance(contains, str) or contains not in content):
                 errors.append(f"postcondition {index}: {condition.get('path')} does not contain expected text")
-            if missing is not None and (not isinstance(missing, str) or missing in content):
+            if missing is not None and not isinstance(missing, str):
                 errors.append(f"postcondition {index}: {condition.get('path')} still contains forbidden text")
+            elif missing is not None and missing in content:
+                errors.append(f"postcondition {index}: {condition.get('path')} still contains "
+                              f"forbidden text {_forbidden_text_location(content, missing)}")
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             errors.append(f"postcondition {index}: {exc}")
 
@@ -1892,6 +1920,38 @@ def _format_command_output(stdout_b: bytes, stderr_b: bytes, returncode: int,
     return output, stderr
 
 
+def _output_after_timeout(proc, exc: subprocess.TimeoutExpired) -> tuple[bytes, bytes]:
+    """What a timed-out ``communicate()`` had read, once the group is killed.
+
+    communicate() keeps what it has read, and calling it again after the kill
+    returns all of it.  A grandchild that left the process group (setsid) can
+    hold the pipes open, so that call is bounded and falls back to the partial
+    output its own timeout carries.
+    """
+    try:
+        return proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired as again:
+        return again.stdout or exc.stdout or b"", again.stderr or exc.stderr or b""
+    except (OSError, ValueError):
+        return exc.stdout or b"", exc.stderr or b""
+
+
+def _timed_out_output(error: str, stdout_b: bytes, stderr_b: bytes, used_sudo: bool = False,
+                      encoding: "str | None" = None) -> str:
+    """*error* plus whatever the command printed before it was killed.
+
+    The last lines of a hung watcher or build are what explain the hang, and
+    dropping them left the model with nothing to go on.  Same text as the Rust
+    and C++ editions.
+    """
+    output, _ = _format_command_output(stdout_b, stderr_b, 0, used_sudo, encoding)
+    if not stdout_b and output.startswith("\n"):
+        output = output[1:]  # stderr only: no stdout line to separate it from
+    if not output.strip():
+        return error
+    return f"{error}. Output before it was killed:\n{_snip_tool_output(output)}"
+
+
 def _sudo_auth_failure_note(ctx: "ToolContext", host: "str | None", stderr: str) -> str:
     """Forget *host*'s cached password after a failed sudo authentication."""
     if not _SUDO_AUTH_FAILURE_RE.search(stderr or ""):
@@ -1979,10 +2039,12 @@ def _run_bash_local(command: str, ctx: "ToolContext", run_cwd: "str | None",
         if used_sudo:
             output += _sudo_auth_failure_note(ctx, None, stderr)
         return _snip_tool_output(output) or "(No output)"
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         _kill_proc_group(proc)
         ctx.unregister_process(proc)
-        return f"Error: Command timed out after {_tool_timeout} seconds"
+        stdout_b, stderr_b = _output_after_timeout(proc, exc)
+        return _timed_out_output(f"Error: Command timed out after {_tool_timeout} seconds",
+                                 stdout_b, stderr_b, password is not None)
     except Exception as e:
         ctx.unregister_process(proc)
         return f"Error running command: {e}"
@@ -2005,6 +2067,9 @@ def _run_bash_remote(command: str, ctx: "ToolContext", run_cwd: "str | None",
     read_fd, write_fd = os.pipe()
     proc = None
     writer = None
+    out_chunks: list[bytes] = []
+    err_chunks: list[bytes] = []
+    readers: list[threading.Thread] = []
 
     def _feed():
         # Threaded: a large command can exceed the pipe buffer, and a blocking
@@ -2052,8 +2117,6 @@ def _run_bash_remote(command: str, ctx: "ToolContext", run_cwd: "str | None",
             os.close(read_fd)
         writer = threading.Thread(target=_feed, daemon=True)
         writer.start()
-        out_chunks: list[bytes] = []
-        err_chunks: list[bytes] = []
         # Wait on ssh itself rather than on stdout EOF (communicate): if some
         # other process inherited the output pipes (a ProxyCommand helper), EOF
         # never comes while the channel stays open, and the channel is only
@@ -2087,7 +2150,11 @@ def _run_bash_remote(command: str, ctx: "ToolContext", run_cwd: "str | None",
     except subprocess.TimeoutExpired:
         _kill_proc_group(proc)
         ctx.unregister_process(proc)
-        return f"Error: Command timed out after {_tool_timeout} seconds"
+        _close_channel()
+        for reader in readers:
+            reader.join(timeout=5)
+        return _timed_out_output(f"Error: Command timed out after {_tool_timeout} seconds",
+                                 b"".join(out_chunks), b"".join(err_chunks), password is not None)
     except Exception as e:
         if proc is not None:
             _kill_proc_group(proc)
@@ -2174,10 +2241,12 @@ def _run_powershell(command: str, ctx: "ToolContext" = None,
         output, _ = _format_command_output(
             stdout_b, stderr_b, proc.returncode, False, encoding="utf-8")
         return _snip_tool_output(output) or "(No output)"
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         _kill_proc_group(proc)
         ctx.unregister_process(proc)
-        return f"Error: Command timed out after {_tool_timeout} seconds"
+        stdout_b, stderr_b = _output_after_timeout(proc, exc)
+        return _timed_out_output(f"Error: Command timed out after {_tool_timeout} seconds",
+                                 stdout_b, stderr_b, encoding="utf-8")
     except Exception as e:
         ctx.unregister_process(proc)
         return f"Error running PowerShell: {e}"
@@ -2421,10 +2490,12 @@ def _run_python(code: str, ctx: "ToolContext" = None, cwd: str | None = None) ->
         if proc.returncode != 0:
             output += f"\n[Exit code: {proc.returncode}]"
         return _snip_tool_output(output) or "(No output)"
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         _kill_proc_group(proc)
         ctx.unregister_process(proc)
-        return f"Error: Python execution timed out after {_tool_timeout} seconds"
+        stdout_b, stderr_b = _output_after_timeout(proc, exc)
+        return _timed_out_output(f"Error: Python execution timed out after {_tool_timeout} seconds",
+                                 stdout_b, stderr_b)
     except Exception as e:
         ctx.unregister_process(proc)
         return f"Error running Python: {e}"

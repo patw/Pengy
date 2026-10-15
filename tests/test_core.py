@@ -2191,6 +2191,14 @@ class TestRemoteRunBash:
         assert argv[-4:] == ["--", "web1", "sh", "-s"]
         assert "-T" in argv and "BatchMode=yes" in argv
 
+    def test_remote_timeout_keeps_output_printed_before_the_kill(self, remote, monkeypatch):
+        from pengy.core import tools
+        from pengy.core.tools import execute_tool
+        monkeypatch.setattr(tools, "_tool_timeout", 2)
+        result = execute_tool("run_bash", {"command": "echo started; sleep 30", "host": "web1"})
+        assert result.startswith(
+            "Error: Command timed out after 2 seconds. Output before it was killed:\nstarted"), result
+
     def test_unelevated_remote_command(self, remote, tmp_path):
         from pengy.core.tools import execute_tool
         result = execute_tool("run_bash", {

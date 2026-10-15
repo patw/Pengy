@@ -534,11 +534,11 @@ Each entry in `changes` is `{path, operations[]}`. Each operation has a `kind`:
 | `insert_after` | `anchor`, `text` | Insert `text` immediately after `anchor` |
 | `delete` | `old` | Remove exact text |
 
-Every operation also accepts `expected_matches` (positive int, default `1`); the operation fails unless the match count is exactly that. `dry_run=true` returns the unified diff without writing. `postconditions` is a list of `{path, contains?, does_not_contain?}` checks evaluated *before* any write; a failed check aborts the whole transaction.
+Every operation also accepts `expected_matches` (positive int, default `1`); the operation fails unless the match count is exactly that. `dry_run=true` returns the unified diff without writing. `postconditions` is a list of `{path, contains?, does_not_contain?}` checks evaluated *before* any write; a failed check aborts the whole transaction. Each check is a plain substring test over the file's whole edited text, comments and strings included. A failed `does_not_contain` names where it matched: `postcondition N: <path> still contains forbidden text at line L: <line> (+K more)`: the first match's line number, that line trimmed (a line over 160 characters is cut to the 160-character window starting 60 characters before the match, with `...` marking each cut), and `(+K more)` only when there are further non-overlapping matches.
 
 Safety limits (rejected with an error if exceeded): 20 files, 100 total operations, 1,000,000 total bytes, 256,000 bytes per individual text block. Paths are expanded, resolved to absolute with symlinks followed, and must already exist; duplicate paths in one call — including two spellings of one file, or a file and a link to it — are rejected (combine the operations instead). Each entry accepts only `path` and `operations`; `dry_run` or `postconditions` inside an entry is rejected by argument validation rather than ignored.
 
-Writing is two-phase: every changed file is staged to a temp file first (a staging failure discards all temps and reports "no changes applied"), then the temps are renamed over their targets. Returns a unified diff (difflib format, 3 lines of context, every line newline-terminated) on success and for `dry_run`, in all editions.
+Writing is two-phase: every changed file is staged to a temp file first (a staging failure discards all temps and reports "no changes applied"), then the temps are renamed over their targets. Returns a unified diff (difflib format, 3 lines of context, every line newline-terminated) on success and for `dry_run`, in all editions. The Rust and C++ editions match lines with an exact LCS while the region between the first and last change fits a 4,000,000-cell table; a larger region is split on lines occurring exactly once on each side (longest increasing subsequence, as patience diff) and each gap matched the same way, so far-apart edits stay separate small hunks. Only a large region with no such line is reported as one replace.
 
 ### `run_bash(command, cwd=None, elevated=False, host=None)`
 Executes a bash command via `subprocess.Popen` in its own process group. An optional `cwd` is expanded and must name an existing directory. Timeout configurable via `tool_timeout` (default 300s). Captures stdout and stderr.
@@ -816,6 +816,18 @@ web run emits a `notice` each minute and stops the run **with a notice** after a
 lease: a worker blocked forever on a prompt nobody can see keeps its thread alive and leaves
 the chat showing an active task forever.
 
+The lease is armed only by a prompt that actually waits for an answer — a tool request that
+needs confirming, an `ask_user_question`, a sudo password — never by an auto-approved tool
+request, and it is cleared when the prompt is answered. A viewer is an attached SSE stream for
+its whole lifetime. Time spent with a viewer attached never counts: when the last viewer
+leaves, the 30 minutes start over. On expiry every wait is released (confirm, question and
+sudo alike), not just flagged, and the run is marked finished so the chat stops showing it as
+active.
+
+On a terminal, Ctrl-C or Ctrl-D at the CLI's tool confirmation aborts the run, the same as
+"[4] Abort run", which declines that tool and then ends the run. Neither may ever read as
+"Execute".
+
 A **headless CLI run** (no TTY: cron, script, CI) has nobody to confirm a tool. It must not
 abort the run, and must not auto-approve the tool; it declines and reports `NO_USER_CONFIRM`
 ("no user is available", explicitly not a refusal), so the model carries on where the choice
@@ -859,7 +871,11 @@ Tool dispatch runs with two independent deadlines, because they catch different 
 
 - Subprocess tools (`run_bash`, `run_powershell`, `run_python`) enforce `tool_timeout` at the process level and are
   killed by **process group** (POSIX `killpg`; on Windows `taskkill /T /F` on the process tree, falling
-  back to `TerminateProcess`), so orphaned grandchildren die with them.
+  back to `TerminateProcess`), so orphaned grandchildren die with them. The result keeps what
+  the command printed before the kill: `Error: Command timed out after N seconds. Output before it
+  was killed:` (`Python execution timed out` for `run_python`), then stdout and stderr joined as
+  for a normal run but without an exit code, snipped and binary-guarded like any tool output. With
+  no output the error stands alone.
 - Every tool additionally runs under an outer deadline of `tool_timeout + 30` seconds. This
   catches tools with no internal deadline — `read_file` on a hung network mount, `fetch_url`
   against a trickling server — without requiring each one to implement its own guard. On expiry

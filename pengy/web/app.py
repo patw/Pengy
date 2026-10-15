@@ -402,6 +402,8 @@ class WebWorker:
         # Attached SSE consumers.  The prompt lease keys on this: a prompt waits
         # forever while someone is watching, and is bounded when nobody is.
         self._viewers = 0
+        # Every SSE stream runs on its own request thread; += is not atomic.
+        self._viewers_lock = threading.Lock()
         self._yolo_this_turn = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         # Scope sudo credentials and active processes to this worker; web
@@ -465,7 +467,8 @@ class WebWorker:
         index = start_index
         # A viewer is attached for the lifetime of this generator: the worker's
         # prompt lease keys on it (see _await_user).
-        self._viewers += 1
+        with self._viewers_lock:
+            self._viewers += 1
         try:
             while True:
                 event = None
@@ -492,7 +495,8 @@ class WebWorker:
                     if event.get("type") in ("final_response", "error", "stream_rotate"):
                         return
         finally:
-            self._viewers -= 1
+            with self._viewers_lock:
+                self._viewers -= 1
 
     def _await_user(self, event: threading.Event) -> None:
         """Wait for the user to answer a prompt, announcing that we are waiting.
@@ -512,7 +516,12 @@ class WebWorker:
                 return
             waited += _PROMPT_POLL_SECONDS
             if self._viewers > 0:
-                next_notice = waited + _PROMPT_NOTICE_SECONDS
+                # Someone is watching: the lease starts over when they leave.
+                # Carrying the attached time over stopped a run ~25 s after a
+                # tab that had held a prompt open for 30+ minutes was closed,
+                # with a notice claiming nobody had been attached all along.
+                waited = 0.0
+                next_notice = _PROMPT_NOTICE_SECONDS
                 continue
             if waited >= _PROMPT_LEASE_SECONDS:
                 self._put_event({"type": "notice", "message":
@@ -690,9 +699,9 @@ class WebWorker:
                         "cumulative_usage": self._live_usage(response),
                     })
                     self._confirm_event.clear()
-                    # Block until the user answers or cancels -- no timeout,
-                    # matching the CLI/GUI prompts (see _get_sudo_password).
-                    self._confirm_event.wait()
+                    # Block until the user answers or cancels -- no silent
+                    # expiry (see _await_user for the lease).
+                    self._await_user(self._confirm_event)
                     if self._cancelled:
                         break
                     result = self._confirm_result

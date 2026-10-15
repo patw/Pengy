@@ -319,3 +319,41 @@ def test_search_ignore_case(tmp_path):
     assert "No matches" in execute_tool("search_content", {"pattern": "needle", "path": str(tmp_path)})
     assert "Found 1 match" in execute_tool("search_content", {"pattern": "needle", "path": str(tmp_path),
                                                               "ignore_case": True})
+
+
+# ── postconditions and timeouts say what they saw ─────────────────────────────
+
+def test_failed_does_not_contain_shows_the_matching_line(tmp_path):
+    f = tmp_path / "t.py"
+    f.write_text('import httpx\nimport pytest\n\ndef helper():\n'
+                 '    """No longer builds an httpx.Request."""\n    # httpx.Request was the old way\n')
+    out = execute_tool("apply_changes", {
+        "changes": [_replace(f, "import httpx\nimport pytest", "import pytest")],
+        "postconditions": [{"path": str(f), "does_not_contain": "httpx.Request"}],
+    })
+    assert ('still contains forbidden text at line 4: '
+            '"""No longer builds an httpx.Request.""" (+1 more)') in out, out
+    assert f.read_text().startswith("import httpx\n")
+
+
+def test_forbidden_text_location_windows_a_long_line():
+    line = "a" * 300 + "NEEDLE" + "b" * 300
+    assert (tools._forbidden_text_location(f"first\n  {line}\n", "NEEDLE")
+            == "at line 2: ..." + "a" * 60 + "NEEDLE" + "b" * 94 + "...")
+    # Near the end the window still shows 160 characters.
+    assert (tools._forbidden_text_location("a" * 300 + "NEEDLE", "NEEDLE")
+            == "at line 1: ..." + "a" * 154 + "NEEDLE")
+
+
+def test_timeouts_return_output_printed_before_the_kill(monkeypatch):
+    """The last lines of a hung watcher are what explain the hang."""
+    monkeypatch.setattr(tools, "_tool_timeout", 1)
+    bash = execute_tool("run_bash", {"command": "echo started; echo oops >&2; sleep 5"})
+    python = execute_tool("run_python", {
+        "code": "import time; print('working', flush=True); time.sleep(5)"})
+    silent = execute_tool("run_bash", {"command": "sleep 5"})
+    assert bash == ("Error: Command timed out after 1 seconds. "
+                    "Output before it was killed:\nstarted\n\noops\n")
+    assert python == ("Error: Python execution timed out after 1 seconds. "
+                      "Output before it was killed:\nworking\n")
+    assert silent == "Error: Command timed out after 1 seconds"

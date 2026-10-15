@@ -176,3 +176,61 @@ def test_viewer_count_tracks_the_sse_connection(worker):
     assert worker._viewers == 1
     gen.close()
     assert worker._viewers == 0
+
+
+def test_time_spent_attached_does_not_count_against_the_lease(worker, monkeypatch):
+    """A prompt held open in a tab, then the tab closed, starts a fresh lease.
+
+    The attached time used to carry over, so closing a tab that had shown the
+    prompt for longer than the lease stopped the run on the next poll, with a
+    notice claiming nobody had been attached all along.
+    """
+    from pengy.web import app
+
+    monkeypatch.setattr(app, "_PROMPT_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(app, "_PROMPT_NOTICE_SECONDS", 10.0)
+    monkeypatch.setattr(app, "_PROMPT_LEASE_SECONDS", 0.2)
+    worker._viewers = 1
+    event = threading.Event()
+    threading.Timer(0.4, lambda: setattr(worker, "_viewers", 0)).start()  # 2x the lease, attached
+    threading.Timer(0.5, event.set).start()  # answered 0.1 s after the tab closed
+
+    worker._await_user(event)
+    assert worker._cancelled is False
+    assert not [e for e in worker._events if e.get("type") == "notice"]
+
+
+def test_question_prompt_has_the_lease_too(monkeypatch):
+    """ask_user_question waited forever with no browser, unlike confirm and sudo."""
+    from pengy.core.chat_manager import create_chat, save_chat
+    from pengy.web import app as app_mod
+    from pengy.web.app import WebWorker
+
+    chat = create_chat()
+    chat["messages"].append({"role": "user", "content": "pick one"})
+    save_chat(chat)
+
+    class _LLM:
+        def __init__(self, **kwargs):
+            pass
+
+        def chat(self, messages, **kwargs):
+            yield {"type": "question_request", "tool_call_id": "q1",
+                   "questions": [{"question": "Which?", "options": ["a", "b"]}]}
+
+    monkeypatch.setattr(app_mod, "LLMClient", _LLM)
+    worker = WebWorker(chat, {"model": "gpt-4o", "tool_confirmation": "none"})
+    leased = []
+
+    def fake_await(event):  # stands in for an expired lease
+        leased.append(event)
+        worker.cancel()
+
+    monkeypatch.setattr(worker, "_await_user", fake_await)
+    run = threading.Thread(target=worker._run, daemon=True)
+    run.start()
+    run.join(timeout=10)
+    if run.is_alive():  # the old bare wait(): release it so the test can fail
+        worker.cancel()
+        worker._confirm_event.set()
+    assert leased == [worker._confirm_event]
