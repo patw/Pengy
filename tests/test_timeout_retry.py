@@ -28,7 +28,6 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import httpx
 import pytest
 from openai import APIConnectionError, APITimeoutError, APIStatusError
 
@@ -44,6 +43,20 @@ from tests.test_llm_loop import collect_auto, completion, tool_call
 TIMEOUT_BODY = {"error": {"message": "Request timed out", "type": "timeout"}}
 OVERFLOW_BODY = {"error": {"message": "This model's maximum context length is 1024 tokens",
                            "code": "context_length_exceeded"}}
+
+
+def fake_request(url: str):
+    """A stand-in for the SDK's request object.
+
+    The SDK's timeout/connection errors only store the request they were raised
+    with, and Pengy never reads it -- so the tests need an object, not a real
+    request.  Building one from the transport module pinned these tests to
+    whichever HTTP library the SDK happens to ship: openai 2.x brings ``httpx``,
+    openai 3.x brings ``httpx2``, and CI installs the latter, where the bare
+    import fails and every module importing this one fails to collect.  Same
+    stub shape as the ``APIStatusError`` responses below.
+    """
+    return type("Req", (), {"url": url})()
 
 
 # ── Wire fixture: queued (status, body, headers), with a repeat tail ──────────
@@ -138,7 +151,7 @@ def retrying_events(events: list) -> list:
 
 def raise_timeouts(wire: Wire, monkeypatch, times: int):
     """Make the SDK raise its own deadline for the first *times* requests."""
-    request = httpx.Request("POST", f"{wire.base_url}/chat/completions")
+    request = fake_request(f"{wire.base_url}/chat/completions")
     original = completions_resource.Completions.create
     calls: list[int] = []
 
@@ -168,8 +181,8 @@ def test_classification_names_budget_and_reason_for_every_shape(wire):
         response = type("R", (), {"status_code": code, "headers": {}, "request": None})()
         return APIStatusError(f"HTTP {code}", response=response, body={})
 
-    deadline = APITimeoutError(httpx.Request("POST", wire.base_url))
-    refused = APIConnectionError(request=httpx.Request("POST", wire.base_url))
+    deadline = APITimeoutError(fake_request(wire.base_url))
+    refused = APIConnectionError(request=fake_request(wire.base_url))
 
     assert _transient_retry(status_error(408), False) == (_MAX_TIMEOUT_RETRIES, "timeout")
     assert _transient_retry(status_error(504), False) == (_MAX_TIMEOUT_RETRIES, "timeout")
@@ -192,7 +205,7 @@ def test_classification_covers_both_shapes_and_excludes_the_rest(wire):
 
     assert _is_timeout_error(status_error(408))
     assert _is_timeout_error(status_error(504))
-    assert _is_timeout_error(APITimeoutError(httpx.Request("POST", wire.base_url)))
+    assert _is_timeout_error(APITimeoutError(fake_request(wire.base_url)))
     # Negative controls: "the endpoint is not there" and "the request was wrong"
     # must keep failing fast, and 429/529 keep their own budget.
     for code in (400, 401, 403, 404, 422, 429, 500, 503, 529):
