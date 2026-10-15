@@ -701,3 +701,36 @@ class TestEffortAndResponseRate:
         window._handle_final_response(first, {"content": "", "usage": {}})
         assert "last_response_tokens_per_second" not in get_chat(first.chat["id"])
         assert window.chat_history.rate_label.text() == "Last: — tok/s"
+
+
+def test_retry_launch_restores_status_without_touching_other_tabs(window, monkeypatch):
+    session = _active_session(window)
+    session.thinking = True
+    session.tool_running = False
+    cid = window.active_chat_id
+    monkeypatch.setattr(window, "_sender_chat_id", lambda: cid)
+    window._on_worker_response({"type": "retrying", "reason": "timeout",
+                               "delay_secs": 0.9, "attempt": 1, "max_attempts": 3})
+    assert "retrying in 0.9s" in window.chat_history.status_text.text()
+    window._on_worker_response({"type": "request_started", "stage": "turn", "attempt": 1})
+    assert window.chat_history.status_text.text() == "Thinking…"
+    window.create_new_chat()
+    text = window.chat_history.status_text.text()
+    window._on_worker_response({"type": "request_started", "stage": "summary", "attempt": 1})
+    assert window.chat_history.status_text.text() == text
+
+
+def test_gui_worker_forwards_synchronous_summary_launches(qapp):
+    from pengy.ui.chat_worker import ChatWorker
+    class Fake:
+        def chat(self, messages, *args, **kwargs):
+            kwargs["event_sink"]({"type": "request_started", "stage": "summary", "attempt": 1})
+            yield {"type": "request_started", "stage": "turn", "attempt": 1}
+            yield {"type": "final_response", "content": "done", "usage": {}}
+    worker = ChatWorker(Fake(), messages=[])
+    events, errors = [], []
+    worker.response.connect(events.append)
+    worker.error.connect(errors.append)
+    worker.run()
+    assert not errors
+    assert [e["type"] for e in events] == ["request_started", "request_started", "final_response"]

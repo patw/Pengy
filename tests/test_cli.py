@@ -699,3 +699,23 @@ class TestMarkupSafety:
         assert _sanitize_display("line1\nline2\tend") == "line1\nline2\tend"
         assert _sanitize_display("FAIL: [tests/test.cpp(9)]") == "FAIL: [tests/test.cpp(9)]"
         assert _sanitize_display("a\x1b]0;evil\x07b") == "ab"
+
+
+@pytest.mark.parametrize("mode", ["pretty", "raw", "json", "silent"])
+def test_generator_driver_wires_live_summary_sink_and_launch_events(tmp_cfg, monkeypatch, capsys, mode):
+    cli = PengyCLI(no_save=True)
+    cli._output_mode = mode
+    seen = []
+    def fake_chat(messages, **kwargs):
+        sink = kwargs["event_sink"]
+        sink({"type": "retrying", "reason": "timeout", "attempt": 1,
+              "max_attempts": 3, "delay_secs": 0.9, "status_code": 0})
+        sink({"type": "request_started", "stage": "summary", "attempt": 2})
+        yield {"type": "request_started", "stage": "turn", "attempt": 1}
+        yield {"type": "final_response", "content": "done"}
+    monkeypatch.setattr(cli.llm_client, "chat", fake_chat)
+    monkeypatch.setattr(cli, "_render_final", lambda response, chat: seen.append(response))
+    cli._drive_generator([{"role": "user", "content": "hi"}], {"id": "driver", "messages": []})
+    assert seen[0]["content"] == "done"  # wrong callback attribute previously failed before driving
+    out = capsys.readouterr().out
+    assert ("retrying in" in out) == (mode == "pretty")

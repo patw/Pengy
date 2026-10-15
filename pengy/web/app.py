@@ -612,6 +612,7 @@ class WebWorker:
                 cancel_fn=lambda: self._cancelled,
                 tool_context=self._tool_context,
                 chat_id=chat["id"],
+                event_sink=self._put_event,
                 **{key: config.get(key, default) for key, default in (
                     ("auto_context_recovery", True), ("recovery_keep_turns", 3),
                     ("output_token_limit", 0), ("output_token_parameter", "max_tokens"))},
@@ -628,7 +629,7 @@ class WebWorker:
                 send_value = None
                 rtype = response.get("type", "")
 
-                if rtype in ("retrying", "context_compacted"):
+                if rtype in ("retrying", "context_compacted", "request_started"):
                     # Backoff sleep handled inside the generator; push event
                     # through so the SSE stream shows "Overloaded/Timeout, retrying…"
                     self._put_event(response)

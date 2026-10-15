@@ -98,7 +98,7 @@ def test_read_image_recovery_keeps_tool_reasoning_state_and_does_not_rerun(wire,
     assert len(server.requests) == 3
     before, after = [r['messages'] for r in server.requests[1:]]
     assert before[-1]['content'][1]['type'] == 'image_url'
-    assert after[-2]['content'].startswith('Image loaded by read_image:')
+    assert after[-1]['content'].startswith('Image loaded by read_image:')
     assert after[1]['reasoning_details'] == envelope
     assert after[2]['tool_call_id'] == 'tc1'
     notice = after[-1]['content']
@@ -141,7 +141,7 @@ def test_attachment_recovery_is_request_only_and_bounded(wire, tmp_path):
     assert len(server.requests) == 2
     assert 'attachments' not in server.requests[0]['messages'][0]
     assert server.requests[0]['messages'][0]['content'][0]['type'] == 'image_url'
-    assert server.requests[1]['messages'][0]['content'] == 'attachment'
+    assert server.requests[1]['messages'][0]['content'].startswith('attachment\n\n')
     assert history == original
     assert outgoing[0]['content'][0]['type'] == 'image_url'
 
@@ -176,7 +176,87 @@ def test_rejected_images_stay_omitted_in_later_tool_rounds(wire, tmp_path):
     assert events[-1]['content'] == 'done'
     assert len(server.requests) == 3
     for request in server.requests[1:]:
-        assert request['messages'][0]['content'] == 'look'
-        assert 'not evidence' in request['messages'][-1]['content']
-    assert server.requests[-1]['messages'][-2]['tool_call_id'] == 'tc1'
+        assert request['messages'][0]['content'].startswith('look\n\n')
+        assert 'not evidence' in request['messages'][0]['content']
+        assert sum('not evidence' in str(m.get('content', '')) for m in request['messages']) == 1
+    assert server.requests[-1]['messages'][-1]['tool_call_id'] == 'tc1'
     assert history == original
+
+
+def test_rejection_survives_new_client_and_is_endpoint_model_scoped(wire, tmp_path):
+    server, client = wire
+    set_config_dir(str(tmp_path / 'cfg'))
+    image = tmp_path / 'original.png'
+    Image.new('RGB', (32, 32), 'red').save(image)
+    ref = import_image(image)
+    saved = [{'role': 'user', 'content': 'screenshot', 'attachments': [ref]}]
+    original = copy.deepcopy(saved)
+    outgoing = resolve_history(saved)
+    server.replies = [(400, PROXY), (200, completion(content='fallback'))]
+    collect_auto(client.chat(outgoing))
+    base = client.base_url
+    server.replies = [(200, completion(content='next'))]
+    fresh = LLMClient(base + '/', 'test-key', 'stub-model')
+    collect_auto(fresh.chat(resolve_history(saved)))
+    assert not any(p.get('type') == 'image_url' for m in server.requests[-1]['messages']
+                   for p in (m['content'] if isinstance(m.get('content'), list) else []))
+    assert 'previously rejected' in server.requests[-1]['messages'][0]['content']
+    server.replies = [(200, completion(content='vision'))]
+    collect_auto(fresh.chat(resolve_history(saved), model='vision-model'))
+    assert server.requests[-1]['messages'][0]['content'][0]['type'] == 'image_url'
+    from pengy.core.image_capabilities import images_rejected
+    assert not images_rejected(base + '/other', 'stub-model')
+    assert not images_rejected(base, 'Stub-model')  # model spelling is significant
+    assert images_rejected(base, 'stub-model')
+    assert saved == original
+    assert resolve_history(saved)[0]['content'][0]['type'] == 'image_url'
+
+
+def test_non_image_error_does_not_poison_route(wire, tmp_path):
+    server, client = wire
+    set_config_dir(str(tmp_path / 'cfg'))
+    image_message = {'role': 'user', 'content': [{'type': 'image_url',
+        'image_url': {'url': 'data:image/png;base64,aW1hZ2U='}}]}
+    server.replies = [(400, {'error': {'message': 'Invalid image URL'}})]
+    with pytest.raises(BadRequestError):
+        collect_auto(client.chat([image_message]))
+    from pengy.core.image_capabilities import images_rejected
+    assert not images_rejected(client.base_url, client.model)
+    server.replies = [(200, completion(content='fixed'))]
+    collect_auto(client.chat([image_message]))
+    assert server.requests[-1]['messages'][0]['content'][0]['type'] == 'image_url'
+
+
+def test_cached_rejection_suppresses_new_read_image_tool_output(wire, tmp_path):
+    server, client = wire
+    set_config_dir(str(tmp_path / 'cfg'))
+    from pengy.core.image_capabilities import remember_image_rejection
+    remember_image_rejection(client.base_url, client.model)
+    image = tmp_path / 'new.png'
+    Image.new('RGB', (32, 32), 'blue').save(image)
+    server.replies = [(200, completion(tool_calls=[tool_call('tc1', 'read_image', {'path': str(image)})])),
+                      (200, completion(content='metadata only'))]
+    events = collect_auto(client.chat([{'role': 'user', 'content': 'look'}], tool_confirmation='all'))
+    assert len(server.requests) == 2
+    assert events[-1]['content'] == 'metadata only'
+    assert not any(p.get('type') == 'image_url' for r in server.requests for m in r['messages']
+                   for p in (m.get('content') if isinstance(m.get('content'), list) else []))
+    assert 'new.png' in server.requests[-1]['messages'][-1]['content']
+
+
+def test_route_cache_key_and_reset_and_corruption(tmp_path):
+    set_config_dir(str(tmp_path / 'cfg'))
+    from pengy.core import image_capabilities as cache
+    endpoint, model = 'https://example.com/v1', 'model'
+    path, _, _ = cache._route(endpoint, model)
+    import hashlib
+    expected = hashlib.sha256(b'["https://example.com/v1","model"]').hexdigest()
+    assert path.name == expected + '.json'
+    cache.remember_image_rejection(endpoint, model)
+    assert cache.images_rejected(endpoint + '/', model)
+    path.unlink()  # explicit reset can retry the same route
+    assert not cache.images_rejected(endpoint, model)
+    path.write_text('broken')
+    assert not cache.images_rejected(endpoint, model)
+    path.write_text(json.dumps({'v': 1, 'endpoint': endpoint, 'model': 'other'}))
+    assert not cache.images_rejected(endpoint, model)

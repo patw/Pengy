@@ -1025,6 +1025,14 @@ function handleEvent(data) {
       showRetrying(data);
       break;
 
+    case 'request_started':
+      // The announced backoff is over and the request is in flight again
+      // (a retry, or a context-recovery summary call): swap the stale
+      // "retrying in Xs" card back to the live spinner.
+      hideThinking();
+      showThinking();
+      break;
+
     case 'final_response':
       hideThinking();
       appendAssistantMessage(data.html, data.usage);

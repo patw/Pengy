@@ -69,6 +69,7 @@ class ChatWorker(QObject):
                 cancel_fn=self._cancelled.is_set,
                 tool_context=self._tool_context,
                 model=self.model,
+                event_sink=self.response.emit,
                 **self.recovery_options,
             )
             send_value = None

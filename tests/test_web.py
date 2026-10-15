@@ -1552,3 +1552,24 @@ class TestQuestionTemplateWiring:
 # pytest marker
 # ────────────────────────────────────────────────────────────────────
 pytestmark = pytest.mark.web
+
+
+def test_web_worker_forwards_live_summary_and_yielded_launch_notices(tmp_dirs, monkeypatch):
+    from pengy.core.chat_manager import create_chat
+    from pengy.web import app as module
+    chat = create_chat()
+    class Fake:
+        def __init__(self, **kwargs): pass
+        def chat(self, messages, **kwargs):
+            kwargs["event_sink"]({"type": "request_started", "stage": "summary", "attempt": 1})
+            yield {"type": "retrying", "reason": "timeout", "attempt": 1,
+                   "max_attempts": 3, "delay_secs": 0.9, "status_code": 0}
+            yield {"type": "request_started", "stage": "turn", "attempt": 1}
+            yield {"type": "final_response", "content": "done", "usage": {}}
+    monkeypatch.setattr(module, "LLMClient", Fake)
+    worker = WebWorker(chat, {"model": "stub-model"})
+    worker._run()
+    notices = [e for e in worker._events if e["type"] in ("request_started", "retrying")]
+    assert [e["type"] for e in notices] == ["request_started", "retrying", "request_started"]
+    assert notices[-1]["stage"] == "turn"
+    assert not any(m.get("content") == "request_started" for m in worker._chat["messages"])

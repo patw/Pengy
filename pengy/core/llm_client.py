@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from openai import APITimeoutError, APIConnectionError, APIStatusError, OpenAI
 
 from pengy.core import tools as _tools_mod
+from pengy.core.image_capabilities import images_rejected, remember_image_rejection
 from pengy.core.context_recovery import Recovery, SUMMARY_PROMPT
 from pengy.core.tool_args import parse_raw_arguments
 
@@ -68,6 +69,14 @@ _MAX_UNREACHABLE_RETRIES = 3
 # the same reasoning as a 500: a blip is worth riding out, a deterministic
 # answer is not worth three more full-cost attempts.
 _MAX_EMPTY_RETRIES = 1
+
+# ── Retry-chain wall-clock grace ──────────────────────────────────
+# Retry decisions close 31 seconds after the first retry is approved.
+# An already admitted attempt retains its own request timeout; this is not
+# a hard total deadline. Fast failures keep their attempt budgets. A full
+# retry at the default 300 s timeout prevents admitting another attempt.
+# Identical policy in the Rust and C++ editions.
+_RETRY_CHAIN_GRACE_SECS = 31.0
 
 # Only context errors get a size-reduction retry; generic bad requests do not.
 _MAX_CONTEXT_RETRIES = 4
@@ -235,6 +244,28 @@ def _image_rejection_notice(exc: "APIStatusError") -> str:
         "Do not claim to have inspected the images.]"
     )
 
+_CACHED_IMAGE_NOTICE = (
+    "[Images omitted: this endpoint/model previously rejected image inputs. "
+    "Original attachments are retained; only text and file metadata are available. "
+    "This is not evidence that the underlying model lacks vision. "
+    "Do not claim to have inspected the omitted images.]"
+)
+
+
+def _suppress_images(messages: list[dict], notice: str) -> None:
+    """Filter private provider messages; place one notice beside the first image,
+    never after every tool result. Stored messages and attachments are untouched."""
+    first = next((i for i, msg in enumerate(messages)
+                  if _has_image_url_parts([msg])), None)
+    _strip_image_url_parts(messages)
+    if first is not None:
+        content = messages[first].get("content")
+        if isinstance(content, str):
+            messages[first]["content"] = content + "\n\n" + notice
+        elif isinstance(content, list):
+            messages[first]["content"] = content + [{"type": "text", "text": notice}]
+
+
 def _retry_after_delay(status_code: int, headers) -> float | None:
     """Extract Retry-After from response headers.
 
@@ -379,6 +410,17 @@ def _sleep_interruptible(seconds: float, is_cancelled: Callable[[], bool] | None
         if is_cancelled():
             raise _Cancelled()
         time.sleep(min(0.5, deadline - time.monotonic()))
+
+
+def _retry_chain_open(started: list) -> bool:
+    """Whether the chain may launch another attempt: the first decision opens
+    the clock, later ones spend it.  *started* is a one-element list holding
+    the opening monotonic time (empty when the chain has not opened yet)."""
+    now = time.monotonic()
+    if not started:
+        started.append(now)
+        return True
+    return now - started[0] < _RETRY_CHAIN_GRACE_SECS
 
 
 class _Cancelled(Exception):
@@ -877,6 +919,14 @@ class LLMClient:
                 "usage": accumulated_usage,
             }
             return False
+        # The announced pause is over and the attempt is launching. Say so, or
+        # every frontend keeps advertising "retrying in Xs" for the whole
+        # (llm_timeout-bounded) in-flight attempt.
+        yield {
+            "type": "request_started",
+            "stage": "turn",
+            "attempt": attempt + 1,
+        }
         self._reset_client()
         return True
 
@@ -885,7 +935,8 @@ class LLMClient:
              cancel_fn: Callable[[], bool] | None = None,
              tool_context=None, model: str | None = None, *, chat_id: str = "",
              auto_context_recovery: bool = True, recovery_keep_turns: int = 3,
-             output_token_limit: int = 0, output_token_parameter: str = "max_tokens"):
+             output_token_limit: int = 0, output_token_parameter: str = "max_tokens",
+             event_sink: Callable[[dict], None] | None = None):
         """
         Send a chat request and handle tool calls.
         Yields intermediate tool call info for UI updates.
@@ -900,14 +951,22 @@ class LLMClient:
 
         *cancel_fn*, if given, is polled during retry backoff sleeps so the
         user can abort a long wait.  Return ``True`` to cancel.
+
+        *event_sink*, if given, receives events emitted from inside the
+        synchronous context-recovery summary calls (which cannot ``yield``:
+        ``Recovery.reduce`` calls ``summarize`` synchronously) -- a
+        ``request_started`` notice before each summary request and a
+        ``retrying`` notice when one is retried.  It is invoked on the same
+        thread as this generator, so a frontend's normal event path is safe
+        to pass as the sink.
         """
         current_messages = list(messages)
         # Request-only reductions: tool events and persisted chat retain full output.
         accumulated_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         # Once this endpoint rejects image input, don't reattach the same
         # images on subsequent tool rounds in this turn.
-        image_input_rejected = False
-        image_rejection = None
+        image_input_rejected = images_rejected(self.base_url, model or self.model)
+        image_rejection = _CACHED_IMAGE_NOTICE
 
         # Checked here rather than in each frontend so the CLI, GUI and Web UI
         # cannot disagree -- and because an empty model would otherwise be sent
@@ -921,6 +980,10 @@ class LLMClient:
         output_token_parameter = output_token_parameter if isinstance(output_token_parameter, str) else ""
         if output_token_parameter not in ("max_tokens", "max_completion_tokens"):
             raise ConfigError("output_token_parameter must be max_tokens or max_completion_tokens")
+
+        # One wall-clock grace for every summary call in this turn's recovery
+        # (see _RETRY_CHAIN_GRACE_SECS).
+        summary_chain_started: list = []
 
         def summarize(source):
             if cancel_fn and cancel_fn(): raise _Cancelled()
@@ -936,23 +999,41 @@ class LLMClient:
             # same retry budget here as the turn request itself -- a big
             # conversation's prefill is exactly what blows llm_timeout on a slow
             # engine, and losing the turn there is the worst place to lose it.
-            # No events are emitted: Recovery calls summarize() synchronously and
-            # cannot carry a yield.
+            # Events go through *event_sink* (a yield is impossible: Recovery
+            # calls summarize() synchronously), so the summary calls and their
+            # retries are visible live instead of silent for minutes.
             while True:
+                if cancel_fn and cancel_fn():
+                    raise _Cancelled()
+                if event_sink:
+                    event_sink({"type": "request_started", "stage": "summary",
+                                "attempt": summary_retries + 1})
                 try:
                     reply = self.client.chat.completions.create(**summary_kwargs)
                     self._endpoint_answered = True
                     break
                 except (APITimeoutError, APIConnectionError, APIStatusError) as exc:
                     transient = _transient_retry(exc, self._endpoint_answered)
-                    if transient is None or summary_retries >= transient[0]:
+                    if transient is None or summary_retries >= transient[0] \
+                            or not _retry_chain_open(summary_chain_started):
                         reported = _chain_failure(summary_chain, exc)
                         if isinstance(reported, APIStatusError):
                             raise RuntimeError("Context summary request failed; original history retained. " + str(reported)) from reported
                         raise _translate_api_error(reported, self.base_url) from reported
+                    delay = _retry_delay(summary_retries, exc)
+                    if event_sink:
+                        event_sink({
+                            "type": "retrying",
+                            "reason": transient[1],
+                            "attempt": summary_retries + 1,
+                            "max_attempts": transient[0],
+                            "delay_secs": round(delay, 1),
+                            "status_code": getattr(exc, "status_code", 0),
+                            "message": "Context summary failed; retrying",
+                        })
                     summary_retries += 1
                     summary_chain = summary_chain or exc
-                    _sleep_interruptible(_retry_delay(summary_retries - 1, exc), cancel_fn)
+                    _sleep_interruptible(delay, cancel_fn)
                     self._reset_client()
             if reply.usage:
                 for key in accumulated_usage:
@@ -970,10 +1051,10 @@ class LLMClient:
             # A validated provider-only reduction persists across tool rounds.
             request_messages = _without_cross_model_proxy_state(
                 recovery.apply(current_messages), model or self.model)
+            image_input_rejected = image_input_rejected or images_rejected(self.base_url, model or self.model)
             if image_input_rejected:
                 request_messages = [dict(msg) for msg in request_messages]
-                _strip_image_url_parts(request_messages)
-                request_messages.append({"role": "user", "content": image_rejection})
+                _suppress_images(request_messages, image_rejection)
             context_retries = 0
             rate_retries = 0
             transient_retries = 0
@@ -981,6 +1062,10 @@ class LLMClient:
             # itself fails with nothing more informative, so the retries never
             # change what the user is told about the failure they care about.
             chain_error = None
+            # Shared wall-clock grace for every retry path below (see
+            # _RETRY_CHAIN_GRACE_SECS). An admitted request retains its own
+            # per-attempt timeout.
+            retry_chain_started: list = []
             # ── API call with backoff: 429/529, timeouts, 5xx, dropped routes ──
             while True:
                 if cancel_fn and cancel_fn():
@@ -1010,7 +1095,7 @@ class LLMClient:
                     # C++ already said "No choices in API response".
                     choices = getattr(response, "choices", None) or []
                     if not choices:
-                        if transient_retries < _MAX_EMPTY_RETRIES:
+                        if transient_retries < _MAX_EMPTY_RETRIES and _retry_chain_open(retry_chain_started):
                             notice = RuntimeError(_no_choices_help())
                             if not (yield from self._pause_after_transient(
                                     transient_retries, _MAX_EMPTY_RETRIES, "empty",
@@ -1032,8 +1117,7 @@ class LLMClient:
                             yield event
                             request_messages = recovery.apply(current_messages)
                             if image_input_rejected:
-                                _strip_image_url_parts(request_messages)
-                                request_messages.append({"role": "user", "content": image_rejection})
+                                _suppress_images(request_messages, image_rejection)
                             request_messages = _without_cross_model_proxy_state(request_messages, model or self.model)
                             continue
                         raise GenerationLimitError(_generation_limit_message(
@@ -1047,12 +1131,10 @@ class LLMClient:
                             and _has_image_url_parts(request_messages)
                             and _is_image_input_error(e)):
                         image_input_rejected = True
+                        remember_image_rejection(self.base_url, model or self.model)
                         image_rejection = _image_rejection_notice(e)
                         request_messages = [dict(msg) for msg in request_messages]
-                        _strip_image_url_parts(request_messages)
-                        request_messages.append({
-                            "role": "user", "content": image_rejection,
-                        })
+                        _suppress_images(request_messages, image_rejection)
                         continue  # retry once; no image parts remain in this request
 
                     if _is_context_limit_error(e):
@@ -1062,8 +1144,7 @@ class LLMClient:
                                 yield event
                                 request_messages = recovery.apply(current_messages)
                                 if image_input_rejected:
-                                    _strip_image_url_parts(request_messages)
-                                    request_messages.append({"role": "user", "content": image_rejection})
+                                    _suppress_images(request_messages, image_rejection)
                                 request_messages = _without_cross_model_proxy_state(request_messages, model or self.model)
                                 continue
                             raise RuntimeError("Model context limit reached; could not fit the protected task after bounded recovery. Full history retained; try a shorter request or a new chat.") from e
@@ -1092,7 +1173,7 @@ class LLMClient:
                         # gone), or 500 (one attempt, since a 500 is often the
                         # request's fault).  Same ladder as 429/529.
                         budget, reason = transient
-                        if transient_retries >= budget:
+                        if transient_retries >= budget or not _retry_chain_open(retry_chain_started):
                             self._reset_client()
                             raise _translate_api_error(_chain_failure(chain_error, e),
                                                        self.base_url) from e
@@ -1103,7 +1184,8 @@ class LLMClient:
                             return
                         transient_retries += 1
                         continue
-                    if e.status_code not in _RETRYABLE_STATUSES or rate_retries >= _MAX_RETRIES:
+                    if e.status_code not in _RETRYABLE_STATUSES or rate_retries >= _MAX_RETRIES \
+                            or not _retry_chain_open(retry_chain_started):
                         self._reset_client()
                         # 401/403 → tell the user how to configure Pengy instead
                         # of surfacing the SDK's misleading env-var advice.
@@ -1131,6 +1213,13 @@ class LLMClient:
                             "usage": accumulated_usage,
                         }
                         return
+                    # The announced pause is over and the attempt is launching
+                    # (see _pause_after_transient).
+                    yield {
+                        "type": "request_started",
+                        "stage": "turn",
+                        "attempt": rate_retries,
+                    }
                     self._reset_client()
                 except APITimeoutError as e:
                     # The SDK's own deadline (llm_timeout) elapsed with no answer
@@ -1139,7 +1228,7 @@ class LLMClient:
                     # Once the budget is spent the user gets the ordinary timeout
                     # message, unchanged.
                     budget, reason = _transient_retry(e, self._endpoint_answered)
-                    if transient_retries >= budget:
+                    if transient_retries >= budget or not _retry_chain_open(retry_chain_started):
                         self._reset_client()
                         raise _translate_api_error(_chain_failure(chain_error, e),
                                                    self.base_url) from e
@@ -1163,7 +1252,7 @@ class LLMClient:
                         raise _translate_api_error(_chain_failure(chain_error, e),
                                                    self.base_url) from e
                     budget, reason = transient
-                    if transient_retries >= budget:
+                    if transient_retries >= budget or not _retry_chain_open(retry_chain_started):
                         self._reset_client()
                         raise _translate_api_error(_chain_failure(chain_error, e),
                                                    self.base_url) from e

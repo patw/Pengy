@@ -702,6 +702,13 @@ class MainWindow(QMainWindow):
                         response.get("max_attempts", 0),
                     )
                 )
+        elif response["type"] == "request_started":
+            # The announced backoff is over and the request is in flight again
+            # (a retry, or a context-recovery summary call). Show the honest
+            # in-flight state. No timer can race a later turn or another tab.
+            if (session is self._tab_for_chat(self.active_chat_id)
+                    and session.thinking and not session.tool_running):
+                self.chat_history.set_thinking(True)
         elif response["type"] == "tool_request":
             session.thinking = True
             session.tool_running = True

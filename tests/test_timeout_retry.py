@@ -488,3 +488,75 @@ def test_summary_timeout_budget_is_finite(wire, client, no_sleep):
     # The summary gets the same bounded budget: 1 turn request + 1 initial
     # summary + _MAX_TIMEOUT_RETRIES summary retries, then it gives up.
     assert len(wire.requests) == _MAX_TIMEOUT_RETRIES + 2
+
+
+@pytest.mark.parametrize("status", [408, 503, 429])
+def test_retry_launch_notice_arrives_after_sleep(wire, client, monkeypatch, status):
+    wire.queue((status, TIMEOUT_BODY), (200, completion(content="recovered")))
+    slept = []
+    monkeypatch.setattr("pengy.core.llm_client._sleep_interruptible",
+                        lambda seconds, cancel: slept.append(seconds))
+    gen = client.chat([{"role": "user", "content": "go"}])
+    announcement = next(gen)
+    assert announcement["type"] == "retrying"
+    assert not slept
+    launch = next(gen)
+    assert len(slept) == 1
+    assert launch == {"type": "request_started", "stage": "turn", "attempt": announcement["attempt"]}
+    assert next(gen)["content"] == "recovered"
+    gen.close()
+
+
+def test_summary_sink_is_live_and_uses_the_announced_delay(wire, client, monkeypatch):
+    wire.queue((413, OVERFLOW_BODY), (408, TIMEOUT_BODY),
+               (200, completion(content="Requirement 0-5 preserved")),
+               (200, completion(content="done")))
+    seen, delays = [], []
+    monkeypatch.setattr("pengy.core.llm_client._sleep_interruptible",
+                        lambda seconds, cancel: delays.append(seconds))
+    events = collect_auto(client.chat(history(), event_sink=lambda e: seen.append((e, len(wire.requests)))))
+    assert [e["type"] for e, _ in seen] == ["request_started", "retrying", "request_started"]
+    assert [count for _, count in seen] == [1, 2, 2]  # before each request, not buffered afterward
+    assert [e["stage"] for e, _ in seen if e["type"] == "request_started"] == ["summary", "summary"]
+    assert seen[1][0]["delay_secs"] == round(delays[0], 1)
+    assert events[-1]["content"] == "done"
+
+
+@pytest.mark.parametrize("status", [408, 503, 429])
+def test_expired_chain_blocks_another_retry_without_changing_error(wire, client, monkeypatch, status):
+    from pengy.core import llm_client as module
+    from types import SimpleNamespace
+    clock = [0.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], perf_counter=lambda: clock[0]))
+    monkeypatch.setattr(module, "_sleep_interruptible",
+                        lambda seconds, cancel: clock.__setitem__(0, clock[0] + 32))
+    wire.repeat(status, TIMEOUT_BODY)
+    events = []
+    with pytest.raises(APIStatusError) as error:
+        for event in client.chat([{"role": "user", "content": "go"}]):
+            events.append(event)
+    assert error.value.status_code == status
+    assert len(retrying_events(events)) == 1
+    assert len(wire.requests) == 2
+
+
+def test_expired_summary_chain_is_bounded_and_preserves_history(wire, client, monkeypatch):
+    from pengy.core import llm_client as module
+    from types import SimpleNamespace
+    clock = [0.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], perf_counter=lambda: clock[0]))
+    monkeypatch.setattr(module, "_sleep_interruptible",
+                        lambda seconds, cancel: clock.__setitem__(0, clock[0] + 32))
+    wire.queue((413, OVERFLOW_BODY))
+    wire.repeat(408, TIMEOUT_BODY)
+    messages = history()
+    import copy
+    original = copy.deepcopy(messages)
+    seen = []
+    with pytest.raises(Exception):
+        collect_auto(client.chat(messages, event_sink=seen.append))
+    assert len(wire.requests) == 3
+    assert len(retrying_events(seen)) == 1
+    assert messages == original

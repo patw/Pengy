@@ -1404,12 +1404,36 @@ class PengyCLI:
         This is single-threaded — tool confirmation blocks on user input,
         which is fine for a CLI.
         """
+
+        def _recovery_event_sink(event: dict) -> None:
+            """Context-recovery summary calls run inside the generator, between
+            yields; their retry notices print directly so a multi-minute
+            recovery is not silent (the summary calls cannot yield)."""
+            if self._output_mode != "pretty":
+                return
+            if event.get("type") == "request_started":
+                self._show_thinking()
+                return
+            if event.get("type") != "retrying":
+                return
+            self._clear_thinking()
+            label = {"timeout": "Timeout", "server": "Server error",
+                     "unreachable": "Unreachable", "empty": "Empty response"}.get(
+                event.get("reason"), "Overloaded")
+            status = event.get("status_code", 0)
+            head = label if status in (0, "?") else f"{label} (HTTP {status})"
+            self.console.print(
+                "[yellow]{} — retrying in {:.1f}s ({}/{})[/yellow]".format(
+                    head, event.get("delay_secs", 0),
+                    event.get("attempt", 0), event.get("max_attempts", 0)))
+
         gen = self.llm_client.chat(
             messages,
             tool_confirmation=self.config.get("tool_confirmation", "none"),
             reasoning_effort=self.config.get("reasoning_effort", ""),
             preserve_reasoning=bool(self.config.get("preserve_reasoning", False)),
             chat_id=chat["id"] if not self._no_save else "",
+            event_sink=_recovery_event_sink,
             **{key: self.config.get(key, default) for key, default in (
                 ("auto_context_recovery", True), ("recovery_keep_turns", 3),
                 ("output_token_limit", 0), ("output_token_parameter", "max_tokens"))},
@@ -1469,6 +1493,9 @@ class PengyCLI:
                             response.get("max_attempts", 0),
                         )
                     )
+
+                elif rtype == "request_started":
+                    expecting_api_call = True
 
                 elif rtype == "tool_request":
                     expecting_api_call = False
