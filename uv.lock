@@ -787,7 +787,7 @@ wheels = [
 
 [[package]]
 name = "pengy"
-version = "1.12.2"
+version = "1.12.3"
 source = { editable = "." }
 dependencies = [
     { name = "ddgs" },
