@@ -321,6 +321,11 @@ class ChatInputWidget(QWidget):
     def _remove_chip(self, path: Path, chip: QWidget):
         if path in self._attachments:
             self._attachments.remove(path)
+        # Detach from the parent before the deferred delete. deleteLater() alone
+        # leaves the chip in _chips_row's child list, so a later teardown walks a
+        # freed QObject (QObject::~QObject -> setParent_helper) and segfaults when
+        # DeferredDelete has not been delivered yet (e.g. the pytest run).
+        chip.setParent(None)
         chip.deleteLater()
         if not self._attachments:
             self._chips_row.hide()
@@ -330,6 +335,10 @@ class ChatInputWidget(QWidget):
         while cl.count() > 1:
             item = cl.takeAt(0)
             if item.widget():
+                # takeAt() removes the layout item, not the child: detach from
+                # _chips_row too, or the deferred delete leaves a dangling child
+                # that crashes a later widget teardown (see _remove_chip).
+                item.widget().setParent(None)
                 item.widget().deleteLater()
         self._chips_row.hide()
 

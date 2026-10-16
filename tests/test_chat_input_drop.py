@@ -5,7 +5,7 @@ pytest.importorskip("PySide6", reason="GUI tests require the optional GUI extra"
 
 from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QImage
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 
 @pytest.fixture
@@ -104,3 +104,32 @@ def test_drop_skips_unsupported_files_but_keeps_supported(qapp, tmp_path, monkey
     _drop(widget, [QUrl.fromLocalFile(str(bad)), QUrl.fromLocalFile(str(good))])
     assert widget._attachments == [good]
     assert len(warnings) == 1 and "binary.bin" in warnings[0]
+
+
+def test_submitted_and_removed_chips_leave_the_parent_immediately(qapp, tmp_path):
+    """A chip must not stay a child of the row once it is queued for deletion.
+
+    deleteLater() alone removed the chip from the *layout* but not from
+    _chips_row's child list, so the deferred delete left a dangling child that a
+    later widget teardown walked as freed memory (QObject::~QObject ->
+    setParent_helper) -- the single-process full-suite segfault. Detaching with
+    setParent(None) before the deferred delete fixes it, and this pins that.
+    """
+    widget = ChatInputWidget()
+    text = tmp_path / "notes.md"
+    text.write_text("hello")
+    image = tmp_path / "photo.png"
+    assert QImage(2, 2, QImage.Format.Format_RGB32).save(str(image))
+    _drop(widget, [QUrl.fromLocalFile(str(text)), QUrl.fromLocalFile(str(image))])
+    chips = widget._chips_row.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly)
+    assert len(chips) == 2
+
+    # The × button path detaches its chip at once.
+    widget._remove_chip(text, chips[0])
+    assert chips[0].parent() is None
+
+    # Submitting clears the rest without leaving them parented to the row.
+    widget._on_submit()
+    assert widget._chips_row.findChildren(
+        QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly) == []
+    assert widget._chips_row.layout().count() == 1  # only the trailing stretch

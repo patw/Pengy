@@ -138,5 +138,7 @@ def test_image_error_not_confused_with_context(client):
         overflow("model does not support image inputs"), _completion_obj(completion(content="text only"))]) as create:
         events = collect_auto(client.chat([image]))
     assert events[-1]["content"] == "text only"
-    assert create.call_args_list[-1].kwargs["messages"][0]["content"] == "look"
+    # The rejection notice is appended beside the first image message (see
+    # test_image_recovery.py); the original text is preserved as its prefix.
+    assert create.call_args_list[-1].kwargs["messages"][0]["content"].startswith("look\n\n")
     assert isinstance(image["content"], list)
