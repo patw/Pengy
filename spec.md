@@ -230,6 +230,24 @@ The `_drive_generator()` method runs the LLM generator **in the main thread** (u
 
 Flags (shared with the Rust and C++ CLIs): `--no-save`, `--model NAME`, `--system MSG`, `--output pretty|raw|json|silent`, `--config-dir PATH`, `-v/--version`. `--model` and `--system` are in-memory overrides — they never modify `settings.json`.
 
+### Interrupts and signals
+
+*Conformance: **required**, identical across the Python, Rust, and C++ CLIs (POSIX; Windows keeps its defaults).*
+
+Single-shot mode is mostly run by other programs as a subagent, and a caller that gives up on it sends SIGTERM, SIGINT or SIGHUP. While a turn runs, each of these:
+
+1. kills the running tool's process group — tools run in their own session, so the signal never reaches them on its own, and they used to outlive the CLI;
+2. removes any live sudo askpass helper (its 0600 password file would otherwise stay in the temp directory);
+3. abandons the in-flight API request without waiting for it;
+4. repairs dangling `tool_calls` and saves the chat, as every run-ending path does.
+
+Then:
+
+- **Single-shot**, or SIGTERM/SIGHUP in interactive mode: print `Interrupted by SIGTERM.` (etc.) to stderr — in `--output json`, stdout also gets `{"error": {"type": "interrupted", "message": ...}}` so it stays a valid document — and **die by that same signal**, re-raised with its default action. The caller sees exactly what it saw before the handlers existed (Python `returncode == -15`, shell status 143); in particular an interrupted run never exits 0.
+- **Interactive Ctrl-C during a turn**: stop the turn, print `Interrupted.`, return to the prompt. Ctrl-C at the tool confirmation aborts the run, as before; anything typed before it is not an answer. Ctrl-C at the empty prompt still quits.
+
+Exit is bounded: cleanup takes milliseconds, and if the main thread cannot get there (blocked in a prompt or a network-only tool) the edition ends the process itself about a second after killing the tool, restoring the terminal settings first. A second signal during cleanup ends the process at once. SIGKILL cannot be handled; a tool's grandchildren can still outlive a SIGKILLed CLI.
+
 ### Slash Commands
 
 | Command | Description |

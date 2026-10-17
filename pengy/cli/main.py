@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import sys
 import textwrap
 import urllib.request
@@ -178,6 +179,82 @@ def _print_version():
     from pengy import __version__
     print(f"Pengy v{__version__}")
 
+
+
+# ---------------------------------------------------------------------------
+# signals
+# ---------------------------------------------------------------------------
+#
+# pengy-cli is mostly run by other programs as a one-shot subagent, and a
+# parent that gives up on it sends SIGTERM (or SIGINT/SIGHUP).  Python's default
+# SIGTERM/SIGHUP action kills the process outright, skipping the turn's
+# cleanup: the running tool's process group (its own session, so the signal
+# never reaches it) kept running, a sudo askpass password file stayed in the
+# temp directory, and the dangling tool_calls repair never ran.  Now the signal
+# unwinds the turn like Ctrl-C does, the cleanup runs, and the process then
+# dies by that same signal so the parent sees exactly what it saw before
+# (``returncode == -15``, shell status 143).  Keep identical in the Rust and
+# C++ editions.
+
+class _Terminated(BaseException):
+    """Raised in the main thread by SIGTERM/SIGHUP.
+
+    A ``BaseException`` that is not a ``KeyboardInterrupt``, so the prompts that
+    treat Ctrl-C as "abort this run" (and carry on) let it through.
+    """
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+_terminating = False
+
+
+def _on_terminate(signum, _frame):
+    global _terminating
+    if _terminating:
+        # A second signal while the first is being cleaned up: die now.
+        _die_by_signal(signum, cleanup=False)
+    _terminating = True
+    raise _Terminated(signum)
+
+
+def _install_signal_handlers():
+    """Route SIGTERM/SIGHUP through :class:`_Terminated` (main thread only)."""
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, _on_terminate)
+
+
+def _die_by_signal(signum: int, cleanup: bool = True):
+    """Exit as if *signum* had killed the process, after cleaning up.
+
+    Re-raising with the default action (instead of ``sys.exit(128 + n)``)
+    keeps what the parent observes unchanged from before the handler existed.
+    """
+    if cleanup:
+        # A further signal during cleanup ends the process at once.
+        for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            sig = getattr(signal, name, None)
+            if sig is not None:
+                signal.signal(sig, lambda s, _f: _die_by_signal(s, cleanup=False))
+        tools.kill_active_process()
+        tools.cleanup_askpass_helpers()
+        try:
+            atexit._run_exitfuncs()  # readline history; the signal skips atexit
+        except Exception:
+            pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    if os.name == "posix":
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    os._exit(128 + signum)
 
 
 # ---------------------------------------------------------------------------
@@ -377,10 +454,29 @@ class PengyCLI:
                 # A failed turn must not be reported as success: scripts and cron
                 # jobs branch on this exit code (ralph's loop logs `agent rc=`).
                 sys.exit(getattr(self._turn_error, "exit_code", 1) or 1)
-        except KeyboardInterrupt:
-            self.console.print("\n[dim]Cancelled.[/dim]")
+        except (KeyboardInterrupt, _Terminated) as exc:
+            # Interrupted: the turn has been cleaned up and saved.  Die by the
+            # signal rather than exiting 0 -- a caller that stopped us must not
+            # read the run as a success.
+            signum = getattr(exc, "signum", signal.SIGINT)
+            self._report_interrupted(signum)
+            tools.set_sudo_password_provider(None)
+            _die_by_signal(signum)
         finally:
             tools.set_sudo_password_provider(None)
+
+    def _report_interrupted(self, signum: int) -> None:
+        """Say a single-shot run was interrupted, keeping stdout parseable."""
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            name = f"signal {signum}"
+        message = f"Interrupted by {name}."
+        if self._output_mode == "json":
+            self.console.print_json(
+                data={"error": {"type": "interrupted", "message": message}})
+        self._clear_thinking()
+        self._print_stderr("\n" + message)
 
     # ------------------------------------------------------------------
     # REPL
@@ -405,25 +501,36 @@ class PengyCLI:
             if not text:
                 continue
 
-            if text.startswith("/"):
-                self._handle_slash(text)
-                continue
+            # Ctrl-C while a turn (or a slash command such as /task or /models)
+            # is running stops that, not the CLI: _drive_generator has already
+            # killed the tool and saved the repaired chat by the time it gets
+            # here.  Ctrl-C at the prompt itself still quits (run_interactive).
+            try:
+                self._dispatch(text)
+            except KeyboardInterrupt:
+                self.console.print("\n[dim]Interrupted.[/dim]")
 
-            # Check for @path syntax (file attachment)
-            resolved_text, files_content, image_paths = self._resolve_attachments(text)
-            if files_content:
-                text = files_content + "\n" + resolved_text
-            elif resolved_text != text:
-                text = resolved_text
+    def _dispatch(self, text: str):
+        """Run one REPL line: a slash command or a message to the model."""
+        if text.startswith("/"):
+            self._handle_slash(text)
+            return
 
-            # Build display version (stored in history)
-            display_content = text
-            if image_paths:
-                img_placeholders = [f"[Image: {p.name}]" for p in image_paths]
-                display_content = "\n".join(img_placeholders + ([text] if text else []))
+        # Check for @path syntax (file attachment)
+        resolved_text, files_content, image_paths = self._resolve_attachments(text)
+        if files_content:
+            text = files_content + "\n" + resolved_text
+        elif resolved_text != text:
+            text = resolved_text
 
-            # Normal message
-            self._send_text(display_content, image_paths=image_paths if image_paths else None)
+        # Build display version (stored in history)
+        display_content = text
+        if image_paths:
+            img_placeholders = [f"[Image: {p.name}]" for p in image_paths]
+            display_content = "\n".join(img_placeholders + ([text] if text else []))
+
+        # Normal message
+        self._send_text(display_content, image_paths=image_paths if image_paths else None)
 
     def _send_text(self, display_content: str, image_paths: list[Path] | None = None):
         """Append a user message to the active chat and drive the generator.
@@ -1558,6 +1665,14 @@ class PengyCLI:
         except Exception as exc:
             self._clear_thinking()
             self._report_turn_error(exc)
+        except BaseException:
+            # Ctrl-C or SIGTERM/SIGHUP (_Terminated).  The tool runs in its own
+            # session, so the signal never reached it: kill its process group
+            # or it outlives the turn (and, in single-shot, the process).  The
+            # API request needs nothing: its daemon thread is just abandoned.
+            self._clear_thinking()
+            tools.kill_active_process()
+            raise
         finally:
             gen.close()
             if not self._no_save:
@@ -1909,7 +2024,9 @@ def main():
         epilog=(
             "Use -- to treat all remaining arguments as prompt text. "
             "Single-shot exit status: 0 success, 2 missing/invalid credentials, "
-            "1 other error (interactive mode always exits 0)."
+            "1 other error (interactive mode always exits 0). Stopped by SIGINT, "
+            "SIGTERM or SIGHUP: the running tool is killed, the chat is saved, "
+            "and the process dies by that signal."
         ),
     )
     parser.add_argument(
@@ -1982,13 +2099,19 @@ def main():
     if args.model or args.system:
         cli._update_llm_client()
 
-    if args.prompt:
-        prompt_text = " ".join(args.prompt)
-        if args.output:
-            cli._output_mode = args.output
-        cli.run_single_shot(prompt_text)
-    else:
-        cli.run_interactive()
+    _install_signal_handlers()
+    try:
+        if args.prompt:
+            prompt_text = " ".join(args.prompt)
+            if args.output:
+                cli._output_mode = args.output
+            cli.run_single_shot(prompt_text)
+        else:
+            cli.run_interactive()
+    except _Terminated as exc:
+        # Interactive mode (single-shot handles its own): the turn, if any,
+        # has already been cleaned up and saved on the way out.
+        _die_by_signal(exc.signum)
 
 
 if __name__ == "__main__":
