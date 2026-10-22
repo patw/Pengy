@@ -2,12 +2,14 @@
 import json
 import math
 import random
+import ssl
 import threading
 import time
 from collections.abc import Callable
 from urllib.parse import urlparse
 
-from openai import APITimeoutError, APIConnectionError, APIStatusError, OpenAI
+import truststore
+from openai import APITimeoutError, APIConnectionError, APIStatusError, DefaultHttpxClient, OpenAI
 
 from pengy.core import tools as _tools_mod
 from pengy.core.image_capabilities import images_rejected, remember_image_rejection
@@ -878,6 +880,12 @@ class LLMClient:
                 timeout=self.llm_timeout,
                 max_retries=0,
                 default_headers={"api-key": key},
+                # The SDK's httpx client verifies against certifi's frozen copy
+                # of the Mozilla roots, which keeps trusting a root the OS has
+                # already removed (emSign ECC Root CA - G3, 2026-10).  Verify
+                # through the OS trust store instead, as urllib already does.
+                http_client=DefaultHttpxClient(
+                    verify=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)),
             )
         return self._client
 

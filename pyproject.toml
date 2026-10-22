@@ -41,6 +41,7 @@ classifiers = [
 # needs a display, which headless servers and containers do not have.
 dependencies = [
     "openai>=1.0.0",
+    "truststore>=0.10",
     "ddgs>=9.0.0",
     "Pillow>=10.0.0",
     "rich>=13.0.0",
