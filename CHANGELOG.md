@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.12.5
 
 - **The LLM client verifies HTTPS against the operating system's trust store.** The OpenAI SDK's httpx client verified against certifi, a frozen copy of the Mozilla roots that depends on whatever version is installed (2026.06.17 here), and kept trusting `emSign ECC Root CA - G3` after the eMudhra compromise (2026-10) had distros remove it. `LLMClient` now passes a `truststore` SSL context (new dependency, `truststore>=0.10`), so it trusts what the OS trusts on Linux, Windows and macOS — as Pengy's `urllib` calls already did. Checked live: with the system store emptied (`SSL_CERT_FILE`), the client now refuses the connection instead of falling back to certifi. Web search is not covered: ddgs uses primp, whose wheels (up to 2.0.1) compile in a root list that still includes that root, and primp merges it with any CA file it is given; that needs a primp release built with webpki-roots >= 1.0.10.
 
