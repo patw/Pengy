@@ -70,6 +70,7 @@ DEFAULTS = {
     "output_token_parameter": "max_tokens",  # or max_completion_tokens
     "context_window": 0,
     "context_windows": {},
+    "context_window_modes": {},
     "context_window_auto": False,
     "compact_at_percent": 75,
     "empty_reply_thinking_off": "",
@@ -191,6 +192,29 @@ def save_config(config: dict) -> None:
 def recovery_options(config: dict) -> dict:
     """One settings contract for GUI, CLI and web."""
     keys = ("auto_context_recovery", "recovery_keep_turns", "output_token_limit", "output_token_parameter",
-            "context_window", "context_windows", "context_window_auto", "compact_at_percent",
+            "context_window", "context_windows", "context_window_modes", "context_window_auto", "compact_at_percent",
             "empty_reply_thinking_off", "empty_reply_thinking_off_models")
     return {key: config.get(key, DEFAULTS[key]) for key in keys}
+
+
+def compaction_policy(config: dict, model: str) -> tuple[str, int]:
+    windows = config.get("context_windows", {}) or {}
+    modes = config.get("context_window_modes", {}) or {}
+    window = windows.get(model, config.get("context_window", 0))
+    mode = modes.get(model)
+    if mode not in ("off", "auto", "explicit"):
+        mode = ("explicit" if window else "off") if model in windows or window else ("auto" if config.get("context_window_auto", False) else "off")
+    return mode, window
+
+
+def set_compaction_policy(config: dict, model: str, mode: str, window: int = 0, percent: int | None = None):
+    """Change only the selected model. Never disable reactive recovery or remove checkpoints."""
+    if not model.strip(): raise ValueError("Select a model before changing proactive compaction")
+    if mode not in ("off", "auto", "explicit"): raise ValueError("Mode must be off, auto, or explicit")
+    if mode == "explicit" and (not isinstance(window, int) or isinstance(window, bool) or not 1 <= window <= 2147483647):
+        raise ValueError("Explicit window must be 1–2147483647 tokens")
+    if percent is not None and (not isinstance(percent, int) or not 1 <= percent <= 100):
+        raise ValueError("Threshold must be 1–100 percent")
+    config["context_window_modes"] = {**(config.get("context_window_modes", {}) or {}), model: mode}
+    if mode == "explicit": config["context_windows"] = {**(config.get("context_windows", {}) or {}), model: window}
+    if percent is not None: config["compact_at_percent"] = percent

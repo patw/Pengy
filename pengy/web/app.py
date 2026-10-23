@@ -22,7 +22,7 @@ from pengy.core.about import (
     CATBEE_BLURB, CATBEE_URL, DESCRIPTION, GITHUB_URL, LICENSE_NAME, LICENSE_URL,
     WEBSITE_URL, copyright_line, edition_line,
 )
-from pengy.core.config import recovery_options
+from pengy.core.config import recovery_options, set_compaction_policy
 from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.model_cache import cached_models_for, load_model_cache, save_model_cache
 from pengy.core.llm_client import LLMClient
@@ -1489,6 +1489,16 @@ def settings_view():
     config = load_config()
     saved = False
     if request.method == "POST":
+        if "compaction_mode" in request.form:
+            try:
+                selected = request.form.get("compaction_model", request.form.get("model", "")).strip()
+                if selected != request.form.get("model", "").strip(): raise ValueError("Compaction model does not match selected model")
+                mode = request.form["compaction_mode"]
+                window = int(request.form.get("compaction_window", "0")) if mode == "explicit" else 0
+                percent = int(request.form.get("compact_at_percent", config.get("compact_at_percent",75)))
+                set_compaction_policy(config, selected, mode, window, percent)
+            except ValueError as error:
+                return str(error), 400
         for key in ["base_url", "model", "system_message", "user_agent"]:
             config[key] = request.form.get(key, "").strip()
         api_key = request.form.get("api_key", "").strip()
@@ -1529,6 +1539,7 @@ def settings_view():
     chats = load_index()
     return render_template(
         "settings.html", config=config, saved=saved, chats=chats,
+        compaction_config={k:config.get(k) for k in ("context_window","context_windows","context_window_modes","context_window_auto")},
         theme_mode=_theme_mode(config),
     )
 

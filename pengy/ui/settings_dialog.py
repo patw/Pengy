@@ -15,7 +15,7 @@ from pengy.core.about import (
     CATBEE_BLURB, CATBEE_URL, DESCRIPTION, GITHUB_URL, LICENSE_NAME, LICENSE_URL,
     WEBSITE_URL, copyright_line, edition_line,
 )
-from pengy.core.config import DEFAULTS
+from pengy.core.config import DEFAULTS, compaction_policy, set_compaction_policy
 from pengy.core.model_cache import cached_models_for, load_model_cache, save_model_cache
 from pengy.ui.theme import ACCENT_NAMES, THEME_MODES, get_theme, scaled_size
 from pengy.ui.icons import apply_button_icon
@@ -185,6 +185,34 @@ class SettingsDialog(QDialog):
         self.llm_timeout_spinbox.setValue(config.get("llm_timeout", 300))
         llm_layout.addRow(_label("LLM timeout:", "HTTP timeout in seconds for each LLM API request. Increase if your model is slow to respond."), self.llm_timeout_spinbox)
 
+        self.compaction_mode = QComboBox()
+        self.compaction_mode.setObjectName("compactionMode")
+        for label, value in (("Off", "off"), ("Auto-discover", "auto"), ("Explicit window", "explicit")):
+            self.compaction_mode.addItem(label, value)
+        self.compaction_window = QSpinBox()
+        self.compaction_window.setObjectName("compactionWindow")
+        self.compaction_window.setRange(1, 2147483647)
+        self.compaction_window.setSuffix(" tokens")
+        self.compaction_percent = QSpinBox()
+        self.compaction_percent.setObjectName("compactionPercent")
+        self.compaction_percent.setRange(1, 100)
+        self.compaction_percent.setSuffix(" %")
+        self.compaction_percent.setValue(config.get("compact_at_percent", 75))
+        llm_layout.addRow("Proactive compaction:", self.compaction_mode)
+        llm_layout.addRow("Selected-model window:", self.compaction_window)
+        llm_layout.addRow("Threshold (all models):", self.compaction_percent)
+        note = QLabel("Applies to the selected model. Off keeps reactive recovery and existing checkpoints. Auto needs endpoint metadata; unknown windows stay reactive. Threshold is shared across models.")
+        note.setWordWrap(True)
+        llm_layout.addRow(note)
+        self.compaction_window.setToolTip("Combined input/output window. Typical: 131072, 262144, or 1048576. Used only in Explicit mode.")
+        self._compaction_drafts = {}
+        self._compaction_model = ""
+        self._compaction_dirty = False
+        self.compaction_mode.currentIndexChanged.connect(self._compaction_changed)
+        self.compaction_window.valueChanged.connect(self._compaction_changed)
+        self.model_combo.currentTextChanged.connect(self._load_compaction)
+        self._load_compaction(self.model_combo.currentText())
+
         tabs.addTab(llm_tab, "LLM")
 
         # ── Tools tab ─────────────────────────────────────────────
@@ -294,6 +322,29 @@ class SettingsDialog(QDialog):
 
         self.adjustSize()
 
+    def _compaction_changed(self, *_):
+        self._compaction_dirty = True
+        self.compaction_window.setEnabled(bool(self._compaction_model.strip()) and self.compaction_mode.currentData() == "explicit")
+
+    def _stash_compaction(self):
+        if self._compaction_dirty and self._compaction_model.strip():
+            self._compaction_drafts[self._compaction_model] = (self.compaction_mode.currentData(), self.compaction_window.value())
+        self._compaction_dirty = False
+
+    def _load_compaction(self, model):
+        self._stash_compaction()
+        self._compaction_model = model
+        mode, window = self._compaction_drafts.get(model, compaction_policy(self.config, model))
+        self.compaction_mode.blockSignals(True)
+        self.compaction_window.blockSignals(True)
+        self.compaction_mode.setCurrentIndex(self.compaction_mode.findData(mode))
+        self.compaction_window.setValue(window or 262144)
+        self.compaction_mode.blockSignals(False)
+        self.compaction_window.blockSignals(False)
+        self.compaction_mode.setEnabled(bool(model.strip()))
+        self.compaction_window.setEnabled(bool(model.strip()) and mode == "explicit")
+        self._compaction_dirty = False
+
     def _update_cache_note(self, cache: dict | None):
         """Show when the current model list was last fetched from the endpoint."""
         if not cache or not cache.get("fetched_at"):
@@ -360,6 +411,10 @@ class SettingsDialog(QDialog):
 
     def get_config(self) -> dict:
         """Return updated configuration."""
+        self._stash_compaction()
+        for model, (mode, window) in self._compaction_drafts.items():
+            set_compaction_policy(self.config, model, mode, window)
+        self.config["compact_at_percent"] = self.compaction_percent.value()
         self.config["base_url"] = self.base_url_input.text()
         self.config["api_key"] = self.api_key_input.text()
         self.config["model"] = self.model_combo.currentText()

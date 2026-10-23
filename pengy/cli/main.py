@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from pengy.core.config import recovery_options
+from pengy.core.config import recovery_options, compaction_policy, set_compaction_policy
 from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
@@ -65,13 +65,14 @@ SLASH_COMMANDS = (
     "/help", "/new", "/show", "/tail", "/rename", "/clear", "/export",
     "/yolo", "/config", "/model", "/models", "/list", "/load", "/baseurl",
     "/apikey", "/llm-timeout", "/timeout", "/download-max", "/agent", "/context-keep",
-    "/system", "/delete", "/attach", "/attachments", "/compact", "/redact",
+    "/auto-compact", "/system", "/delete", "/attach", "/attachments", "/compact", "/redact",
     "/tasks", "/task", "/about", "/quit", "/exit", "/q",
 )
 
 # Sub-arguments worth completing once the command is typed.
 _SLASH_ARGS = {
     "/yolo": ("all", "safe", "none"),
+    "/auto-compact": ("off", "auto", "262144", "1048576"),
 }
 
 
@@ -628,6 +629,9 @@ class PengyCLI:
         elif cmd == "/agent":
             self._cmd_agent(args)
 
+        elif cmd == "/auto-compact":
+            self._cmd_auto_compact(args)
+
         elif cmd == "/context-keep":
             self._cmd_context_keep(args)
 
@@ -686,6 +690,7 @@ class PengyCLI:
         table.add_row("/context-keep <n>", "Set how many recent turns to keep when compacting")
         table.add_row("/yolo [all|safe|none]", "Set tool confirmation: all (YOLO), safe (read-only), none")
         table.add_row("/system [message...]", "Show or set the system message template")
+        table.add_row("/auto-compact [off|auto|tokens] [percent]", "Show/set proactive compaction for the selected model; percent is shared")
         table.add_row("/compact", "Compact context by eliding old tool results")
         table.add_row("/redact [N]", "Delete the last N messages (default 1) — repeatable up to the top")
         table.add_row("/tasks", "List saved prompt-template Tasks")
@@ -1191,6 +1196,24 @@ class PengyCLI:
         self.console.print(
             f"[green]✓ User agent changed:[/green] {old_agent} → [bold]{new_agent}[/bold]"
         )
+
+    def _cmd_auto_compact(self, args):
+        model = (self.current_chat or {}).get("model") or self.config.get("model", "")
+        if args:
+            try:
+                if len(args) > 2: raise ValueError("Usage: /auto-compact [off|auto|tokens] [percent]")
+                value = args[0]
+                mode = value if value in ("off", "auto") else "explicit"
+                window = int(value) if mode == "explicit" else 0
+                percent = int(args[1]) if len(args) == 2 else None
+                set_compaction_policy(self.config, model, mode, window, percent)
+                self._save_config()
+            except ValueError as error:
+                self.console.print(str(error), markup=False)
+                return
+        mode, window = compaction_policy(self.config, model)
+        label = f"explicit {window} tokens" if mode == "explicit" else mode
+        self.console.print(f"Proactive compaction for {model or '(no model selected)'}: {label}; threshold {self.config.get('compact_at_percent',75)}%. Reactive recovery unchanged.", markup=False)
 
     def _cmd_context_keep(self, args: list[str]):
         """Set how many recent turns to keep when compacting context."""

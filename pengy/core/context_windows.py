@@ -63,8 +63,11 @@ def remember_error(base, model, message):
     return w
 
 
-def resolve(base, model, key, global_window=0, windows=None, auto=False, enabled=True):
+def resolve(base, model, key, global_window=0, windows=None, auto=False, enabled=True, modes=None):
     windows = windows or {}
+    mode = (modes or {}).get(model)
+    if mode == 'off': return None
+    if mode == 'auto': global_window, windows, auto = 0, {}, True
     if model in windows:
         n = number(windows[model]); return {'tokens': n, 'input_only': False} if n else None
     if number(global_window): return {'tokens': global_window, 'input_only': False}

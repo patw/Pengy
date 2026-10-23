@@ -956,6 +956,7 @@ class LLMClient:
              event_sink: Callable[[dict], None] | None = None,
              context_window: int = 0, context_windows: dict | None = None,
              context_window_auto: bool = False, compact_at_percent: int = 75,
+             context_window_modes: dict | None = None,
              empty_reply_thinking_off: str = "", empty_reply_thinking_off_models: dict | None = None):
         """
         Send a chat request and handle tool calls.
@@ -1003,7 +1004,7 @@ class LLMClient:
 
         selected_model = model or self.model
         window = window_cache.resolve(self.base_url, selected_model, self.api_key,
-            context_window, context_windows, context_window_auto, auto_context_recovery)
+            context_window, context_windows, context_window_auto, auto_context_recovery, context_window_modes)
         if not isinstance(compact_at_percent, int) or isinstance(compact_at_percent, bool) or not 1 <= compact_at_percent <= 100:
             raise ConfigError("compact_at_percent must be between 1 and 100")
         if window and not window["input_only"] and output_token_limit >= window["tokens"]:
@@ -1200,7 +1201,9 @@ class LLMClient:
                         continue  # retry once; no image parts remain in this request
 
                     if _is_context_limit_error(e):
-                        if auto_context_recovery and context_window_auto and not context_window and selected_model not in (context_windows or {}):
+                        selected_mode = (context_window_modes or {}).get(selected_model)
+                        discovery_on = selected_mode == "auto" or (selected_mode != "off" and context_window_auto and not context_window and selected_model not in (context_windows or {}))
+                        if auto_context_recovery and discovery_on:
                             discovered = window_cache.remember_error(self.base_url, selected_model, str(e))
                             if discovered: window = discovered; pressure.set_window(window["tokens"])
                         if auto_context_recovery:
