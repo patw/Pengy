@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from pengy.core.config import recovery_options
 from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_manager import (
@@ -1541,9 +1542,7 @@ class PengyCLI:
             preserve_reasoning=bool(self.config.get("preserve_reasoning", False)),
             chat_id=chat["id"] if not self._no_save else "",
             event_sink=_recovery_event_sink,
-            **{key: self.config.get(key, default) for key, default in (
-                ("auto_context_recovery", True), ("recovery_keep_turns", 3),
-                ("output_token_limit", 0), ("output_token_parameter", "max_tokens"))},
+            **recovery_options(self.config),
         )
         self._yolo_this_turn = False
         send_value = None

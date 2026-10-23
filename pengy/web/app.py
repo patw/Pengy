@@ -22,6 +22,7 @@ from pengy.core.about import (
     CATBEE_BLURB, CATBEE_URL, DESCRIPTION, GITHUB_URL, LICENSE_NAME, LICENSE_URL,
     WEBSITE_URL, copyright_line, edition_line,
 )
+from pengy.core.config import recovery_options
 from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.model_cache import cached_models_for, load_model_cache, save_model_cache
 from pengy.core.llm_client import LLMClient
@@ -613,9 +614,7 @@ class WebWorker:
                 tool_context=self._tool_context,
                 chat_id=chat["id"],
                 event_sink=self._put_event,
-                **{key: config.get(key, default) for key, default in (
-                    ("auto_context_recovery", True), ("recovery_keep_turns", 3),
-                    ("output_token_limit", 0), ("output_token_parameter", "max_tokens"))},
+                **recovery_options(config),
             )
             send_value = None
 

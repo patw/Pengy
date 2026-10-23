@@ -221,7 +221,7 @@ def test_short_truncated_tool_call_recovers_without_executing(client, stub, tmp_
     assert [e["type"] for e in events] == ["context_compacted", "final_response"]
 
 
-@pytest.mark.parametrize("completion_tokens, limit", [(4096, 0), (256, 256), (None, 0)])
+@pytest.mark.parametrize("completion_tokens, limit", [(4096, 4096), (256, 256), (None, 4096)])
 def test_capped_or_unreported_partial_length_still_fails_safely(client, stub, completion_tokens, limit):
     reply = length_stop("A long partial answer", completion_tokens=completion_tokens or 0)
     if completion_tokens is None:

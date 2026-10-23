@@ -14,7 +14,16 @@ from openai import APITimeoutError, APIConnectionError, APIStatusError, DefaultH
 from pengy.core import tools as _tools_mod
 from pengy.core.image_capabilities import images_rejected, remember_image_rejection
 from pengy.core.context_recovery import Recovery, SUMMARY_PROMPT
+from pengy.core.context_pressure import Pressure, input_chars, budgets, identity
+from pengy.core import context_windows as window_cache
 from pengy.core.tool_args import parse_raw_arguments
+
+def _apply_thinking_off(kwargs, mechanism):
+    if mechanism == "reasoning_effort": kwargs["reasoning_effort"] = "none"
+    elif mechanism == "enable_thinking":
+        kwargs.pop("reasoning_effort", None)
+        kwargs.setdefault("extra_body", {})["chat_template_kwargs"] = {"enable_thinking": False}
+
 
 _REASONING_MESSAGE_FIELDS = (
     "reasoning_content",
@@ -944,7 +953,10 @@ class LLMClient:
              tool_context=None, model: str | None = None, *, chat_id: str = "",
              auto_context_recovery: bool = True, recovery_keep_turns: int = 3,
              output_token_limit: int = 0, output_token_parameter: str = "max_tokens",
-             event_sink: Callable[[dict], None] | None = None):
+             event_sink: Callable[[dict], None] | None = None,
+             context_window: int = 0, context_windows: dict | None = None,
+             context_window_auto: bool = False, compact_at_percent: int = 75,
+             empty_reply_thinking_off: str = "", empty_reply_thinking_off_models: dict | None = None):
         """
         Send a chat request and handle tool calls.
         Yields intermediate tool call info for UI updates.
@@ -989,6 +1001,20 @@ class LLMClient:
         if output_token_parameter not in ("max_tokens", "max_completion_tokens"):
             raise ConfigError("output_token_parameter must be max_tokens or max_completion_tokens")
 
+        selected_model = model or self.model
+        window = window_cache.resolve(self.base_url, selected_model, self.api_key,
+            context_window, context_windows, context_window_auto, auto_context_recovery)
+        if not isinstance(compact_at_percent, int) or isinstance(compact_at_percent, bool) or not 1 <= compact_at_percent <= 100:
+            raise ConfigError("compact_at_percent must be between 1 and 100")
+        if window and not window["input_only"] and output_token_limit >= window["tokens"]:
+            raise ConfigError("output_token_limit must be smaller than the combined context_window")
+        thinking_off = (empty_reply_thinking_off_models or {}).get(selected_model, empty_reply_thinking_off)
+        if thinking_off not in ("", "reasoning_effort", "enable_thinking"):
+            raise ConfigError("empty_reply_thinking_off must be empty, reasoning_effort, or enable_thinking")
+        pressure_key = json.dumps([self.base_url.rstrip('/'), selected_model, chat_id]) if chat_id else ""
+        pressure = Pressure.load(pressure_key, current_messages, identity(recovery.state), window["tokens"] if window else 0)
+        proactive_commits, proactive_failed, long_length_retried, thinking_disabled = 0, False, False, False
+
         # One wall-clock grace for every summary call in this turn's recovery
         # (see _RETRY_CHAIN_GRACE_SECS).
         summary_chain_started: list = []
@@ -1001,6 +1027,7 @@ class LLMClient:
                              {"role": "user", "content": source}],
                 output_token_parameter: 2048,
             }
+            _apply_thinking_off(summary_kwargs, thinking_off)
             summary_retries = 0
             summary_chain = None
             # The summary is part of this turn, so a provider timeout gets the
@@ -1063,6 +1090,24 @@ class LLMClient:
             if image_input_rejected:
                 request_messages = [dict(msg) for msg in request_messages]
                 _suppress_images(request_messages, image_rejection)
+            if (auto_context_recovery and window and not proactive_failed
+                    and proactive_commits < 2 and recovery.attempts < 2):
+                threshold, hard = budgets(window["tokens"], compact_at_percent, output_token_limit, window["input_only"])
+                estimate = pressure.estimate(input_chars(request_messages, _tools_mod.TOOLS))
+                if pressure.should_compact(estimate, threshold, hard):
+                    try:
+                        event = recovery.reduce(current_messages, summarize, proactive=True)
+                    except _Cancelled: raise
+                    except Exception: event = None
+                    if event:
+                        proactive_commits += 1
+                        event["reason"] = "proactive"
+                        event["message"] = f"Compacting before the window fills — {event['chars_removed']:,} fewer characters. Full history retained."
+                        yield event
+                        request_messages = _without_cross_model_proxy_state(recovery.apply(current_messages), selected_model)
+                        if image_input_rejected: _suppress_images(request_messages, image_rejection)
+                        pressure.compacted(pressure.estimate(input_chars(request_messages, _tools_mod.TOOLS)), threshold)
+                    else: proactive_failed = True
             context_retries = 0
             rate_retries = 0
             transient_retries = 0
@@ -1089,8 +1134,13 @@ class LLMClient:
                         request_kwargs["reasoning_effort"] = reasoning_effort
                     if output_token_limit > 0:
                         request_kwargs[output_token_parameter] = output_token_limit
+                    if thinking_disabled: _apply_thinking_off(request_kwargs, thinking_off)
                     request_started = time.perf_counter()
                     response = self.client.chat.completions.create(**request_kwargs)
+                    if auto_context_recovery and window:
+                        pressure.record(input_chars(request_kwargs["messages"], request_kwargs["tools"]),
+                                        getattr(response.usage, "prompt_tokens", None))
+                        pressure.save(pressure_key, current_messages, identity(recovery.state))
                     # The endpoint is reachable and speaking our protocol. From
                     # here on, a connection failure means it went away mid-work.
                     self._endpoint_answered = True
@@ -1114,7 +1164,11 @@ class LLMClient:
                         self._reset_client()
                         raise EmptyResponseError(_no_choices_help())
                     choice = choices[0]
-                    if _length_suggests_context_pressure(choice, response.usage, output_token_limit):
+                    short_or_empty = _length_suggests_context_pressure(choice, response.usage, output_token_limit)
+                    extra_long = (choice.finish_reason == "length" and not short_or_empty
+                                  and output_token_limit == 0 and not long_length_retried)
+                    if short_or_empty or extra_long:
+                        if extra_long: long_length_retried = True
                         if response.usage:
                             for key in accumulated_usage:
                                 accumulated_usage[key] += getattr(response.usage, key, 0) or 0
@@ -1146,6 +1200,9 @@ class LLMClient:
                         continue  # retry once; no image parts remain in this request
 
                     if _is_context_limit_error(e):
+                        if auto_context_recovery and context_window_auto and not context_window and selected_model not in (context_windows or {}):
+                            discovered = window_cache.remember_error(self.base_url, selected_model, str(e))
+                            if discovered: window = discovered; pressure.set_window(window["tokens"])
                         if auto_context_recovery:
                             event = recovery.reduce(current_messages, summarize)
                             if event:
@@ -1297,6 +1354,14 @@ class LLMClient:
                 raise GenerationLimitError(_generation_limit_message(
                     assistant_msg.content, bool(assistant_msg.tool_calls),
                     response.usage, recovery.attempts))
+            if (choice.finish_reason == "stop" and not assistant_msg.tool_calls
+                    and not (assistant_msg.content or "").strip() and not thinking_disabled and thinking_off
+                    and any(str(getattr(assistant_msg, k, "") or "").strip() for k in ("reasoning", "reasoning_content"))):
+                thinking_disabled = True
+                yield {"type":"retrying", "reason":"empty", "attempt":1, "max_attempts":1,
+                       "delay_secs":0.0, "status_code":200, "message":"Reasoning-only empty reply; retrying once with thinking off"}
+                yield {"type":"request_started", "stage":"turn", "attempt":2}
+                continue
             serialized = _serialize_assistant_message(assistant_msg, preserve_reasoning)
             current_messages.append(serialized)
 
@@ -1450,8 +1515,10 @@ class LLMClient:
                 # model said.  Report it as the provider anomaly it is, so an
                 # unattended run fails loudly instead of quietly.
                 if not (assistant_msg.content or "").strip():
-                    raise EmptyResponseError(_empty_reply_help(
-                        assistant_msg, choice.finish_reason, response.usage))
+                    help_text = _empty_reply_help(assistant_msg, choice.finish_reason, response.usage)
+                    if thinking_disabled:
+                        help_text = help_text.replace("Pengy did not retry", "Pengy retried once with thinking off but still received no answer")
+                    raise EmptyResponseError(help_text)
                 yield {"type": "final_response", "content": assistant_msg.content,
                        "message": _serialize_assistant_message(assistant_msg, preserve_reasoning),
                        "usage": accumulated_usage,

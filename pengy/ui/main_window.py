@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QTextOption
 
+from pengy.core.config import recovery_options
 from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.model_cache import cached_models_for
 from pengy.core.chat_manager import (
@@ -630,9 +631,7 @@ class MainWindow(QMainWindow):
                 else self.config.get("reasoning_effort", "")),
             preserve_reasoning=bool(self.config.get("preserve_reasoning", False)),
             model=self._model_for_session(session),
-            recovery_options={"chat_id": chat_id, **{key: self.config.get(key, default)
-                for key, default in (("auto_context_recovery", True), ("recovery_keep_turns", 3),
-                                     ("output_token_limit", 0), ("output_token_parameter", "max_tokens"))}},
+            recovery_options={"chat_id": chat_id, **recovery_options(self.config)},
         )
         thread = QThread()
         worker.moveToThread(thread)

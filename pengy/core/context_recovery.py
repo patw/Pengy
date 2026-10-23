@@ -158,14 +158,16 @@ class Recovery:
             result.insert(at, {"role": "user", "content": NOTICE + "\n" + self.state["summary"]})
         return result
 
-    def reduce(self, messages: list[dict], summarize: Callable[[str], str]) -> dict | None:
+    def reduce(self, messages: list[dict], summarize: Callable[[str], str], *, proactive: bool = False) -> dict | None:
         original = copy.deepcopy(self.state)
+        attempts = self.attempts
         try:
-            event = self._reduce(messages, summarize)
+            event = self._reduce(messages, summarize, proactive=proactive)
             if event is None: self.state = original
             return event
         except Exception:
             self.state = original
+            self.attempts = attempts
             raise
 
     def _summary_plan(self, messages: list[dict]):
@@ -210,7 +212,7 @@ class Recovery:
         if self.summary_calls + len(chunks) > MAX_SUMMARY_CALLS: return None
         return drop, sum(m.get("role") == "user" for m in selected), chunks, len(source)
 
-    def _reduce(self, messages: list[dict], summarize: Callable[[str], str]) -> dict | None:
+    def _reduce(self, messages: list[dict], summarize: Callable[[str], str], *, proactive: bool = False) -> dict | None:
         """Commit a strictly smaller plan; failed summaries never discard history."""
         if not self.enabled or self.attempts >= MAX_RETRIES:
             return None
@@ -247,6 +249,7 @@ class Recovery:
             summary_plan = reserved_summary or self._summary_plan(messages)
             if summary_plan is None: return None
             drop, turns_removed, chunks, source_length = summary_plan
+            if proactive and self.summary_calls + len(chunks) > 8: return None
             summaries = []
             for chunk in chunks:
                 self.summary_calls += 1

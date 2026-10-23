@@ -68,6 +68,12 @@ DEFAULTS = {
     "recovery_keep_turns": 3,
     "output_token_limit": 0,  # 0 omits provider output limit
     "output_token_parameter": "max_tokens",  # or max_completion_tokens
+    "context_window": 0,
+    "context_windows": {},
+    "context_window_auto": False,
+    "compact_at_percent": 75,
+    "empty_reply_thinking_off": "",
+    "empty_reply_thinking_off_models": {},
     "ui_scale": 100,
     "theme_mode": "system",  # "system" | "light" | "dark"
     "theme_accent": "default",  # "default" | "blue" | "teal" | "green" | "orange" | "red" | "pink" | "purple"
@@ -180,3 +186,11 @@ def _migrate_config(config: dict, saved: dict) -> None:
 def save_config(config: dict) -> None:
     """Save configuration to JSON file atomically."""
     _atomic_write(_config_path("settings.json"), config)
+
+
+def recovery_options(config: dict) -> dict:
+    """One settings contract for GUI, CLI and web."""
+    keys = ("auto_context_recovery", "recovery_keep_turns", "output_token_limit", "output_token_parameter",
+            "context_window", "context_windows", "context_window_auto", "compact_at_percent",
+            "empty_reply_thinking_off", "empty_reply_thinking_off_models")
+    return {key: config.get(key, DEFAULTS[key]) for key in keys}
