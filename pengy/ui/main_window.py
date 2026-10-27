@@ -1163,8 +1163,11 @@ class QuestionDialog(QDialog):
         """Build the question dialog with radio buttons for each question."""
         self.setWindowTitle(f"Pengy — Tab: {tab_title}")
         self.setModal(True)
-        self.setMinimumWidth(480)
-        self.setMaximumWidth(680)
+        # No window size constraints here on purpose. A toplevel that advertises
+        # a maximum width opens at its minimum *height* on COSMIC (cosmic-comp
+        # keeps the requested width but substitutes minimumSizeHint().height()),
+        # which collapsed the option list to a ~70px sliver. The width cap is
+        # applied to the computed size below instead.
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -1284,12 +1287,24 @@ class QuestionDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
-        # Size to fit content, with reasonable limits
+        # Size to fit content, with reasonable limits.
+        #
+        # resize() alone is only a suggestion on Wayland: COSMIC opens a new
+        # toplevel at the minimum size it was told about, so the height we want
+        # has to be published as the dialog's minimum. Without that the
+        # compositor honours only the bare layout minimum (header + buttons, no
+        # choices) and the question list is unreadable.
         scroll_widget.adjustSize()
-        from PySide6.QtCore import QSize
-        ideal_w = min(scroll_widget.sizeHint().width() + 40, 680)
-        ideal_h = min(scroll_widget.sizeHint().height() + 140, 650)
-        self.resize(max(ideal_w, 480), max(ideal_h, 280))
+        hint = scroll_widget.sizeHint()
+        avail = self.screen().availableGeometry()
+        max_w = min(680, avail.width() - 60)
+        max_h = min(650, avail.height() - 60)
+        ideal_w = max(min(480, max_w), min(hint.width() + 40, max_w))
+        ideal_h = max(min(280, max_h), min(hint.height() + 140, max_h))
+        # Keep whole options visible even if the dialog is resized down later.
+        scroll.setMinimumHeight(max(120, ideal_h - 140))
+        self.setMinimumSize(min(ideal_w, 560), ideal_h)
+        self.resize(ideal_w, ideal_h)
 
     def _on_submit(self):
         """Collect answers from all button groups."""
