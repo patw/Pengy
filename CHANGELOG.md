@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.14.0 — 2026-10-31
 
 Settings grew a fourth tab, and a new user can now go from "no skills at all"
 to a working skills folder with the system message already pointed at it, in one
