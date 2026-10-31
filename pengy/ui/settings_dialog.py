@@ -1,16 +1,21 @@
-"""Settings dialog for Pengy — tabbed UI / LLM / Tools."""
+"""Settings dialog for Pengy — tabbed UI / LLM / Tools / Extras."""
 import json
 import threading
 import urllib.request
+
+from pathlib import Path
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QLineEdit,
     QTextEdit, QDialogButtonBox, QCheckBox, QLabel, QComboBox,
     QSpinBox, QPushButton, QHBoxLayout, QMessageBox, QTabWidget, QWidget,
+    QFileDialog,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from datetime import datetime
 
+from pengy.core import skills_install
 from pengy.core.about import (
     CATBEE_BLURB, CATBEE_URL, DESCRIPTION, GITHUB_URL, LICENSE_NAME, LICENSE_URL,
     WEBSITE_URL, copyright_line, edition_line,
@@ -19,6 +24,9 @@ from pengy.core.config import DEFAULTS, compaction_policy, set_compaction_policy
 from pengy.core.model_cache import cached_models_for, load_model_cache, save_model_cache
 from pengy.ui.theme import ACCENT_NAMES, THEME_MODES, get_theme, scaled_size
 from pengy.ui.icons import apply_button_icon
+
+#: Public skill registry, documented by the bundled botskills skill.
+SKILL_REGISTRY_URL = "https://skills.catbee.ca"
 
 
 def _label(text: str, tooltip: str) -> QLabel:
@@ -29,10 +37,12 @@ def _label(text: str, tooltip: str) -> QLabel:
 
 
 class SettingsDialog(QDialog):
-    """Settings dialog with three tabs: UI, LLM, Tools."""
+    """Settings dialog with four tabs: UI, LLM, Tools and Extras."""
 
     _models_fetched = Signal(list)
     _models_fetch_failed = Signal(str)
+    #: Asks the main window to send a prompt (e.g. start the profile interview).
+    prompt_requested = Signal(str)
 
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
@@ -270,6 +280,131 @@ class SettingsDialog(QDialog):
 
         tabs.addTab(tools_tab, "Tools")
 
+        # ── Extras tab ────────────────────────────────────────────
+        # Skills are inert files until the system message points at the index,
+        # so this tab does both jobs in one place: seed ~/skills, then add the
+        # pointer sentence to the message. Nothing here writes outside the
+        # user's home, and nothing happens until a button is pressed.
+        extras_tab = QWidget()
+        extras_layout = QVBoxLayout(extras_tab)
+        extras_layout.setSpacing(6)
+
+        skills_heading = QLabel("Skills")
+        _heading_font = skills_heading.font()
+        _heading_font.setBold(True)
+        _heading_font.setPointSize(_heading_font.pointSize() + 1)
+        skills_heading.setFont(_heading_font)
+        extras_layout.addWidget(skills_heading)
+
+        skills_blurb = QLabel(
+            "Skills are folders of markdown instructions that teach Pengy what its "
+            "built-in tools don't cover. Pengy reads the skill index at the start of "
+            "a task, so the folder is only useful once the system message mentions it "
+            "\u2014 installing fills in both."
+        )
+        skills_blurb.setWordWrap(True)
+        skills_blurb.setStyleSheet(f"color: {self._theme['muted']};")
+        extras_layout.addWidget(skills_blurb)
+
+        self.skills_status_label = QLabel("")
+        self.skills_status_label.setWordWrap(True)
+        self.skills_status_label.setTextFormat(Qt.TextFormat.PlainText)
+        extras_layout.addWidget(self.skills_status_label)
+
+        self.skills_detail_label = QLabel("")
+        self.skills_detail_label.setWordWrap(True)
+        self.skills_detail_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.skills_detail_label.setStyleSheet(f"color: {self._theme['muted']};")
+        extras_layout.addWidget(self.skills_detail_label)
+
+        skills_path_row = QHBoxLayout()
+        self.skills_path_input = QLineEdit(
+            skills_install.display_path(skills_install.skills_root(config))
+        )
+        _skills_path_tip = (
+            "Where skills live. Defaults to ~/skills. Point it at a synced or shared "
+            "tree if you keep skills elsewhere \u2014 only this one folder is consulted."
+        )
+        self.skills_path_input.setToolTip(_skills_path_tip)
+        self.skills_path_input.setPlaceholderText(skills_install.DEFAULT_SKILLS_DIR)
+        self.skills_path_input.editingFinished.connect(lambda: self._refresh_skills_state())
+        skills_path_row.addWidget(self.skills_path_input, 1)
+        self.skills_browse_btn = QPushButton("Browse\u2026")
+        self.skills_browse_btn.setToolTip("Choose an existing skills folder")
+        self.skills_browse_btn.clicked.connect(lambda: self._browse_skills_folder())
+        skills_path_row.addWidget(self.skills_browse_btn)
+        extras_layout.addWidget(
+            _label("Skills folder:", _skills_path_tip))
+        extras_layout.addLayout(skills_path_row)
+
+        skills_button_row = QHBoxLayout()
+        self.install_skills_btn = QPushButton("Install Skills")
+        self.install_skills_btn.setToolTip(
+            "Copy the starter skills into the folder above and add the skills "
+            "pointer to your system message. Existing files are never overwritten."
+        )
+        apply_button_icon(self.install_skills_btn, "save", self._theme, size=15)
+        self.install_skills_btn.clicked.connect(lambda: self._install_skills())
+        skills_button_row.addWidget(self.install_skills_btn)
+
+        self.skills_pointer_btn = QPushButton("Add to System Message")
+        self.skills_pointer_btn.setToolTip(
+            "Skills already exist here \u2014 append the one-line pointer to the system "
+            "message so Pengy actually reads the index."
+        )
+        self.skills_pointer_btn.clicked.connect(lambda: self._add_skills_pointer())
+        skills_button_row.addWidget(self.skills_pointer_btn)
+
+        self.skills_open_btn = QPushButton("Open Folder")
+        self.skills_open_btn.setToolTip("Open the skills folder in your file manager")
+        apply_button_icon(self.skills_open_btn, "file", self._theme, size=15)
+        self.skills_open_btn.clicked.connect(lambda: self._open_skills_folder())
+        skills_button_row.addWidget(self.skills_open_btn)
+        skills_button_row.addStretch()
+        extras_layout.addLayout(skills_button_row)
+
+        # Row 2: what to do *next* with the folder that now exists.
+        skills_next_row = QHBoxLayout()
+        self.skills_profile_btn = QPushButton("Fill In My Profile")
+        self.skills_profile_btn.setToolTip(
+            "Sends one prompt: read the user_profile skill and interview me. "
+            "Answers are written to user_profile/profile.md in the skills folder."
+        )
+        self.skills_profile_btn.clicked.connect(lambda: self._start_profile_interview())
+        skills_next_row.addWidget(self.skills_profile_btn)
+
+        self.skills_registry_btn = QPushButton("Browse BotSkills")
+        self.skills_registry_btn.setToolTip(
+            "Open skills.catbee.ca \u2014 the public skill registry \u2014 in your browser. "
+            "The botskills skill documents how Pengy searches and installs from it."
+        )
+        self.skills_registry_btn.clicked.connect(lambda: self._open_skill_registry())
+        skills_next_row.addWidget(self.skills_registry_btn)
+        skills_next_row.addStretch()
+        extras_layout.addLayout(skills_next_row)
+
+        self.skills_pointer_check = QCheckBox("Add the skills pointer to my system message")
+        self.skills_pointer_check.setChecked(True)
+        self.skills_pointer_check.setToolTip(
+            "When checked, installing also appends the pointer sentence shown below "
+            "to the system message on the LLM tab. It is never added twice."
+        )
+        extras_layout.addWidget(self.skills_pointer_check)
+
+        self.skills_pointer_preview = QLabel(
+            skills_install.pointer(
+                self._skills_root() / skills_install.INDEX_NAME))
+        self.skills_pointer_preview.setWordWrap(True)
+        self.skills_pointer_preview.setTextFormat(Qt.TextFormat.PlainText)
+        self.skills_pointer_preview.setStyleSheet(
+            f"color: {self._theme['muted']}; font-style: italic;")
+        extras_layout.addWidget(self.skills_pointer_preview)
+
+        extras_layout.addStretch()
+        self._refresh_skills_state()
+
+        tabs.addTab(extras_tab, "Extras")
+
         # ── About tab ─────────────────────────────────────────────
         about_tab = QWidget()
         about_layout = QVBoxLayout(about_tab)
@@ -409,6 +544,160 @@ class SettingsDialog(QDialog):
         self.fetch_models_btn.setText("Fetch")
         QMessageBox.warning(self, "Fetch Failed", error)
 
+    # ── Extras tab: starter skills ────────────────────────────
+    def _skills_root(self) -> Path:
+        """The folder named in the path field (never the config default behind it)."""
+        return skills_install.skills_root(
+            {skills_install.SKILLS_DIR_KEY: self.skills_path_input.text().strip()})
+
+    def _skills_config(self) -> dict:
+        return {skills_install.SKILLS_DIR_KEY: self.skills_path_input.text().strip()}
+
+    def _set_lit(self, button: QPushButton, lit: bool) -> None:
+        """Accent-fill a button (the “this is the thing to press” state)."""
+        icon_name = button.property("pengyIcon")
+        if not lit:
+            button.setStyleSheet("")
+            if icon_name:
+                apply_button_icon(button, icon_name, self._theme, size=15)
+            return
+        theme = self._theme
+        button.setStyleSheet(
+            f"QPushButton {{ background-color: {theme['primary']};"
+            f" color: {theme['primary_fg']};"
+            f" border: 1px solid {theme['primary']}; font-weight: 600; }}"
+            f"QPushButton:hover {{ background-color: {theme['primary_hover']};"
+            f" border-color: {theme['primary_hover']}; }}"
+            f"QPushButton:pressed {{ background-color: {theme['primary_hover']}; }}"
+            f"QPushButton:disabled {{ background-color: {theme['panel']};"
+            f" color: {theme['muted']}; border: 1px solid {theme['border_soft']};"
+            " font-weight: normal; }"
+        )
+        if icon_name:
+            # A dark icon on an accent fill disappears; invert it while lit.
+            apply_button_icon(button, icon_name, theme, size=15,
+                              color_role="primary_fg")
+
+    def _refresh_skills_state(self, note: str = "") -> None:
+        """Re-inspect the folder and decide which button should light up."""
+        status = skills_install.scan(self._skills_config())
+        shown = skills_install.display_path(status.path)
+        self.skills_pointer_preview.setText(skills_install.pointer(status.index_path))
+        message_has_pointer = skills_install.references_skills(
+            self.system_message_input.toPlainText())
+
+        if status.installed:
+            self.skills_status_label.setText(f"✓ {status.summary()}")
+        elif status.exists:
+            self.skills_status_label.setText(
+                f"⚠ {shown} exists but has no {skills_install.INDEX_NAME} — "
+                "Pengy has nothing to read")
+        else:
+            self.skills_status_label.setText(f"⚠ No skills folder at {shown}")
+
+        self.install_skills_btn.setEnabled(not status.installed)
+        self.install_skills_btn.setText(
+            "Skills Installed" if status.installed else "Install Skills")
+        self._set_lit(self.install_skills_btn, not status.installed)
+
+        needs_pointer = status.installed and not message_has_pointer
+        self.skills_pointer_btn.setVisible(status.installed)
+        self.skills_pointer_btn.setEnabled(needs_pointer)
+        self._set_lit(self.skills_pointer_btn, needs_pointer)
+        self.skills_open_btn.setEnabled(status.exists)
+        needs_profile = skills_install.profile_needs_interview(status)
+        self.skills_profile_btn.setEnabled("user_profile" in status.skills)
+        # The tab always points at exactly one thing to press: install first,
+        # then the interview, and nothing once both are done.
+        self._set_lit(self.skills_profile_btn, needs_profile)
+        self.skills_registry_btn.setEnabled(True)
+
+        lines: list[str] = []
+        if status.skills:
+            lines.append("Skills found: " + ", ".join(status.skills))
+        elif status.installed:
+            lines.append("The index is there, but no skill folders were found.")
+        if needs_profile:
+            lines.append("Your profile is still a blank template — "
+                         "press Fill In My Profile to answer a few questions.")
+        if status.installed and message_has_pointer and not note:
+            lines.append("Your system message already points at the skill index.")
+        if note:
+            lines.append(note)
+        self.skills_detail_label.setText("\n".join(lines))
+
+    def _browse_skills_folder(self) -> None:
+        start = self._skills_root()
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose a skills folder",
+            str(start if start.is_dir() else Path.home()))
+        if chosen:
+            self.skills_path_input.setText(chosen)
+            self._refresh_skills_state()
+
+    def _apply_pointer(self) -> bool:
+        """Add the pointer sentence to the system message. True if it changed."""
+        status = skills_install.scan(self._skills_config())
+        if not status.installed:
+            return False
+        current = self.system_message_input.toPlainText()
+        updated = skills_install.with_reference(current, status.index_path)
+        if updated == current:
+            return False
+        self.system_message_input.setPlainText(updated)
+        return True
+
+    def _install_skills(self) -> None:
+        config = self._skills_config()
+        try:
+            report = skills_install.install(config)
+        except (RuntimeError, OSError) as exc:
+            QMessageBox.warning(
+                self, "Install Failed",
+                f"Could not install the starter skills.\n\n{exc}")
+            return
+        status = skills_install.scan(config)
+        note = (f"Installed {len(report.created)} file(s) into "
+                f"{skills_install.display_path(status.path)}.")
+        if report.skipped:
+            note += f" Left {len(report.skipped)} existing file(s) untouched."
+        if self.skills_pointer_check.isChecked():
+            if self._apply_pointer():
+                note += " System message updated — press OK to save it."
+            elif status.installed:
+                note += " System message already points at the index."
+        self._refresh_skills_state(note)
+
+    def _add_skills_pointer(self) -> bool:
+        changed = self._apply_pointer()
+        self._refresh_skills_state(
+            "System message updated — press OK to save it." if changed
+            else "The system message already points at the skill index.")
+        return changed
+
+    def _open_skills_folder(self) -> None:
+        root = self._skills_root()
+        if root.is_dir():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(root)))
+
+    def _open_skill_registry(self) -> None:
+        QDesktopServices.openUrl(QUrl(SKILL_REGISTRY_URL))
+
+    def _start_profile_interview(self) -> None:
+        """Ask for one prompt, then close Settings so the chat is usable.
+
+        The prompt names the skill file rather than describing the task, which
+        is the whole point of the system: the markdown is the contract.
+        """
+        root = skills_install.display_path(self._skills_root())
+        prompt = (
+            f"Read {root}/user_profile/user_profile_skill.md and interview me to "
+            f"fill in {root}/user_profile/profile.md. Ask one question at a time, "
+            "write the file as we go, and don't invent any answers."
+        )
+        self.prompt_requested.emit(prompt)
+        self.accept()
+
     def get_config(self) -> dict:
         """Return updated configuration."""
         self._stash_compaction()
@@ -431,4 +720,11 @@ class SettingsDialog(QDialog):
         self.config["tool_output_max_chars"] = self.tool_output_max_spinbox.value()
         self.config["download_max_mb"] = self.download_max_spinbox.value()
         self.config["user_agent"] = self.user_agent_input.text() or "PengyAgent/1.0"
+        raw_skills_dir = self.skills_path_input.text().strip()
+        # Keep the config clean: an explicit ~/skills is the default, so store ""
+        # rather than pinning a value every future default change has to outvote.
+        if raw_skills_dir in ("", skills_install.DEFAULT_SKILLS_DIR,
+                              str(Path(skills_install.DEFAULT_SKILLS_DIR).expanduser())):
+            raw_skills_dir = ""
+        self.config[skills_install.SKILLS_DIR_KEY] = raw_skills_dir
         return self.config

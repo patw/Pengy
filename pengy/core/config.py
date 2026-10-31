@@ -87,6 +87,11 @@ DEFAULTS = {
     "image_max_mb": 4.5,            # MB — Anthropic limit is 5
     "image_quality": 85,             # JPEG quality 0–100
     "attachment_context_keep_turns": 4, # recent user turns whose media is sent again
+    # Skills folder. Empty means the documented default (~/skills), which is
+    # also what PengyOS images seed through /etc/skel/skills. Set it to point at
+    # a shared/synced tree instead — only one path is ever consulted, and
+    # Settings → Extras shows and edits this value.
+    "skills_dir": "",
 }
 
 

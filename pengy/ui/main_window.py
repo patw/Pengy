@@ -502,6 +502,11 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         """Open the settings dialog."""
         dialog = SettingsDialog(self.config, self)
+        # The Extras tab can ask for a prompt ("interview me"). It is queued
+        # rather than sent while the dialog is modal, and sent after the
+        # dialog's own settings have been saved.
+        pending: list[str] = []
+        dialog.prompt_requested.connect(pending.append)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.get_config()
             save_config(self.config)
@@ -514,6 +519,10 @@ class MainWindow(QMainWindow):
             session = self._tab_for_chat(self.active_chat_id) if self.active_chat_id else None
             if session:
                 self._update_quick_settings_for(session)
+            if pending:
+                if not self.active_chat_id:
+                    self.create_new_chat()
+                self.send_message(pending[-1])
 
     def open_tasks(self):
         """Open the task/template manager."""

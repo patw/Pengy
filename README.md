@@ -235,6 +235,8 @@ The 16 built-in tools cover the basics, but Pengy is designed to be extended wit
 
 A local skill normally has a `skillname/skillname_skill.md` instruction file, optionally backed by a bash or Python helper. Put installed skills under `~/skills/` and list them in `skill_index.md`; Pengy's system instructions tell it to consult that index and read the selected skill before acting. For reusable packages, [BotSkills](https://skills.catbee.ca) lets you inspect a skill, download its ZIP, and review its manifest and helper scripts before installing it.
 
+**New to skills?** In the desktop app, **Settings → Extras → Install Skills** copies the starter skills into `~/skills` and adds the one-line pointer to your system message — the same tab shows which folder is in use and can point Pengy at a synced tree instead.
+
 This means your Pengy can do whatever you need it to:
 - Fetch weather from an API
 - Control devices on your home network

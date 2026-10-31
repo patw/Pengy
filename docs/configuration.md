@@ -24,6 +24,7 @@ Pengy stores its settings in `~/.config/pengy/settings.json`. This file is share
 | `ui_scale` | int | `100` | GUI only. UI scale percentage (75, 100, 125, 150, 175, 200). Restart required for full native-widget scaling. |
 | `theme_mode` | string | `system` | GUI only. `system` (follow OS), `light`, or `dark`. |
 | `theme_accent` | string | `default` | GUI only. `default`, `blue`, `teal`, `green`, `orange`, `red`, `pink`, or `purple`. |
+| `skills_dir` | string | `""` (means `~/skills`) | Where skills live. Empty keeps the default. Set it to a synced or shared tree (e.g. `~/Personal/skills`) and Settings → Extras shows and edits that path instead. If unset, the folder named by `system_message` wins when it exists. |
 
 ## Web-only settings
 

@@ -140,6 +140,20 @@ class TestReadlineSetup:
         _setup_readline()
         assert readline.get_completer() is _complete_slash
 
+    def test_unreadable_history_file_does_not_stop_startup(self, monkeypatch):
+        """EINVAL from a foreign-format history file must not kill the CLI.
+
+        A Python 3.11 readline refuses the headerless file a 3.14 readline
+        writes; before this guard, `_setup_readline()` raised OSError at
+        startup and no prompt was ever shown.
+        """
+        def explode(path):
+            raise OSError(22, "Invalid argument")
+
+        monkeypatch.setattr(readline, "read_history_file", explode)
+        assert _setup_readline() is not None   # returns the history path
+        assert readline.get_completer() is _complete_slash
+
 
 # ────────────────────────────────────────────────────────────────────
 # Registry / dispatcher sync

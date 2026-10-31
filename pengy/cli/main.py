@@ -126,10 +126,18 @@ def _setup_readline() -> Path | None:
 
     try:
         readline.read_history_file(str(hist_file))
-    except (FileNotFoundError, PermissionError, FileExistsError):
-        # macOS libedit can report EEXIST while loading a concurrently
-        # initialized history file; an empty/current in-memory history is
-        # still valid and setup must remain idempotent.
+    except OSError:
+        # An unreadable history file must never stop the CLI from starting.
+        # Three real cases: macOS libedit reports EEXIST while loading a file
+        # another process is initialising; a permission error on a shared
+        # state dir; and -- verified on beholaptop 2026-10-31 -- EINVAL when
+        # the file was written by a *different* readline. CPython 3.11 (GNU
+        # readline) writes a "_HiStOrY_V2_" header and refuses a headerless
+        # file, while 3.14 writes headerless and reads both, so switching
+        # interpreters over one ~/.local/state made `pengy-cli` die at
+        # startup with `OSError: [Errno 22]` before printing a prompt. Losing
+        # history is a nuisance; refusing to launch is not acceptable, and an
+        # empty/current in-memory history keeps setup idempotent.
         pass
     readline.set_history_length(1000)
 

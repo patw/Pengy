@@ -4,6 +4,52 @@ Skills are how you teach Pengy to do things its built-in tools don't cover. A sk
 
 *New to skills? Start with the [skills/README.md](../skills/README.md) tutorial first.*
 
+## Quick start alternative — the Settings button
+
+Desktop builds have a one-click path: **Settings → Extras → Install Skills**. The
+button only lights up when the skills folder is missing (or has no
+`skill_index.md`), and installing does two things at once:
+
+1. copies the starter skills into the skills folder (`~/skills` by default),
+   never overwriting a file that is already there;
+2. appends one line to your system message so Pengy actually reads the index:
+
+   ```
+   WARNING: Always look at ~/skills/skill_index.md before running web search,
+   bash, running code or fetch_url! Skills should be used over tools!
+   ```
+
+The starter set is five skills that **all work immediately**, with nothing to
+install first:
+
+| Skill | What it is |
+|-------|-----------|
+| `user_profile/` | Interviews the user and writes the answers into `user_profile/profile.md`. The Extras tab has a **Fill In My Profile** button that sends that prompt for you. |
+| `memory/` | `memory.jsonl` plus `memory.py` (stdlib): add, search, list, forget. Teaches the search-before-asking habit with no service, database or key. Documents the upgrade path to a shared memory bus without pretending a file copy can install one. |
+| `pengy_bio/` | Pengy's own bio — pure markdown, no script. |
+| `botskills/` | How to search, review, install and publish skills from [skills.catbee.ca](https://skills.catbee.ca) — the public registry. |
+| `sysinfo/` | Disk, memory, load, temps and failed services in the commands nobody remembers. |
+
+It is deliberately *not* the same set as the repo's [`skills/`](../skills/)
+folder: that one is the tutorial, walking through four patterns in ascending
+complexity (`pengy_bio` → `tts` → `plot` → `weather`), and three of those need
+something installed before they run. Two copies, two jobs.
+
+The same tab shows which folder is in use and lets you point it somewhere else —
+that is stored as `skills_dir` in `settings.json`. Worth doing if your skills
+live in a synced tree (Syncthing, a dotfiles repo, a shared folder): leave
+`~/skills` alone and point Pengy at the real folder instead. If `skills_dir` is
+unset, Pengy uses the folder your system message names (when it exists), then
+`~/skills`.
+
+There is also a **Browse BotSkills** button, because the starter set is a
+starting point, not a catalogue: the registry carries a few dozen ready-to-run
+skills, and `botskills/botskills_skill.md` documents the search/install/publish
+API so Pengy can do it for you.
+
+Nothing is installed system-wide, nothing is hidden, and the pointer is only
+ever added once — pressing the button again cannot stack it.
+
 > **Quick start alternative — [BotSkills](https://skills.catbee.ca):** Instead of working through this full tutorial, visit BotSkills to learn the skills model and browse reusable, complete skill packages for agents and humans. Search for a skill, inspect its metadata and instructions, download its ZIP, and review the manifest plus every helper script before installing it under `~/skills/`; then add it to `skill_index.md`. Downloading alone does not activate a skill: Pengy's system instructions must tell it to consult the index, read the selected `_skill.md`, and follow its documented helper or workflow when appropriate.
 
 ---
