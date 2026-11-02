@@ -31,7 +31,7 @@ All three share the same core, tools, chat history, and config. Use whichever fi
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv tool install pengy
 
-# Or with pip (Python 3.10+)
+# Or with pip (Python 3.11+)
 pip install pengy
 ```
 

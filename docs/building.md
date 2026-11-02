@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
 ## Install from source
@@ -53,6 +53,6 @@ python -m build
 ## Platform notes
 
 - **Linux:** the default install has no Qt at all, so it works on a headless box out of the box. The desktop GUI needs the `gui` extra (PySide6-Essentials) and a display.
-- **macOS:** If your default `/usr/bin/python3` is older than 3.10, use `uv` — it installs a compatible Python automatically. PySide6-Essentials ships a `universal2` wheel.
+- **macOS:** If your default `/usr/bin/python3` is older than 3.11, use `uv` — it installs a compatible Python automatically. PySide6-Essentials ships a `universal2` wheel.
 - **Windows:** PySide6-Essentials wheels are available for `win_amd64` and `win_arm64`. The CLI and web UI work natively.
 - **Containers / musl:** there are no PySide6 wheels for musl-based images (Alpine), which is one reason Qt is not in the default install — `pip install pengy` stays installable there.

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Six advisories closed in the dependency lock, and the CI supply chain pinned to
+audited bytes.
+
+- **Pillow 12.3.0 → 13.0.0, plus anyio, certifi, brotlicffi, h2 and werkzeug.** Pillow carried 59 advisories, several CRITICAL, in the decoders Pengy runs over user-supplied files (`attachments.py` and `image_utils.py` call `Image.open` on whatever the user attaches) — heap overflows in JPEG and FlashPix decode and an argument injection into the Ghostscript call. anyio 4.16.0 closes a CRITICAL TLS hostname spoofing issue (IDNA 2003), h2 4.4.1 a request-smuggling bug, werkzeug 3.1.9 a `safe_join` device-name bypass, and brotlicffi 1.2.1.0 the "Node2Shell" decoder out-of-bounds write — the same CVE family this repo fixed on the Rust side in v1.13.1 while the Python twin stayed behind. certifi moves to 2026.10.23, whose emSign intermediates are compromised; that one was already inert here because HTTPS verifies through `truststore`, not certifi.
+- **Python 3.10 support dropped (`requires-python = ">=3.11"`).** Pillow 13 requires 3.11, so a 3.10 install would have kept resolving the vulnerable 12.x — the lock split into two Pillow entries, which is how this was caught. 3.10 reached end-of-life on 2026-10-31.
+- **CI now runs pinned bytes.** Every `uses:` is pinned to a commit SHA, and the AppImage tooling comes from dated linuxdeploy releases with a `sha256sum -c` check instead of the rolling `continuous` tag. The `dtolnay/rust-toolchain` step also gains `with: toolchain: stable`, without which pinning the ref silently selects no toolchain.
+
+Verified: OSV reports no known advisories for the new lock; the image paths (EXIF rotation, alpha flattening, byte-cap downscale, corrupt input) were exercised directly under Pillow 13; full suite green.
+
 ## v1.14.1 — 2026-11-02
 
 - **The new-user `pengy_bio` skill no longer ships someone else's fleet, a stale tool list, or a wrong `--no-save` rule.** It listed seven hostnames and their LAN addresses: a new user has none of those machines, and the published wheel carried the operator's network around with it. The tool section claimed 11 tools and left out ones the agent actually has, so it now tells the agent that the live tool schema is authoritative and that a tool missing from it does not exist. Single-shot mode was documented twice as not saving history while `pengy/cli/main.py` saves by default, and the cron example omitted `--no-save` — a cron job written from that page would have filled the user's chat sidebar. The chats path is `~/.config/pengy/chats/<id>.json`, not a `chats.json` array, and the dangling `../scheduler/` link pointed at a skill the bundle does not contain.
