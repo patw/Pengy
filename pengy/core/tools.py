@@ -563,7 +563,7 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run a bash command and return its output. Non-interactive: stdin is closed. For root, write sudo in the command and set elevated=true. To run on another machine set host (don't call ssh yourself). Killed after the tool timeout.",
+            "description": "Run a bash command and return its output. Non-interactive: stdin is closed, so prompts fail instead of waiting -- pass non-interactive flags. Without host it runs here; with host (an ssh destination, key login already working) it runs on that machine and cwd/paths are that machine's. Do not wrap the command in ssh yourself. For root, include an explicit sudo in the command AND set elevated=true: elevated alone is rejected, not silently ignored, and Pengy then asks the user for that host's sudo password. Killed after the tool timeout.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -573,15 +573,15 @@ _BASE_TOOLS = [
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Working directory",
+                        "description": "Working directory (on the target when host is set)",
                     },
                     "host": {
                         "type": "string",
-                        "description": "ssh destination (key login must already work)",
+                        "description": "ssh destination to run on instead of locally (key login must already work)",
                     },
                     "elevated": {
                         "type": "boolean",
-                        "description": "true when the command uses sudo",
+                        "description": "true iff the command contains sudo; Pengy prompts for the target's sudo password",
                     },
                 },
                 "required": ["command"],
