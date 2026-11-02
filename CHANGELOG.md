@@ -10,6 +10,7 @@ audited bytes.
 - **CI now runs pinned bytes.** Every `uses:` is pinned to a commit SHA, and the AppImage tooling comes from dated linuxdeploy releases with a `sha256sum -c` check instead of the rolling `continuous` tag. The `dtolnay/rust-toolchain` step also gains `with: toolchain: stable`, without which pinning the ref silently selects no toolchain.
 
 Verified: OSV reports no known advisories for the new lock; the image paths (EXIF rotation, alpha flattening, byte-cap downscale, corrupt input) were exercised directly under Pillow 13; full suite green.
+- **Qt tests no longer segfault at shutdown on PySide6 6.12.** Roughly every second CI run went red with exit 139 after `test_extras_tab.py` had already reported 14 passed: `SIGSEGV` at interpreter exit with no Python frame, because the `QApplication` outlived the widgets the tests built and shiboken freed them afterwards. 6.11 tolerated it, 6.12.0 does not — reproduced deterministically on Python 3.12 + PySide6 6.12.0 (10/10 clean after the fix, ~8/10 crashing before) and absent on 3.14 + 6.11.1. `conftest.py` now tears the widget tree down in `pytest_sessionfinish`, while the application is still alive.
 
 ## v1.14.1 — 2026-11-02
 

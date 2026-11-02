@@ -100,8 +100,32 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 
 # ── 3.  Teardown ───────────────────────────────────────────────────────────────
 
+def _teardown_qt() -> None:
+    """Destroy the Qt widget tree before the interpreter exits.
+
+    PySide6 6.12 aborts at shutdown (SIGSEGV/SIGABRT, no Python frame) when the
+    QApplication outlives the widgets a test created: shiboken then frees
+    children after the application is gone. Invisible on 6.11, and it turned
+    roughly every second CI run red, so tear the tree down while the app lives.
+    """
+    try:
+        from PySide6.QtWidgets import QApplication
+    except Exception:            # no GUI extras installed: nothing to tear down
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in app.topLevelWidgets():
+        widget.deleteLater()
+    app.processEvents()
+    app.quit()
+    app.deleteLater()
+    app.processEvents()
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Clean up the session temp dir and clear the env overrides."""
+    _teardown_qt()
     os.environ.pop("PENGY_CONFIG_DIR", None)
     os.environ.pop("XDG_DATA_HOME", None)
     from pengy.core.config import set_config_dir
