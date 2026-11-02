@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+The starter `memory` skill searched the way grep does, which meant half of all
+realistic questions came back empty. It now ranks, and it no longer loses notes
+when two writes land at once.
+
+- **`memory.py search` is BM25 over the note text, subject and tags, with light stemming — not a substring AND.** Any query word can match, more matching words rank higher, an exact phrase lifts a note further, and plurals/tenses meet each other (`test`/`tests`, `deploy`/`deployed`). Identifiers stay searchable whole and in parts, so `client_max_body_size` is found by `max body size`, and a subject or tag outweighs an incidental mention in prose. Measured on a 73-note store with 24 hand-annotated queries: Recall@5 **.486 → .965**, MRR **.500 → .958**, NDCG@5 **.490 → .948**, queries returning nothing **12/24 → 0/24**. The whole gap was phrasing: literal keyword queries scored .972 before and after, while the 12 paraphrase queries scored **.000 before** and .958 after. A natural-language query could never match, because asking how the tests run requires the store to contain the words *how* and *the*. Exit codes stay usable in a shell chain (`search && act`): 0 when anything matched, 1 when nothing did, 2 for a malformed query.
+- **Notes can be corrected without being rewritten.** `add --supersedes ID` marks the older note retired; retired notes stop appearing in `search`/`list` (still available under `--all`, labelled `(superseded by #N)`, counted by `stats`) so a stale note cannot keep getting believed. An identical note is no longer stored twice — `add` reports which id already holds it, and `--force` overrides.
+- **Concurrent writers no longer collide, and `forget` no longer takes out a neighbour.** Every write was read-whole-file → compute `max(id)+1` → append with no lock, so two notes written at the same instant got the same id, and `forget --id N` deleted *every* note carrying it. 40 parallel adds produced 36 unique ids; two notes sharing id 7 were both deleted by one `forget`. Writes now take an exclusive `fcntl` lock (best effort where it is unavailable), notes are appended and fsynced individually, and `forget` deletes exactly the record you were shown, writes `memory.jsonl.bak` first, and preserves any hand-broken line verbatim instead of dropping it. Re-measured: 40/40 unique ids, and 60 adds racing 20 forgets kept all 60 new notes with no duplicates.
+- **Search no longer re-tokenises the store twice per query** (once for scoring, once for the phrase check), which cuts a 5,000-note search to about 0.1 s.
+
 ## v1.14.0 — 2026-10-31
 
 Settings grew a fourth tab, and a new user can now go from "no skills at all"

@@ -25,7 +25,7 @@ install first:
 | Skill | What it is |
 |-------|-----------|
 | `user_profile/` | Interviews the user and writes the answers into `user_profile/profile.md`. The Extras tab has a **Fill In My Profile** button that sends that prompt for you. |
-| `memory/` | `memory.jsonl` plus `memory.py` (stdlib): add, search, list, forget. Teaches the search-before-asking habit with no service, database or key. Documents the upgrade path to a shared memory bus without pretending a file copy can install one. |
+| `memory/` | `memory.jsonl` plus `memory.py` (stdlib): add, ranked search, list, forget. Search is BM25 over text/subject/tags with light stemming, so a question in the user's own words still finds the note; notes can supersede older ones and identical notes are not stored twice. Teaches the search-before-asking habit with no service, database or key. Documents the upgrade path to a shared memory bus without pretending a file copy can install one. |
 | `pengy_bio/` | Pengy's own bio — pure markdown, no script. |
 | `botskills/` | How to search, review, install and publish skills from [skills.catbee.ca](https://skills.catbee.ca) — the public registry. |
 | `sysinfo/` | Disk, memory, load, temps and failed services in the commands nobody remembers. |

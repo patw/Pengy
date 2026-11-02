@@ -271,9 +271,14 @@ def test_memory_skill_add_search_forget(tmp_path):
     assert found.returncode == 0
     assert "QT_QPA_PLATFORM" in found.stdout
 
-    # every term must match; a miss exits non-zero so `search && act` is safe
-    assert _memory("search", "--q", "offscreen nomatch",
+    # a miss exits non-zero so `search && act` is safe; a query where only
+    # *some* words match is a hit now — the ranked search exists so a question
+    # phrased in the user's own words still finds the note (see
+    # tests/test_memory_skill.py)
+    assert _memory("search", "--q", "zeppelin airship",
                    env_store=store).returncode == 1
+    assert _memory("search", "--q", "offscreen nomatch",
+                   env_store=store).returncode == 0
 
     # --json works in BOTH positions (the house CLI convention)
     before = _memory("--json", "list", env_store=store)
