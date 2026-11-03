@@ -44,12 +44,6 @@ INDEX_NAME = "skill_index.md"
 README_NAME = "README.md"
 SKILL_SUFFIX = "_skill.md"
 
-#: The one starter skill that is not finished by installing it — it needs an
-#: interview, so the UI can point at it as the natural next step.
-PROFILE_SKILL = "user_profile"
-PROFILE_FILE = "profile.md"
-PROFILE_TODO = "<!-- TODO -->"
-
 #: The sentence the shipped starter skills need in the system message.  It is
 #: deliberately phrased as a warning: an agent that skips the index re-solves
 #: problems a skill already documents.
@@ -179,22 +173,6 @@ def scan(config: dict | None = None) -> SkillsStatus:
                 names.append(child.name)
     return SkillsStatus(path=root, exists=exists, has_index=has_index,
                         skills=tuple(names))
-
-
-def profile_needs_interview(status: SkillsStatus) -> bool:
-    """True when the profile skill is installed but never filled in.
-
-    Marker-based on purpose: the file belongs to the user, so the only reliable
-    signal that nobody has answered anything is the template still being
-    untouched. A hand-edited profile that keeps the marker is theirs to keep.
-    """
-    if PROFILE_SKILL not in status.skills:
-        return False
-    try:
-        text = (status.path / PROFILE_SKILL / PROFILE_FILE).read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return PROFILE_TODO in text
 
 
 # ── installation ─────────────────────────────────────────────────────────────

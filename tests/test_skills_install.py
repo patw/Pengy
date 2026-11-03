@@ -168,26 +168,6 @@ def test_install_overwrite_refreshes_changed_files_only(tmp_path):
     assert not report.created
 
 
-def test_profile_skill_starts_as_an_unanswered_template(tmp_path):
-    target = tmp_path / "skills"
-    si.install({si.SKILLS_DIR_KEY: str(target)})
-    status = si.scan({si.SKILLS_DIR_KEY: str(target)})
-    assert si.profile_needs_interview(status)
-
-    # Once it is filled in, the tab stops advertising the interview.
-    profile = target / si.PROFILE_SKILL / si.PROFILE_FILE
-    profile.write_text(profile.read_text(encoding="utf-8").replace(
-        si.PROFILE_TODO, "Prefers terse answers."), encoding="utf-8")
-    assert not si.profile_needs_interview(
-        si.scan({si.SKILLS_DIR_KEY: str(target)}))
-
-
-def test_profile_needs_interview_is_false_without_the_skill(tmp_path):
-    (tmp_path / si.INDEX_NAME).write_text("# Skills Index\n", encoding="utf-8")
-    assert not si.profile_needs_interview(
-        si.scan({si.SKILLS_DIR_KEY: str(tmp_path)}))
-
-
 def test_install_rerun_is_a_no_op(tmp_path):
     target = tmp_path / "skills"
     si.install({si.SKILLS_DIR_KEY: str(target)})
@@ -311,3 +291,10 @@ def test_install_restores_the_execute_bit_on_scripts(tmp_path):
     si.install({si.SKILLS_DIR_KEY: str(target)}, source=source)
 
     assert (target / "demo" / "demo.py").stat().st_mode & 0o111
+
+
+def test_profile_skill_remains_an_unanswered_template(tmp_path):
+    target = tmp_path / "skills"
+    si.install({si.SKILLS_DIR_KEY: str(target)})
+    assert "user_profile" in si.scan({si.SKILLS_DIR_KEY: str(target)}).skills
+    assert "<!-- TODO -->" in (target / "user_profile/profile.md").read_text(encoding="utf-8")

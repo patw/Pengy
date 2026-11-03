@@ -24,7 +24,7 @@ install first:
 
 | Skill | What it is |
 |-------|-----------|
-| `user_profile/` | Interviews the user and writes the answers into `user_profile/profile.md`. The Extras tab has a **Fill In My Profile** button that sends that prompt for you. |
+| `user_profile/` | Interviews the user and writes the answers into `user_profile/profile.md`. Ask Pengy in normal chat when you want an interview; Settings never starts one. |
 | `memory/` | `memory.jsonl` plus `memory.py` (stdlib): add, ranked search, list, forget. Search is BM25 over text/subject/tags with light stemming, so a question in the user's own words still finds the note; notes can supersede older ones and identical notes are not stored twice. Teaches the search-before-asking habit with no service, database or key. Documents the upgrade path to a shared memory bus without pretending a file copy can install one. |
 | `pengy_bio/` | Pengy's own bio — pure markdown, no script. |
 | `botskills/` | How to search, review, install and publish skills from [skills.catbee.ca](https://skills.catbee.ca) — the public registry. |
@@ -49,6 +49,12 @@ API so Pengy can do it for you.
 
 Nothing is installed system-wide, nothing is hidden, and the pointer is only
 ever added once — pressing the button again cannot stack it.
+
+**Open Folder** opens the selected skills directory in your OS file manager
+(Explorer on Windows, Finder on macOS, or the configured Linux file manager).
+Extras is setup-only: installing copies local bundled files and updates the
+system-message editor; press **OK** to save settings. No Extras action calls
+the LLM or starts a conversation.
 
 > **Quick start alternative — [BotSkills](https://skills.catbee.ca):** Instead of working through this full tutorial, visit BotSkills to learn the skills model and browse reusable, complete skill packages for agents and humans. Search for a skill, inspect its metadata and instructions, download its ZIP, and review the manifest plus every helper script before installing it under `~/skills/`; then add it to `skill_index.md`. Downloading alone does not activate a skill: Pengy's system instructions must tell it to consult the index, read the selected `_skill.md`, and follow its documented helper or workflow when appropriate.
 

@@ -41,8 +41,6 @@ class SettingsDialog(QDialog):
 
     _models_fetched = Signal(list)
     _models_fetch_failed = Signal(str)
-    #: Asks the main window to send a prompt (e.g. start the profile interview).
-    prompt_requested = Signal(str)
 
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
@@ -285,6 +283,7 @@ class SettingsDialog(QDialog):
         # so this tab does both jobs in one place: seed ~/skills, then add the
         # pointer sentence to the message. Nothing here writes outside the
         # user's home, and nothing happens until a button is pressed.
+        # These are setup/file-manager actions only; none starts a chat.
         extras_tab = QWidget()
         extras_layout = QVBoxLayout(extras_tab)
         extras_layout.setSpacing(6)
@@ -363,25 +362,14 @@ class SettingsDialog(QDialog):
         skills_button_row.addStretch()
         extras_layout.addLayout(skills_button_row)
 
-        # Row 2: what to do *next* with the folder that now exists.
-        skills_next_row = QHBoxLayout()
-        self.skills_profile_btn = QPushButton("Fill In My Profile")
-        self.skills_profile_btn.setToolTip(
-            "Sends one prompt: read the user_profile skill and interview me. "
-            "Answers are written to user_profile/profile.md in the skills folder."
-        )
-        self.skills_profile_btn.clicked.connect(lambda: self._start_profile_interview())
-        skills_next_row.addWidget(self.skills_profile_btn)
-
         self.skills_registry_btn = QPushButton("Browse BotSkills")
         self.skills_registry_btn.setToolTip(
             "Open skills.catbee.ca \u2014 the public skill registry \u2014 in your browser. "
             "The botskills skill documents how Pengy searches and installs from it."
         )
         self.skills_registry_btn.clicked.connect(lambda: self._open_skill_registry())
-        skills_next_row.addWidget(self.skills_registry_btn)
-        skills_next_row.addStretch()
-        extras_layout.addLayout(skills_next_row)
+        skills_button_row.insertWidget(
+            skills_button_row.count() - 1, self.skills_registry_btn)
 
         self.skills_pointer_check = QCheckBox("Add the skills pointer to my system message")
         self.skills_pointer_check.setChecked(True)
@@ -605,11 +593,6 @@ class SettingsDialog(QDialog):
         self.skills_pointer_btn.setEnabled(needs_pointer)
         self._set_lit(self.skills_pointer_btn, needs_pointer)
         self.skills_open_btn.setEnabled(status.exists)
-        needs_profile = skills_install.profile_needs_interview(status)
-        self.skills_profile_btn.setEnabled("user_profile" in status.skills)
-        # The tab always points at exactly one thing to press: install first,
-        # then the interview, and nothing once both are done.
-        self._set_lit(self.skills_profile_btn, needs_profile)
         self.skills_registry_btn.setEnabled(True)
 
         lines: list[str] = []
@@ -617,9 +600,6 @@ class SettingsDialog(QDialog):
             lines.append("Skills found: " + ", ".join(status.skills))
         elif status.installed:
             lines.append("The index is there, but no skill folders were found.")
-        if needs_profile:
-            lines.append("Your profile is still a blank template — "
-                         "press Fill In My Profile to answer a few questions.")
         if status.installed and message_has_pointer and not note:
             lines.append("Your system message already points at the skill index.")
         if note:
@@ -682,21 +662,6 @@ class SettingsDialog(QDialog):
 
     def _open_skill_registry(self) -> None:
         QDesktopServices.openUrl(QUrl(SKILL_REGISTRY_URL))
-
-    def _start_profile_interview(self) -> None:
-        """Ask for one prompt, then close Settings so the chat is usable.
-
-        The prompt names the skill file rather than describing the task, which
-        is the whole point of the system: the markdown is the contract.
-        """
-        root = skills_install.display_path(self._skills_root())
-        prompt = (
-            f"Read {root}/user_profile/user_profile_skill.md and interview me to "
-            f"fill in {root}/user_profile/profile.md. Ask one question at a time, "
-            "write the file as we go, and don't invent any answers."
-        )
-        self.prompt_requested.emit(prompt)
-        self.accept()
 
     def get_config(self) -> dict:
         """Return updated configuration."""

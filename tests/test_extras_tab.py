@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="PySide6 not installed")
 
-from PySide6.QtWidgets import QApplication, QTabWidget
+from PySide6.QtWidgets import QApplication, QTabWidget, QPushButton, QDialogButtonBox
 
 from pengy.core import skills_install as si
 from pengy.core.config import DEFAULTS
@@ -143,61 +143,6 @@ def test_install_leaves_an_edited_file_alone(make_dialog):
     assert "untouched" in dialog.skills_detail_label.text()
 
 
-# ── the follow-on actions ────────────────────────────────────────────────────
-
-def test_profile_interview_button_is_off_until_the_skill_is_installed(make_dialog):
-    dialog, _ = make_dialog()
-    assert not dialog.skills_profile_btn.isEnabled()
-    assert not _is_lit(dialog, dialog.skills_profile_btn)
-
-
-def test_the_interview_is_the_last_thing_lit_up(make_dialog):
-    """One action at a time: install → interview → nothing to press."""
-    dialog, target = make_dialog()
-
-    dialog._install_skills()
-    # installed, profile still a blank template → the interview is the next step
-    assert dialog.skills_profile_btn.isEnabled()
-    assert _is_lit(dialog, dialog.skills_profile_btn)
-    assert not _is_lit(dialog, dialog.install_skills_btn)
-    assert "blank template" in dialog.skills_detail_label.text()
-
-    profile = target / si.PROFILE_SKILL / si.PROFILE_FILE
-    profile.write_text(profile.read_text(encoding="utf-8").replace(
-        si.PROFILE_TODO, "Answers given."), encoding="utf-8")
-    dialog._refresh_skills_state()
-
-    assert dialog.skills_profile_btn.isEnabled()   # still re-runnable
-    assert not _is_lit(dialog, dialog.skills_profile_btn)
-    assert "blank template" not in dialog.skills_detail_label.text()
-
-
-def test_profile_button_queues_one_prompt_and_closes(qapp, tmp_path):
-    """The button sends a prompt naming the skill file, then accepts the dialog."""
-    import pengy.ui.settings_dialog as settings_dialog
-
-    target = tmp_path / "skills"
-    si.install({si.SKILLS_DIR_KEY: str(target)})
-    config = dict(DEFAULTS)
-    config[si.SKILLS_DIR_KEY] = str(target)
-    dialog = SettingsDialog(config)
-
-    prompts: list[str] = []
-    dialog.prompt_requested.connect(prompts.append)
-
-    assert dialog.skills_profile_btn.isEnabled()
-    dialog.skills_profile_btn.click()
-
-    assert len(prompts) == 1
-    prompt = prompts[0]
-    assert "user_profile/user_profile_skill.md" in prompt
-    assert "user_profile/profile.md" in prompt
-    assert "one question at a time" in prompt
-    # the dialog closes accepted, so the settings are saved and the chat is free
-    assert dialog.result() == dialog.DialogCode.Accepted
-    assert settings_dialog.SKILL_REGISTRY_URL == "https://skills.catbee.ca"
-
-
 # ── the pointer-only path (skills already there, message doesn't say so) ─────
 
 def test_existing_skills_without_a_pointer_offer_the_pointer_button(make_dialog):
@@ -236,37 +181,78 @@ def test_get_config_keeps_the_default_folder_unset(qapp, tmp_path):
     assert dialog.get_config()[si.SKILLS_DIR_KEY] == ""
 
 
-# ── main-window wiring: the prompt is sent, but never while the dialog is up ──
+# ── setup-only: no Settings-to-chat path ──────────────────────────────────────
+@pytest.mark.parametrize("exists", [False, True])
+def test_extras_has_only_setup_and_os_navigation_actions(make_dialog, exists):
+    dialog, _ = make_dialog(exists=exists)
+    extras = dialog.findChild(QTabWidget).widget(3)
+    labels = {b.text() for b in extras.findChildren(QPushButton)}
+    assert labels == {"Browse…", "Skills Installed" if exists else "Install Skills",
+                      "Add to System Message", "Open Folder", "Browse BotSkills"}
+    assert not hasattr(dialog, "prompt_requested")
+    assert not hasattr(dialog, "_start_profile_interview")
+    assert "interview" not in dialog.skills_detail_label.text().lower()
 
-def test_profile_prompt_reaches_the_chat_after_settings_close(qapp, tmp_path, monkeypatch):
-    import tempfile
 
-    from pengy.core.config import set_config_dir
+def test_install_leaves_settings_open_and_profile_template_untouched(make_dialog):
+    dialog, target = make_dialog()
+    dialog.install_skills_btn.click()
+    assert dialog.result() == dialog.DialogCode.Rejected  # never auto-accepted
+    assert (target / si.INDEX_NAME).is_file()
+    assert "<!-- TODO -->" in (target / "user_profile/profile.md").read_text()
+    assert dialog.skills_open_btn.isEnabled()
+    assert "interview" not in dialog.skills_detail_label.text().lower()
+
+
+def test_partial_folder_is_repaired_locally(make_dialog):
+    dialog, target = make_dialog(exists=True)
+    (target / si.INDEX_NAME).unlink()
+    dialog._refresh_skills_state()
+    assert dialog.install_skills_btn.isEnabled()
+    assert "no skill_index.md" in dialog.skills_status_label.text()
+    dialog.install_skills_btn.click()
+    assert (target / si.INDEX_NAME).is_file()
+    assert dialog.result() == dialog.DialogCode.Rejected
+
+
+def test_folder_and_registry_buttons_delegate_to_os(make_dialog, monkeypatch):
+    from pengy.ui import settings_dialog as mod
+    dialog, target = make_dialog(exists=True)
+    opened = []
+    monkeypatch.setattr(mod.QDesktopServices, "openUrl", lambda url: opened.append(url) or True)
+    dialog.skills_open_btn.click()
+    dialog.skills_registry_btn.click()
+    assert opened[0].isLocalFile()
+    assert opened[0].toLocalFile() == str(target)
+    assert opened[1].toString() == "https://skills.catbee.ca"
+    assert dialog.result() == dialog.DialogCode.Rejected
+
+
+def test_accepting_extras_saves_settings_without_sending_chat(qapp, tmp_path, monkeypatch):
+    from pengy.core.config import set_config_dir, load_config
     from pengy.ui.main_window import MainWindow
-    from pengy.ui import main_window as mw_mod
 
-    with tempfile.TemporaryDirectory(prefix="pengy-extras-") as cfg_dir:
-        set_config_dir(cfg_dir)
-        monkeypatch.setattr(mw_mod.LLMClient, "chat", lambda *a, **kw: (_ for _ in ()))
-        monkeypatch.setattr(mw_mod.LLMClient, "__init__", lambda self, *a, **kw: None)
-        window = MainWindow()
+    set_config_dir(str(tmp_path / "config"))
+    window = MainWindow()
+    target = tmp_path / "skills"
+    window.config[si.SKILLS_DIR_KEY] = str(target)
+    sent = []
+    monkeypatch.setattr(window, "send_message", sent.append)
+    monkeypatch.setattr(window, "update_llm_client", lambda: None)
+
+    def install_and_accept(dialog):
+        dialog.install_skills_btn.click()
+        dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok).click()
+        return dialog.result()
+
+    monkeypatch.setattr(SettingsDialog, "exec", install_and_accept)
+    try:
+        window.open_settings()
+        assert sent == []
+        saved = load_config()
+        assert saved[si.SKILLS_DIR_KEY] == str(target)
+        assert str(target / si.INDEX_NAME) in saved["system_message"]
+    finally:
+        window.close()
         qapp.processEvents()
-        try:
-            # Never let the dialog look at the real ~/skills on the test host.
-            window.config[si.SKILLS_DIR_KEY] = str(tmp_path / "skills")
-            sent: list[str] = []
-            monkeypatch.setattr(window, "send_message", sent.append)
-            monkeypatch.setattr(window, "update_llm_client", lambda *a, **kw: None)
-
-            def fake_exec(dialog_self):
-                # What the "Fill In My Profile" button does, then OK.
-                dialog_self.prompt_requested.emit("interview me please")
-                return dialog_self.DialogCode.Accepted
-
-            monkeypatch.setattr(SettingsDialog, "exec", fake_exec)
-            window.open_settings()
-            assert sent == ["interview me please"]
-        finally:
-            window.close()
-            qapp.processEvents()
-            set_config_dir(None)
+        set_config_dir(None)
