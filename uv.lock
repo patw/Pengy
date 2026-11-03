@@ -1068,7 +1068,7 @@ wheels = [
 
 [[package]]
 name = "pyside6-essentials"
-version = "6.12.0"
+version = "6.10.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "shiboken6" },
@@ -1096,7 +1096,7 @@ wheels = [
 
 [[package]]
 name = "shiboken6"
-version = "6.12.0"
+version = "6.10.3"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/45/11536fba5f50a57671eb14441c6098096f3e57074e54c9d7d66039a5831e/shiboken6-6.12.0-cp310-abi3-macosx_14_0_universal2.whl", hash = "sha256:47105e05baf57d35453e07d240bbe59cb4b8d9565377ea5134ff9fb37d4f5c02", size = 479653, upload-time = "2026-10-08T09:10:41.506Z" },

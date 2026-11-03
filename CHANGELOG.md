@@ -2,9 +2,7 @@
 
 ## Unreleased
 
-- **PySide6 pinned to the same Qt as the native editions: `>=6.12,<6.13`.** It was `>=6.6.0`, so a fresh `pip install pengy[gui]` floated to whatever Qt was newest while our lock sat on 6.11.1 and the shipped GUIs ran 6.4/6.5/6.8. One Qt version now underlies the Python edition, both native editions and every platform; the lock moves to 6.12.0.
-Six advisories closed in the dependency lock, and the CI supply chain pinned to
-audited bytes.
+- **PySide6 pinned to the same Qt as the native editions: `>=6.10,<6.11`.** It was `>=6.6.0`, so a fresh `pip install pengy[gui]` floated to whatever Qt was newest while the lock sat on 6.11.1 and the shipped GUIs ran 6.4/6.5/6.8. One Qt version now underlies the Python edition, both native editions and every platform: 6.10.3, the newest release Qt actually publishes for Windows desktop.
 
 - **Pillow 12.3.0 → 13.0.0, plus anyio, certifi, brotlicffi, h2 and werkzeug.** Pillow carried 59 advisories, several CRITICAL, in the decoders Pengy runs over user-supplied files (`attachments.py` and `image_utils.py` call `Image.open` on whatever the user attaches) — heap overflows in JPEG and FlashPix decode and an argument injection into the Ghostscript call. anyio 4.16.0 closes a CRITICAL TLS hostname spoofing issue (IDNA 2003), h2 4.4.1 a request-smuggling bug, werkzeug 3.1.9 a `safe_join` device-name bypass, and brotlicffi 1.2.1.0 the "Node2Shell" decoder out-of-bounds write — the same CVE family this repo fixed on the Rust side in v1.13.1 while the Python twin stayed behind. certifi moves to 2026.10.23, whose emSign intermediates are compromised; that one was already inert here because HTTPS verifies through `truststore`, not certifi.
 - **Python 3.10 support dropped (`requires-python = ">=3.11"`).** Pillow 13 requires 3.11, so a 3.10 install would have kept resolving the vulnerable 12.x — the lock split into two Pillow entries, which is how this was caught. 3.10 reached end-of-life on 2026-10-31.

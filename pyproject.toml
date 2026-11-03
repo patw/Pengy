@@ -60,7 +60,7 @@ dependencies = [
 # The meta-package additionally pulls PySide6-Addons (~175 MB on Linux,
 # ~332 MB on macOS, ~168 MB on Windows) that Pengy never imports.
 gui = [
-    "PySide6-Essentials>=6.12,<6.13",
+    "PySide6-Essentials>=6.10,<6.11",
 ]
 # Kept for backwards compatibility (existing docs, scripts, muscle memory).
 # These dependencies are now part of the base install, so the extras below are
@@ -74,11 +74,11 @@ web = [
     "pygments>=2.17.0",
 ]
 all = [
-    "PySide6-Essentials>=6.12,<6.13",
+    "PySide6-Essentials>=6.10,<6.11",
 ]
 # Alias for `all`, named for what it actually gets you.
 desktop = [
-    "PySide6-Essentials>=6.12,<6.13",
+    "PySide6-Essentials>=6.10,<6.11",
 ]
 
 [project.scripts]
