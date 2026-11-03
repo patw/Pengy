@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.14.2 — 2026-11-02
 
 - **`run_bash`'s schema now says what it actually does.** The description was vague enough to mislead: it states that stdin is closed so a prompt fails instead of waiting, that `host` runs the command on that machine with that machine's cwd and paths (and that wrapping the command in ssh yourself is wrong), and that `elevated` must accompany an explicit root command — `elevated` alone is rejected, not ignored. Identical wording in all three editions, so the model gets one contract rather than three.
 - **PySide6 pinned to the same Qt as the native editions: `>=6.10,<6.11`.** It was `>=6.6.0`, so a fresh `pip install pengy[gui]` floated to whatever Qt was newest while the lock sat on 6.11.1 and the shipped GUIs ran 6.4/6.5/6.8. One Qt version now underlies the Python edition, both native editions and every platform: 6.10.3, the newest release Qt actually publishes for Windows desktop.
