@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **PySide6 pinned to the same Qt as the native editions: `>=6.12,<6.13`.** It was `>=6.6.0`, so a fresh `pip install pengy[gui]` floated to whatever Qt was newest while our lock sat on 6.11.1 and the shipped GUIs ran 6.4/6.5/6.8. One Qt version now underlies the Python edition, both native editions and every platform; the lock moves to 6.12.0.
 Six advisories closed in the dependency lock, and the CI supply chain pinned to
 audited bytes.
 
