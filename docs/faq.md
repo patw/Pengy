@@ -79,6 +79,19 @@ Yes. The `daily_briefing` skill orchestrates the `weather/`, `rss/`, and `news/`
 
 ## Troubleshooting
 
+### On Windows the app was force-closed and the command stopped existing
+
+Windows Defender almost certainly quarantined it. Pengy hands the model shell,
+PowerShell and file-write access, and Defender's heuristics act on that: the process
+is terminated without a dialog and the `pengy`/`pengy-gui` launcher is quarantined.
+A plain reinstall does not help — the new copy is caught the same way within seconds.
+
+Exclude the launcher folder and the environment that holds the package **first**
+(`%USERPROFILE%\.local\bin` plus `%APPDATA%\uv\tools\pengy` for a `uv` install, or
+the venv's `Scripts` and `site-packages\pengy`), then restore the file from
+Protection history or reinstall. Confirm it was Defender and follow the whole
+procedure in [Windows Defender and antivirus](windows-antivirus.md).
+
 ### I get 403 errors from the web UI
 
 If you're behind a reverse proxy, you need `--trusted-host`. See [docs/reverse-proxy.md](reverse-proxy.md).

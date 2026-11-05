@@ -92,6 +92,15 @@ behind the GUI. Point shortcuts at **`pengy-gui`** instead — it is packaged as
 console-less launcher. `pengy` keeps its console so `pengy --version` still prints
 in a terminal.
 
+#### Windows: if Defender quarantines Pengy
+
+Pengy hands the model shell, PowerShell and file-write access, which is enough for
+Windows Defender's heuristics to force-close the process and quarantine the
+launcher: the command stops existing, any shortcut to it dies, and a reinstall is
+deleted again within seconds. Exclude the program folder **before** restoring or reinstalling —
+**[Windows Defender and antivirus](docs/windows-antivirus.md)** has the
+step-by-step for `uv`, `pip` and virtualenv installs.
+
 ### CLI (interactive or single-shot)
 
 First, make sure there is a model to talk to. The default endpoint is a local
@@ -343,6 +352,7 @@ All three offer the same 16 tools, durable image attachments, desktop theme cont
 - [Skills deep-dive](docs/skills.md) — skill patterns, `~/.secrets`, `uv` dependencies
 - [API compatibility](docs/api-compatibility.md) — provider support, model discovery, local endpoints
 - [FAQ](docs/faq.md) — common questions and troubleshooting
+- [Windows Defender and antivirus](docs/windows-antivirus.md) — false positives, quarantine, exclusions, SmartScreen
 - [Building from source](docs/building.md) — platform-specific build instructions
 - [Changelog](CHANGELOG.md) — version history
 

@@ -54,5 +54,5 @@ python -m build
 
 - **Linux:** the default install has no Qt at all, so it works on a headless box out of the box. The desktop GUI needs the `gui` extra (PySide6-Essentials) and a display.
 - **macOS:** If your default `/usr/bin/python3` is older than 3.11, use `uv` — it installs a compatible Python automatically. PySide6-Essentials ships a `universal2` wheel.
-- **Windows:** PySide6-Essentials wheels are available for `win_amd64` and `win_arm64`. The CLI and web UI work natively.
+- **Windows:** PySide6-Essentials wheels are available for `win_amd64` and `win_arm64`. The CLI and web UI work natively. Windows Defender may quarantine a `pip`/`uv` install (or your own source build) on first run — the tools it exposes look like malware behaviour to heuristics. Exclude the folder, don't just reinstall: see [Windows Defender and antivirus](windows-antivirus.md).
 - **Containers / musl:** there are no PySide6 wheels for musl-based images (Alpine), which is one reason Qt is not in the default install — `pip install pengy` stays installable there.
