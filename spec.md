@@ -2,7 +2,7 @@
 
 ## Overview
 
-Pengy is a local-first AI agent application that connects to any OpenAI-compatible LLM API and gives the model a set of tools to operate on the user's machine. It provides two interfaces backed by the same core:
+Pengy is a local-first AI agent application that connects to any OpenAI-compatible LLM API and gives the model a set of tools to operate on the user's machine. It provides three interfaces backed by the same core:
 
 | Interface | Entry Point | Description |
 |-----------|------------|-------------|
@@ -45,13 +45,13 @@ and default system message are.
 
 *Conformance: **reference** — reimplement freely.*
 
-- **Language:** Python 3.10+
+- **Language:** Python 3.11+
 - **GUI Framework:** PySide6 (LGPL)
 - **CLI Framework:** `rich` (tables, panels, markdown rendering, prompts)
 - **Web Framework:** Flask (threaded dev server; SSE streaming responses)
 - **LLM Client:** `openai` Python SDK (non-streaming)
 - **Markdown Rendering:** `markdown` + `pygments` (syntax highlighting, desktop + web); `rich.markdown` (CLI)
-- **Web UI:** Bootstrap 5.3 (responsive layout, light theme, offcanvas sidebar)
+- **Web UI:** Bootstrap 5.3 (responsive layout, light/dark via `data-bs-theme`, offcanvas sidebar)
 - **Web Search:** `ddgs` (DuckDuckGo)
 - **Storage:** JSON files in `~/.config/pengy/`
 
@@ -63,32 +63,50 @@ and default system message are.
 
 ```
 pengy/
-├── main.py                    # Desktop GUI entry point
-├── assets/
-│   └── icon.png               # Penguin app icon
+├── main.py                    # Desktop GUI entry point (--install-launcher, --version)
+├── assets/                    # icon.png, themed SVG icons, bundled starter skills
 ├── cli/
-│   ├── __init__.py            # Package marker
 │   └── main.py                # CLI entry point — PengyCLI class (interactive + single-shot)
 ├── core/
 │   ├── config.py              # Settings load/save + render_system_message()
-│   ├── chat_manager.py        # Chat session CRUD
+│   ├── chat_manager.py        # Per-chat files + index; title_source, redact, usage
+│   ├── chat_search.py         # Chat search (see "Chat Search")
+│   ├── chat_title.py          # Edit Chat / Bulk Rename title generation
 │   ├── llm_client.py          # OpenAI-compatible API client (generator protocol)
-│   └── tools.py               # Tool schemas (TOOLS), execution (execute_tool), sudo provider
+│   ├── tools.py               # Tool schemas (TOOLS), execution (execute_tool), sudo provider
+│   ├── tool_args.py           # Tool-call argument validation and coercion
+│   ├── task_manager.py        # Tasks (prompt templates)
+│   ├── attachments.py         # Durable content-addressed image attachments
+│   ├── image_utils.py         # Image preprocessing for vision APIs
+│   ├── image_capabilities.py  # Remembered image-input rejections per endpoint/model
+│   ├── context_pressure.py    # Context-size estimates calibrated by provider usage
+│   ├── context_recovery.py    # Context-overflow recovery (never rewrites the transcript)
+│   ├── context_windows.py     # Opt-in per-route context-window discovery
+│   ├── model_cache.py         # Cached model list per base URL
+│   ├── skills_install.py      # Detect, seed and announce a skills directory
+│   ├── launcher.py            # Linux menu entry for pip/uv installs
+│   ├── nudge.py               # First-run notice pointing at the desktop options
+│   └── about.py               # Edition name, links and blurb for every frontend
 ├── ui/
-│   ├── main_window.py         # 3-pane main window; wires all signals
-│   ├── chat_history.py        # Left sidebar — chat list + quick settings panel
+│   ├── main_window.py         # Tabbed main window; wires all signals
+│   ├── chat_history.py        # Left sidebar — search, chat list, quick settings
 │   ├── chat_view.py           # Right-top — markdown chat renderer (QTextBrowser)
 │   ├── chat_input.py          # Right-bottom — input field + attachment button
 │   ├── chat_worker.py         # QThread worker driving the LLM generator
-│   └── settings_dialog.py     # Settings modal dialog
+│   ├── settings_dialog.py     # Settings dialog (UI / LLM / Tools / Extras tabs)
+│   ├── edit_chat_dialog.py    # Edit Chat: rename, Generate, Export as Markdown
+│   ├── bulk_rename.py         # Settings → UI → Bulk Rename Chats
+│   ├── tasks_dialog.py        # Tasks manager
+│   ├── theme.py, icons.py     # Light/dark/accent theming, themed SVG icons
+│   └── image_preview.py, image_save.py  # Chat image preview and Save As
 └── web/
-    ├── __init__.py            # Package marker
     ├── app.py                 # Flask app — routes, WebWorker, SSE streaming
-    ├── main.py                # Web entry point (argparse: --host, --port, --debug)
+    ├── main.py                # Web entry point (--host, --port, --trusted-host, --debug)
     └── templates/
-        ├── base.html          # Bootstrap 5.3 base — navbar, offcanvas sidebar, CSS
+        ├── base.html          # Bootstrap 5.3 base — theme, navbar, sidebar + search, CSS
         ├── chat.html          # Chat view — server-rendered history + SSE live updates
-        └── settings.html      # Settings form
+        ├── settings.html      # Settings form
+        └── about.html         # About page
 ```
 
 ### Core Package (`pengy/core/`)
@@ -101,7 +119,12 @@ Pure Python — no Qt or terminal dependencies. Shared by both GUI and CLI.
 | `chat_manager.py` | Per-chat CRUD and a derived history index under `~/.config/pengy/chats/`; imports legacy `chats.json` as a compatibility seed |
 | `attachments.py` | Durable content-addressed image attachment references, source objects, display derivatives, and provider-message resolution |
 | `llm_client.py` | `LLMClient.chat()` — a Python generator that yields `tool_request`, `assistant_tool_calls`, `tool_result`, or `final_response` dicts. Callers `.send()` confirmation dicts back into the generator to resume after tool calls |
-| `tools.py` | 16 OpenAI function-calling tool schemas (`TOOLS`) and `execute_tool(name, arguments)`. Also manages `_sudo_password_provider` (callback set by UI or CLI) and `_tool_timeout` |
+| `tools.py` | 16 OpenAI function-calling tool schemas (`TOOLS`; 17 on Windows) and `execute_tool(name, arguments)`. Also manages `_sudo_password_provider` (callback set by UI or CLI) and `_tool_timeout` |
+| `tool_args.py` | Validates and coerces every tool call's arguments against its schema before dispatch (see "Tools") |
+| `chat_title.py` | One tool-free completion that titles a chat from its user/assistant text (Edit Chat, `/title`, Bulk Rename) |
+| `chat_search.py` | Case-insensitive word search over titles and user/assistant text (see "Chat Search") |
+| `task_manager.py` | Tasks — prompt templates with `%placeholder%` substitution (see "Tasks") |
+| `context_*.py`, `image_capabilities.py`, `model_cache.py` | Context-pressure estimates and overflow recovery, opt-in context-window discovery, remembered image rejections, cached model lists |
 
 ### Desktop UI Package (`pengy/ui/`)
 
@@ -123,8 +146,8 @@ Flask server-side-rendered interface. See [Web UI](#web-ui) section below for de
 
 ```
 ┌────────────────────┬──────────────────────────────────────────────────┐
-│  + New Chat        │                                                  │
-│  ⚙ Settings        │           Chat View (Markdown)                   │
+│ [+ New Chat][⚙][☰] │                                                  │
+│ [🔍 Search chats ] │           Chat View (Markdown)                   │
 │                    │                                                  │
 │  ─────────────     │  You 🧑                                          │
 │  Chat 1            │  Can you list files in /tmp?                     │
@@ -157,7 +180,7 @@ Case-insensitive word matching over chat history, newest first. No index and no 
 - **Order** — first, chats whose *title* holds every word (from the index, no file read, `hits` empty), newest first; then the remaining chats with messages, newest first. Stop after 100 results and report `truncated`.
 - **Pre-check** — before parsing a chat file, each word that is plain ASCII and contains no `"` or `\` must occur in the file's lowercased bytes, or the file is skipped. Other words can only be decided after parsing (Python writes non-ASCII as `\uXXXX`; every edition escapes quotes and backslashes).
 - **Hits** — per chat, up to 3 messages containing words, preferring those holding more of the words, then earlier ones; returned in message order as `{index, role, snippet, spans}`. `index` is the position in `chat["messages"]`, which jump-to-message uses (below).
-- **Snippet** — strip Markdown markers (```` ```lang ````, `**`, `__`, `` ` ``), collapse whitespace, take 80 characters starting 30 before the first matching word (shifted left at the end of the text), with `…` where cut; `spans` are `[start, end)` offsets of every word inside the returned snippet, for bolding. If lowercasing changes the text's length, start at the beginning and return no spans.
+- **Snippet** — strip Markdown markers (```` ```lang ````, `**`, `__`, `` ` ``), collapse whitespace, take 80 characters starting 30 before the first matching word (shifted left at the end of the text), with `…` where cut; `spans` are `[start, end)` offsets of every word inside the returned snippet, for bolding, counted in **Unicode code points** (Python `str` indexing) in every edition — UTF-16 consumers (JS, `QString`) convert, or an emoji before a match shifts the bolding. If lowercasing changes the text's length, start at the beginning and return no spans.
 - **Events** (`search_chats()`): `result` `{id, title, created_at, title_match, hits}`, `progress` `{scanned, total}` after each file, `done` `{results, truncated, cancelled}`; cancellation is checked between files.
 
 Frontends: the desktop sidebar (typing hides rows whose title lacks a word; Enter shows results with snippets in place of the list, streamed with an `n/total` status; any edit or Esc returns to the list; clicking a result opens the chat); the web sidebar (same, results from `GET /search?q=` in one JSON response); the CLI `/search <words>`, which numbers results with their `/list` index so `/load <#>` opens one.
@@ -166,6 +189,11 @@ Frontends: the desktop sidebar (typing hides rows whose title lacks a word; Ente
 - **Desktop** — clicking a result opens (or switches to) the chat, marks the words in each hit message (`search-hit` span: theme `selection` background, bold; only in the message body, not its label or reasoning), and scrolls so the first hit sits just below the top edge. Each rendered user/assistant message records its `chat["messages"]` index (`source`), including messages appended live, so this also works on an already-open tab. The view stops following new output until the user scrolls to the bottom or sends a message; sending clears the marks. If no hit is in the view (e.g. redacted since the search ran), the chat is just shown.
 - **Web** — user and assistant turns carry `id="msg-<index>"` (index taken *before* the dangling-tool-call repair, which can insert placeholders). A result links to `/chat/<id>#hits=<i>,<j>&terms=<JSON array>`; on load (and on `hashchange`, for a result in the chat already open) the page wraps each word in the hit messages' text nodes in `<mark class="search-hit">`, scrolls the first into view instead of to the bottom, drops the hash with `history.replaceState`, and closes the phone sidebar.
 - **CLI** — `/search` prefixes each snippet with `#N`, the 1-based message number `/show` uses. `/load <#> <N>` (a leading `#` on N is accepted) loads the chat and prints message N in full as plain text in a panel, the last `/search`'s words highlighted, instead of the last 3 messages; an out-of-range N says how many messages the chat has.
+
+**Shared code across editions.** The web sidebar search script (`chat-search.js` in PengyR/PengyCPP `web/templates/`, inlined in Python's `base.html`) and the hit-revealing script (`search-hits.js`, inlined in Python's `chat.html`) are the same JavaScript in all three web UIs; the desktop sidebar (`chathistory.*`) and `chatsearch.h` are shared verbatim between the two Qt GUIs, with `ChatSearch::run()` implemented natively in PengyCPP (`chatsearch.cpp`) and over FFI in PengyR (`chatsearch_ffi.cpp` → `pengy_search_chats`).
+
+### Rendering model output in the web UIs
+Assistant text is untrusted (it can echo a fetched page) and the page that shows it can drive the whole API, so: raw HTML in a reply renders as text, never markup (Python removes Python-Markdown's `html_block`/`html` handlers; Rust and C++ escape before applying markdown), and a link or image keeps its URL only for `http`, `https`, `mailto`, `file` or scheme-less URLs (scheme compared after dropping whitespace/control characters and lowercasing). Link URLs may contain one level of balanced parentheses.
 - **Quick settings panel** — Status dot, per-tab model and Effort selectors, cumulative chat token totals, and last-final-response tok/s. Tool confirmation remains in Settings.
 
 ### Per-chat Effort and last-response throughput (v1.11.0)
@@ -197,17 +225,18 @@ when final text is empty. Existing cumulative `chat.usage` remains separate.
 - Markdown-rendered chat messages via `QTextBrowser`
 - **User messages:** bold dark-blue "You 🧑" label, plain body text
 - **Assistant messages:** bold dark-green "Assistant 🤖" label, HTML-rendered markdown
-- **Tool requests:** bold amber `🔧 Using tool: <name> [<args truncated to 40 chars>]`
-- **Tool output:** italic "Tool output" label, monospace content in a styled panel
-- Syntax-highlighted code blocks (monokai style, `#f5f5f5` background)
-- Auto-scrolls to bottom on new content
+- **Tool calls:** a collapsible card per call — `▶ Tool: <name> [<args, truncated to 60 chars>]`, with *(running…)* until the result arrives or *(declined)*; click to show the arguments and output
+- **Reasoning:** a collapsible card above the assistant message when the model returned reasoning
+- **Notice / error cards:** harness messages (context recovery, failed turns) on their own surface, never labelled as the assistant
+- Syntax-highlighted code blocks (Pygments; the theme's style — friendly in light, monokai in dark)
+- Follows new content only while scrolled to the bottom; scrolling up holds position. A search jump (see "Chat Search") marks the hit messages and holds position until the next send
 
 ### Right-Bottom Pane (Chat Input)
 - **📎 Attach button** — Opens file picker; accepts text files (detected by extension, MIME type, and UTF-8 sniff) and images (JPEG, PNG, GIF, WebP); other binary files are rejected with an error dialog
-- **Image paste** — Clipboard images are pasted directly into the chat (saved to a temp file, sent as base64 data URIs)
+- **Image paste** — Clipboard images are pasted directly into the chat
 - **File chips** — Selected files shown as removable badges above the input (🖼 for images, 📄 for text); cleared after send
 - **Text input** — Multi-line QPlainTextEdit; Enter to send, Shift+Enter for newline
-- On send: attached text file contents are injected into the message as fenced code blocks before the user's text; images are sent as image content parts
+- On send: each attached text file is injected as `[File: <name>]` plus a fenced code block before the user's text; images are imported as durable attachments (see "Durable image attachments") and sent as image content parts
 
 ---
 
@@ -275,7 +304,8 @@ Exit is bounded: cleanup takes milliseconds, and if the main thread cannot get t
 | `/new` | Start a new chat session |
 | `/show [n]` | Show the full conversation (optional: last n messages) |
 | `/tail [n]` | Show the last n messages (default 5) |
-| `/rename <title>` | Rename the current chat |
+| `/rename <title>` | Rename the current chat (marks the title `"user"`) |
+| `/title` | Generate a title for the current chat with the configured model (marks it `"model"`) |
 | `/clear` | Clear the terminal screen |
 | `/export [path]` | Export the current chat as Markdown |
 | `/yolo [all\|safe\|none]` | Set tool confirmation: all (YOLO), safe (read-only), none — cycles if no arg |
@@ -298,6 +328,8 @@ Exit is bounded: cleanup takes milliseconds, and if the main thread cannot get t
 | `/llm-timeout <sec>` / `/download-max <mb>` | Set LLM request timeout or default download cap |
 | `/system [message]` | Show or set the system message template |
 | `/compact` | Elide old tool results to free context window space |
+| `/auto-compact [off\|auto\|<tokens>] [percent]` | Show or set proactive context compaction for the selected model; the percent is shared |
+| `/about` | Show edition, version and links |
 | `/quit`, `/exit`, `/q` | Exit the CLI |
 
 ### CLI Rendering
@@ -335,10 +367,10 @@ pengy-web --host 0.0.0.0 --port 8080
 │                                                             │
 │  ┌─sidebar (260px)─┐  ┌─chat area──────────────────────┐  │
 │  │  [+ New Chat]   │  │  message history (scrollable)  │  │
-│  │                 │  │                                │  │
-│  │  Chat 1   [×]  │  │  User bubble (right-aligned)   │  │
-│  │  Chat 2   [×]  │  │  🔧 tool card (collapsed)       │  │
-│  │  Chat 3   [×]  │  │  Assistant bubble (markdown)   │  │
+│  │  [🔍 Search   ] │  │                                │  │
+│  │  💬 Chat 1 [×] │  │  User bubble (right-aligned)   │  │
+│  │  💬 Chat 2 [×] │  │  🔧 tool card (collapsed)       │  │
+│  │  💬 Chat 3 [×] │  │  Assistant bubble (markdown)   │  │
 │  └─────────────────┘  │                                │  │
 │   (offcanvas on mob.) │  ┌──input + [Send]────────────┐│  │
 │                        │  └────────────────────────────┘│  │
@@ -346,17 +378,18 @@ pengy-web --host 0.0.0.0 --port 8080
 └─────────────────────────────────────────────────────────────┘
 ```
 
-- **Sidebar** — 260 px fixed column on md+ screens; offcanvas drawer on mobile. Lists all chats with delete button; "New Chat" button at top.
+- **Sidebar** — 260 px fixed column on md+ screens; offcanvas drawer on mobile. "New Chat" at top, then the search box (see "Chat Search"; Ctrl+K), then every chat with a delete button. Each row's chat bubble is the Edit Chat button (a pencil on hover): rename, Generate a title (`POST /chat/<id>/title/generate`, which only suggests), Export.
+- **Theme** — follows the shared `theme_mode` through Bootstrap's `data-bs-theme` on `<html>`: explicit light/dark rendered server-side, `system` resolved by an inline head script before the stylesheets load and followed live. Colours beyond Bootstrap's own are `--pengy-*` tokens defined for both themes.
 - **Chat area** — Server-rendered message history on page load; SSE appends new content live during generation.
 - **Input** — Auto-expanding textarea; Enter to send, Shift+Enter for newline.
-- **Navbar** — Shows current model and tool confirmation mode badge; gear icon links to settings.
+- **Navbar** — Shows current model, tool confirmation mode badge and cumulative token count; Tasks, Export and Redact Last buttons (a ⋮ menu on phones); gear icon links to settings. Double-click the title to Edit Chat.
 
 ### Message Rendering
 
 | Message type | Appearance |
 |---|---|
 | User | Right-aligned rounded bubble |
-| Assistant | Left-aligned bubble, full markdown + syntax highlighting (Pygments `friendly` style) |
+| Assistant | Left-aligned bubble, full markdown + syntax highlighting (Pygments `friendly` in light, `monokai` in dark; see "Rendering model output in the web UIs" for what is never rendered as markup) |
 | Tool request | Collapsed accordion card with amber left border; click header to expand args |
 | Tool result | Injected into card body on completion; green border = done, red = declined |
 | Thinking | Spinner with "Thinking…" text, removed when response arrives |
@@ -381,19 +414,32 @@ The worker remains in the `_workers` dict until the SSE endpoint has drained its
 | POST | `/chat/<id>/stop` | Cancel running generation for a chat |
 | POST | `/chat/<id>/delete` | Delete chat and redirect to index |
 | GET | `/chat/<id>/export` | Download the chat as a Markdown file |
-| POST | `/chat/<id>/rename` | Rename a chat |
+| GET | `/chat/<id>/export/<fmt>` | Export bundle (with attachments) |
+| POST | `/chat/<id>/rename` | Rename a chat (marks the title `"user"`) |
+| POST | `/chat/<id>/title/generate` | Suggest a model-generated title (Edit Chat); saves nothing |
+| POST | `/chat/<id>/answer` | Answer an `ask_user_question` card |
+| POST | `/chat/<id>/redact` | Remove the last raw message (409 while a turn runs) |
+| POST | `/chat/<id>/command` | Web slash commands (`/new /yolo /model /rename /title /export /help`) typed in the chat input |
 | GET | `/search?q=<words>` | Chat search (see "Chat Search"): `{results: [...], truncated}` |
-| POST | `/chat/<id>/command` | Web slash commands (`/new /yolo /model /rename /export /help`) typed in the chat input |
 | GET | `/models` | Fetch available models from the endpoint (settings page Fetch button) |
+| GET | `/tasks`, POST `/tasks/render` | List Tasks; render one with its placeholder values |
+| GET | `/files?path=` | Serve a local file the model linked (`file://` links are rewritten to this) |
+| GET | `/attachments/<digest>/<derivative>` | Serve a durable attachment's display derivative |
 | GET/POST | `/settings` | View/update all config fields |
+| GET | `/about` | About page |
 
 ### SSE Event Types
 
 | Type | Payload | Browser action |
 |------|---------|---------------|
+| `assistant_message` | `html` | Append the narration the model wrote alongside its tool calls |
 | `tool_request` | `name`, `args`, `auto_approved` | Append tool card; if not auto-approved, show confirmation modal |
+| `question_request` | `questions` | Show the `ask_user_question` card/modal |
 | `tool_result` | `content`, `declined` | Update tool card body and badge |
-| `final_response` | `html`, `usage` | Append assistant bubble |
+| `final_response` | `html`, `usage`, `cumulative_usage` | Append assistant bubble; update the navbar token count |
+| `retrying` / `request_started` / `context_compacted` | reason, delay, attempt / — / message | Status line during backoff; notice card on compaction |
+| `notice` | `message` | Harness notice card (never an assistant bubble) |
+| `stream_rotate` | — | Server is cycling the SSE connection; reconnect with the cursor |
 | `sudo_request` | `host` (string, or null for local) | Show sudo password modal naming the host |
 | `error` | `message` | Append error alert, re-enable input |
 | `keepalive` | — | SSE comment (`: keepalive`); browser ignores |
@@ -458,8 +504,18 @@ Browser shows Bootstrap modal (tool name + args JSON)
 | `preserve_reasoning` | bool | `false` | Keep reasoning fields (`reasoning_content`, `reasoning`, `reasoning_details`) on assistant messages sent back to the API |
 | `context_keep_turns` | int | `0` | Number of recent turns whose tool results are kept; older ones are elided to `[tool output from earlier turn elided]`. 0 = keep all. |
 | `attachment_context_keep_turns` | int | `4` | Recent turns whose durable image attachments are resolved into provider requests; `0` sends no historical attachments. |
-| `ui_scale` | int | `100` | Sets `QT_SCALE_FACTOR` on next launch (75/100/125/200); CLI ignores this |
-| `theme_mode` | string | `"system"` | Desktop theme: `"system"`, `"light"`, or `"dark"` |
+| `auto_context_recovery` | bool | `true` | Recover from a context-overflow error by summarising older turns into a checkpoint (see "Context-overflow recovery") |
+| `recovery_keep_turns` | int | `3` | Most recent user turns kept verbatim when recovery summarises |
+| `output_token_limit` | int | `0` | Output cap sent to the provider; `0` omits it. Must be smaller than the context window when one is known |
+| `output_token_parameter` | string | `"max_tokens"` | Name the cap is sent under: `max_tokens` or `max_completion_tokens` |
+| `context_window` / `context_windows` | int / object | `0` / `{}` | Context window in tokens: global, and per model (overrides) |
+| `context_window_modes` | object | `{}` | Per-model proactive compaction mode: `off`, `auto` (discover the window), `explicit` (use `context_windows`) |
+| `context_window_auto` | bool | `false` | Default to `auto` window discovery for models with no mode set |
+| `compact_at_percent` | int | `75` | Compact proactively once a request reaches this percent of the window (1–100) |
+| `empty_reply_thinking_off` / `…_models` | string / object | `""` / `{}` | How to retry with thinking off after an empty reply: `""` (don't), `reasoning_effort`, or `enable_thinking`; global and per model |
+| `skills_dir` | string | `""` | Skills folder; empty means `~/skills`. Settings → Extras shows and edits it |
+| `ui_scale` | int | `100` | Sets `QT_SCALE_FACTOR` on next launch (75/100/110/125/135/150/175/200); CLI ignores this |
+| `theme_mode` | string | `"system"` | Theme for the desktop app and the web UIs: `"system"`, `"light"`, or `"dark"` |
 | `theme_accent` | string | `"default"` | Desktop accent color: `default`/`blue`/`teal`/`green`/`orange`/`red`/`pink`/`purple` |
 | `user_agent` | string | `PengyAgent/1.0` | User-Agent header for HTTP requests (downloads, URL fetches) |
 | `llm_timeout` | int | `300` | HTTP timeout in seconds for each LLM API request |
@@ -485,8 +541,9 @@ Browser shows Bootstrap modal (tool name + args JSON)
 
 **Conformance: required.** Each authoritative chat is one JSON file at
 `chats/<uuid>.json`; `chats/index.json` is a rebuildable cache used for fast history listings.
-The index contains only `{id, title, created_at, msg_count, preview}` summaries and is never the
-source of truth. If it is missing, stale, corrupt, or loses a cross-process update, rebuild it by
+The index contains only `{id, title, created_at, msg_count, preview, title_source}` summaries and
+is never the source of truth. `title_source` is always written (null = absent on the chat); an
+entry *without* the key (an older index) means "unknown — read the chat file". If it is missing, stale, corrupt, or loses a cross-process update, rebuild it by
 scanning the per-chat files. Writes use temp-file plus rename.
 
 A legacy `~/.config/pengy/chats.json` array remains a compatibility seed for older editions. Import
@@ -506,9 +563,22 @@ An authoritative chat is:
   "created_at": "2026-05-13T21:00:00",
   "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
   "reasoning_effort": "high",
-  "last_response_tokens_per_second": 42.5
+  "last_response_tokens_per_second": 42.5,
+  "model": "qwen3:8b",
+  "title_source": "model"
 }
 ```
+
+Optional fields, each round-tripped by every edition: `usage`, `reasoning_effort` and
+`last_response_tokens_per_second` (see "Per-chat Effort"), `model` (per-tab model override; absent
+follows the global setting), and `title_source` — where the title came from: `"model"`
+(generated: Edit Chat's Generate, `/title`, Bulk Rename), `"user"` (typed: Edit Chat Save,
+`/rename`, web rename), or absent (the automatic first-message title, and every chat from before
+the field). Bulk Rename only retitles absent ones ("rename all again" also redoes `"model"`, never
+`"user"`), which makes it resumable; it re-reads each chat's own marker before spending a request,
+and writes a title by re-reading the chat immediately before saving so it never writes back stale
+messages. A frontend saving its in-memory copy of a chat adopts the on-disk title and
+`title_source`, so a rename landing mid-run is not undone.
 
 Only `user`, `assistant` (including those with `tool_calls`), and `tool` messages are persisted.
 The optional `usage` object is the cumulative total for the chat, not merely its last turn. This
@@ -537,16 +607,14 @@ All tools are defined in `tools.py` as OpenAI function-calling schemas (`TOOLS`)
 
 **Descriptions.** Tool and parameter descriptions state only the contract a model wouldn't assume (what comes back, limits, what is skipped); "don't do X" guidance lives in the error a mistake produces, which costs tokens only when the mistake happens. Every sentence must be true of the tool — a description that promises behaviour one edition lacks is a bug. The schemas (names, parameters, all description strings, nested ones included) are byte-identical across the three editions. A canary eval on a local Qwen model (24 tasks) showed the terse set (−32% schema tokens) with no loss in pass rate.
 
-Tool argument previews are shown in the chat view truncated to 40 characters: `🔧 Using tool: web_search [query=latest Python news…]`.
-
 **Argument validation.** Before any handler runs, `execute_tool` checks the arguments against the tool's own JSON schema (`tool_args.normalize_arguments`; `tool_args.rs` / `Tools::normalizeArguments` in the ports). Unambiguous slips are coerced silently: a numeric string or integral float for an integer, `"true"`/`"false"` (any case) or `0`/`1` for a boolean, a single value where an array is expected, a JSON-encoded string where an array or object is expected, and an enum value in the wrong case. `null` counts as an absent key. Anything else rejects the whole call and nothing runs: an unknown key at any depth (the error lists the valid keys, sorted, and names a top-level key used in a nested object as "a top-level argument"), a missing required key, or a value that can't be coerced. Malformed tool-call JSON is reported to the model ("were not valid JSON") instead of running the tool with `{}`, and one level of double encoding is unwrapped. `ask_user_question` never reaches `execute_tool`; the harness checks it against the same schema first (`tools.validate_question_arguments`), and an empty `questions` list is also rejected, so a malformed call goes back to the model as an error instead of reaching the user as an empty or broken form. The messages are identical across editions.
 
 **Safe writes.** `write_file`, `replace_in_file` and `apply_changes` never write a target in place. Each writes a hidden temp file beside the target (`.<name>.pengy-tmp-…`), checks every write, syncs it, copies the target's permission bits (and owner where allowed), and renames it over the target, so a failed write (disk full, quota) leaves the original intact and no stray file. Symlinks are followed: the link survives and its target is edited. A target the user made read-only is refused ("Permission denied"), as a plain open would; if the directory doesn't allow a temp file but the target is writable, the write falls back to a checked in-place write.
 
 **Line endings.** Files are read without newline translation. When an exact-text edit (`old_str`, `old`, `anchor`) has no match as typed, contains `\n` but no `\r`, and the file uses CRLF, it is retried with CRLF line endings and the replacement text is written the same way, so editing a Windows file never converts it to LF.
 
-### `read_file(path)`
-Reads a local file. Expands `~`. Returns file contents or an error string.
+### `read_file(path, offset=None, limit=None)`
+Reads a local text file. Expands `~`. `offset` (1-based first line) and `limit` (line count) select a range; a long file is truncated at a line boundary with a header saying how many lines exist and how to continue with `offset`/`limit`, so paging is discoverable. Binary files are refused (see the binary guard). Returns file contents or an error string.
 
 ### `read_image(path)`
 Loads a local PNG, JPEG, GIF, WebP, BMP, or TIFF for the model to inspect. It produces an image
@@ -944,21 +1012,15 @@ Attached images are sent as OpenAI-style content parts on the user message:
 
 *Conformance: **reference** — reimplement freely.*
 
-| Field | Widget | Notes |
-|-------|--------|-------|
-| Base URL | QLineEdit | OpenAI-compatible endpoint |
-| API Key | QLineEdit (masked) | Stored in settings.json (plaintext) |
-| Model | QComboBox (editable) | Pre-populated with current model; "↻ Fetch" button calls `GET /v1/models` to populate the dropdown |
-| User Agent | QLineEdit | User-Agent for tool HTTP requests |
-| System Message | QTextEdit | Supports `{date}`, `{username}`, etc. templates |
-| Tool Confirmation | QComboBox | "YOLO (All)", "Safe Only", "None" — controls which tools require confirmation |
-| Reasoning effort | QComboBox | Provider default / none / low / medium / high / xhigh / max |
-| Reasoning preservation | QCheckBox | Keep reasoning fields on messages sent back to the API |
-| Keep tool results | QSpinBox | Number of recent turns to keep tool results for (0 = keep all) |
-| Theme mode | QComboBox | System / Light / Dark |
-| Accent color | QComboBox | Default / Blue / Teal / Green / Orange / Red / Pink / Purple |
-| UI Scale | QComboBox | 75%, 100%, 125%, 200% — takes effect on relaunch |
-| Tool timeout | QSpinBox | Seconds (-1 = no timeout) |
+Five tabs:
+
+| Tab | Fields |
+|-----|--------|
+| **UI** | UI Scale (75–200%, takes effect on relaunch); Theme mode (System / Light / Dark); Accent color (Default / Blue / Teal / Green / Orange / Red / Pink / Purple); **Bulk Rename Chats** (warning with a "rename all again" checkbox, then a progress dialog; see `title_source`) |
+| **LLM** | Base URL; API Key (masked, stored in settings.json); Model (editable combo, **Fetch** calls `GET /v1/models`); System Message (`{date}`, `{username}`, … templates); Reasoning effort; Preserve reasoning; LLM timeout; Proactive compaction (mode and window for the selected model, threshold for all) |
+| **Tools** | Tool Confirmation (YOLO / Safe / None); Keep tool results (turns, 0 = all); Tool timeout (s, -1 = none); Max tool output (chars); Max download (MB); User Agent |
+| **Extras** | Skills folder (Browse…), Install Skills, Add to System Message, Open Folder, Browse BotSkills — all local operations, none invokes the LLM |
+| **About** | Edition, version, links, license |
 
 ## Tasks (Prompt Templates)
 
@@ -983,21 +1045,21 @@ Tasks are reusable prompt templates stored in `~/.config/pengy/tasks.json` (same
 
 *Conformance: **reference** — reimplement freely.*
 
-| Package | Version | Purpose | Required by |
-|---------|---------|---------|------------|
-| PySide6 | >= 6.6.0 | Qt6 GUI framework | Desktop only |
-| openai | >= 1.0.0 | OpenAI-compatible API client | Both |
-| markdown | >= 3.5 | Markdown to HTML conversion | Desktop only |
-| pygments | >= 2.17.0 | Syntax highlighting | Desktop only |
-| ddgs | >= 9.0.0 | DuckDuckGo web search | Both |
-| rich | >= 13.0.0 | CLI formatting (tables, panels, markdown) | CLI only |
+| Package | Version | Purpose | Installed |
+|---------|---------|---------|-----------|
+| openai | >= 1.0.0 | OpenAI-compatible API client | default |
+| truststore | >= 0.10 | HTTPS verification against the OS certificate store | default |
+| ddgs | >= 9.0.0 | DuckDuckGo web search | default |
+| Pillow | >= 10.0.0 | Image attachments and preprocessing | default |
+| rich | >= 13.0.0 | CLI formatting (tables, panels, markdown) | default |
+| flask | >= 3.0.0 | Web UI | default |
+| markdown | >= 3.5 | Markdown to HTML (desktop + web) | default |
+| pygments | >= 2.17.0 | Syntax highlighting (desktop + web) | default |
+| PySide6-Essentials | >= 6.10, < 6.11 | Qt6 desktop GUI (not the `PySide6` meta-package, which adds ~175–330 MB of unused Addons) | `pengy[gui]` |
 
 ```
-# Desktop (full)
-pip install PySide6 openai markdown pygments ddgs
-
-# CLI only
-pip install openai ddgs rich
+pip install pengy            # CLI + web UI
+pip install "pengy[gui]"     # + Qt desktop GUI
 ```
 
 ---
@@ -1015,17 +1077,17 @@ but read the reasoning first, because most of these were paid for with a bug.*
 
 **System message templating at send time:** Templates are resolved fresh on every send so `{date}` is always accurate regardless of when the config was saved.
 
-**Sudo via `SUDO_ASKPASS`:** Rather than a PTY (which would handle any interactive prompt but adds significant complexity), the app specifically detects `sudo` in bash commands, prompts for a password, and hands it to sudo's askpass interface: every `sudo` in the command is rewritten to `sudo -A`, and `SUDO_ASKPASS` points at a mode-0700 temp script that echoes the `PENGY_SUDO_PASSWORD` environment variable given to the child process. The password never touches disk, and the script is removed when the command finishes. The password is cached in memory for the duration of the LLM run to avoid re-prompting on multi-step workflows, and cleared when the run completes.
+**Sudo via `SUDO_ASKPASS`:** Rather than a PTY (which would handle any interactive prompt but adds significant complexity), the app specifically detects `sudo` in bash commands, prompts for a password, and hands it to sudo's askpass interface: every `sudo` in the command is rewritten to `sudo -A`, and `SUDO_ASKPASS` points at a mode-0700 script in a private 0700 temp directory that `cat`s a 0600 password file beside it. The password is deliberately *not* passed in an environment variable: every child of the command could read and print one. The directory is removed when the command finishes (and by the CLI's signal handling if it is killed mid-command). The password is cached in memory for the duration of the LLM run to avoid re-prompting on multi-step workflows, and cleared when the run completes.
 
 The original design piped the password to the shell's stdin and rewrote only the *first* `sudo` to `sudo -S`. That quietly failed whenever anything else in the command touched stdin, which an LLM emits routinely: a pipeline (`echo x | sudo tee f`) gave sudo the pipe instead of the password, a redirect (`sudo cmd < /dev/null`) overrode it, an earlier command that reads stdin (`cat`, `read`) consumed the password first, and a second `sudo` had nothing left to read and died with `no tty present`. Only the single-`sudo`, no-stdin case worked. Askpass has none of those constraints — it is per-invocation and independent of stdin — so every occurrence can be rewritten safely. The command's own stdin is now `/dev/null` in all cases, which also stops a non-sudo command from hanging on a terminal read.
 
-**Portability of the askpass approach:** `-A`/`SUDO_ASKPASS` is supported by both sudo implementations Ubuntu ships. Verified on Ubuntu 26.04 against **sudo-rs 0.2.13** (the default since 25.10, `/usr/bin/sudo` via the alternatives system) and **legacy sudo 1.9.17p2** (`/usr/bin/sudo.ws`): both invoke the helper exactly once per `sudo` for every command shape above, and both pass `PENGY_SUDO_PASSWORD` through to it. Flag combinations the rewrite can produce (`-A -u`, `-A -g`, `-A --`) parse on both. The helper script uses only POSIX `printf '%s\n'`, which is byte-identical between dash's builtin and uutils `printf` (the Rust coreutils Ubuntu now ships) — including passwords containing quotes, `$`, `%s`, backslashes, and spaces. Note that the earlier `sudo -S` approach was *not* broken by the sudo-rs switch; sudo-rs supports `-S` too. The stdin collisions above were the sole cause.
+**Portability of the askpass approach:** `-A`/`SUDO_ASKPASS` is supported by both sudo implementations Ubuntu ships. Verified on Ubuntu 26.04 against **sudo-rs 0.2.13** (the default since 25.10, `/usr/bin/sudo` via the alternatives system) and **legacy sudo 1.9.17p2** (`/usr/bin/sudo.ws`): both invoke the helper exactly once per `sudo` for every command shape above. Flag combinations the rewrite can produce (`-A -u`, `-A -g`, `-A --`) parse on both. The helper script only `cat`s the password file, so the password's bytes reach sudo unchanged — including quotes, `$`, `%s`, backslashes, and spaces — with no shell or `printf` interpretation in between. Note that the earlier `sudo -S` approach was *not* broken by the sudo-rs switch; sudo-rs supports `-S` too. The stdin collisions above were the sole cause.
 
 **Remote sudo (`run_bash` `host`):** Pengy never infers a target host from `ssh …` text — ssh option parsing, config aliases and nested quoting make that undecidable, and a guess is wrong at a privilege boundary. The model names the host explicitly; the sudo lexer, elevation rules and `sudo -A` rewrite run unchanged on the bare command. Pengy then runs `ssh -T -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -- <host> sh -s` and writes `_REMOTE_WRAPPER` to ssh's stdin with the password, command and cwd substituted as POSIX single-quoted literals (so nothing sensitive is on any argv and the remote login shell only ever parses `sh -s`). The wrapper recreates the askpass helper remotely — 0600 password file in a 0700 `mktemp -d` under `$XDG_RUNTIME_DIR`, `~/.cache` or `/tmp`, whichever proves executable — never exports the password, runs the command with `bash -c` (or `sh`) in its own session with stdin `/dev/null`, and removes the directory on exit. Key-based ssh login and an existing `known_hosts` entry are required; `BatchMode` makes anything else fail fast, and exit 255 with ssh's error text gets a hint appended.
 
 Stop works without a pty: Pengy holds ssh's stdin open for the whole run (a raw `os.pipe`, written from a thread) and waits on the ssh process rather than on output EOF. Killing ssh closes the channel; a watcher in the wrapper blocked on `cat` of the saved stdin fd sees EOF and SIGTERMs the command's process group (sudo relays it to its root child). Two details are load-bearing: `exec 3<&0` before backgrounding (POSIX gives background jobs `/dev/null` as stdin, so the watcher would otherwise fire immediately), and `trap 'exit 141' PIPE` (after the disconnect dash writes a job notice to the dead channel and would die of SIGPIPE before its EXIT trap removed the password directory). Host strings must match `[A-Za-z0-9._@:%-]+` without a leading `-`. The wrapper script must be byte-identical across editions.
 
-**File attachment injection (GUI):** Attached files are formatted as fenced code blocks and prepended to the message text before sending. The LLM sees them as part of the user turn, so no special API handling is needed.
+**File attachment injection (GUI):** Attached text files are formatted as `[File: <name>]` plus a fenced code block and prepended to the message text before sending. The LLM sees them as part of the user turn, so no special API handling is needed.
 
 **JSON storage:** Human-readable, easy to backup, no database dependencies. Shared between GUI and CLI.
 

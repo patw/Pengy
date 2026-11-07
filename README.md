@@ -154,6 +154,8 @@ The web UI is for single-user personal use. For remote access, put it behind ngi
 - **Tabbed chat** — Multiple concurrent chat sessions, each with its own worker thread
 - **Theme system** — System/light/dark modes plus 8 accent colours; fonts scale with the UI
 - **Tasks** — Reusable prompt templates with `%placeholder%` tokens for workflows you run on repeat
+- **Chat search** — A search box above the chat list (Ctrl+K): type to filter by title, press Enter to search message text too, then jump straight to the matching messages. CLI: `/search`, then `/load <#> <msg#>`
+- **Edit Chat & Bulk Rename** — Rename a chat, let the model generate a title, or export it as Markdown from the pencil on each chat (`/title` in the CLI); Settings → UI → Bulk Rename Chats titles your whole history, resumably, and never touches a name you typed
 - **Model discovery** — Fetch available models from your endpoint with one click or `/models`
 - **File attachments** — GUI: attach from the input bar; CLI: `/attach` or `@path` syntax
 - **Templated system message** — Auto-fills `{date}`, `{username}`, `{hostname}`, `{osinfo}` at send time
@@ -192,7 +194,7 @@ The web UI is for single-user personal use. For remote access, put it behind ngi
 | Model | Model name, e.g. `llama3.2`, `qwen3:8b`, `gemma3` — **no default**, see below |
 | System Message | Supports `{date}`, `{username}`, `{hostname}`, `{osinfo}` placeholders |
 | Tool Confirmation | All / Safe / None — controls which tools require approval |
-| Theme Mode (GUI) | System / Light / Dark — follows OS palette |
+| Theme Mode (GUI, Web) | System / Light / Dark — follows OS palette |
 | Accent Color (GUI) | Default, Blue, Teal, Green, Orange, Red, Pink, or Purple |
 | UI Scale (GUI) | 75–200% — restart for full native-widget scaling |
 
@@ -298,6 +300,7 @@ uv sync
 
 # Add the Qt desktop GUI
 uv sync --extra gui
+```
 
 Or with pip:
 
@@ -317,6 +320,7 @@ python -m pytest tests/ -v
 | Package | Purpose | Installed by default? |
 |---------|---------|:---------------------:|
 | openai | OpenAI-compatible API client | ✅ |
+| truststore | HTTPS verification against the OS certificate store | ✅ |
 | ddgs | DuckDuckGo web search | ✅ |
 | Pillow | Image attachments and processing | ✅ |
 | flask | Web UI framework | ✅ |

@@ -455,8 +455,11 @@ function revealSearchHits() {
   let terms = [];
   try { terms = JSON.parse(params.get('terms') || '[]'); } catch (e) { /* none */ }
   terms = terms.filter(t => typeof t === 'string' && t);
-  document.querySelectorAll('#messagesArea mark.search-hit').forEach(m => m.replaceWith(m.textContent));
-  document.getElementById('messagesArea').normalize();
+  document.querySelectorAll('mark.search-hit').forEach(m => {
+    const parent = m.parentNode;
+    m.replaceWith(m.textContent);
+    parent.normalize();
+  });
   const hits = params.get('hits').split(',')
     .map(n => document.getElementById('msg-' + n)).filter(Boolean);
   // Drop the hash so a reload goes back to following the chat.
@@ -468,7 +471,7 @@ function revealSearchHits() {
   if (offcanvas) bootstrap.Offcanvas.getInstance(offcanvas)?.hide();
   for (const el of hits) markTerms(el, terms);
   hits[0].scrollIntoView({block: 'start'});
-  updateJumpBtn();
+  if (typeof updateJumpBtn === 'function') updateJumpBtn();
   return true;
 }
 

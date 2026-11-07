@@ -118,6 +118,32 @@ class TestRenderMd:
     def test_empty(self):
         assert _render_md("") == ""
 
+    def test_raw_html_from_the_model_is_shown_not_parsed(self):
+        # Model output can echo a fetched page; a script in the web UI's own
+        # origin could drive the API (/yolo, /send).
+        html = _render_md("hi <img src=x onerror=alert(1)>\n\n<script>alert(2)</script>\n\nx <br> y")
+        assert "<img" not in html and "<script" not in html and "<br>" not in html
+        assert "&lt;img src=x onerror=alert(1)&gt;" in html
+
+    @pytest.mark.parametrize("url", [
+        "javascript:alert(1)", "JaVaScRiPt:alert(1)", "java\tscript:alert(1)", "data:text/html,x", "vbscript:x",
+    ])
+    def test_script_capable_urls_are_dropped(self, url):
+        html = _render_md(f"[link]({url}) ![img]({url})")
+        assert "href" not in html and "src" not in html, html
+        assert ">link</a>" in html
+
+    def test_ordinary_urls_are_kept(self):
+        html = _render_md("[a](https://x.org) [b](mailto:me@x.org) [c](/tmp/a.txt) [d](#top) "
+                          "![e](file:///tmp/p.png)")
+        for href in ('href="https://x.org"', 'href="mailto:me@x.org"', 'href="/tmp/a.txt"', 'href="#top"'):
+            assert href in html
+        assert 'src="/files?path=%2Ftmp%2Fp.png"' in html
+
+    def test_html_in_code_blocks_is_still_shown(self):
+        html = _render_md("```html\n<b>code</b>\n```")
+        assert "&lt;" in html and "<b>" not in html
+
     def test_code_block(self):
         html = _render_md("```python\nprint('hi')\n```")
         assert "highlight" in html  # codehilite CSS class

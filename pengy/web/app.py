@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 
 import markdown as _md
+import markdown.extensions
+import markdown.treeprocessors
 from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, url_for
 from pygments.formatters import HtmlFormatter
 
@@ -247,12 +249,45 @@ def _fix_file_urls(html: str) -> str:
     return html
 
 
+# URL schemes a rendered link or image may keep.  Scheme-less URLs (relative
+# paths, local file paths, #anchors) are always fine; file: is rewritten to
+# /files by _fix_file_urls().
+_SAFE_URL_SCHEMES = {"http", "https", "mailto", "file"}
+_URL_SCHEME_RE = re.compile(r"^([a-z][a-z0-9+.-]*):")
+
+
+class _SafeUrls(_md.treeprocessors.Treeprocessor):
+    def run(self, root):
+        for el in root.iter():
+            attr = {"a": "href", "img": "src"}.get(el.tag)
+            if attr is None or el.get(attr) is None:
+                continue
+            # Browsers ignore whitespace and control characters inside a scheme.
+            url = re.sub(r"[\x00-\x20]", "", el.get(attr)).lower()
+            m = _URL_SCHEME_RE.match(url)
+            if m and m.group(1) not in _SAFE_URL_SCHEMES:
+                del el.attrib[attr]
+
+
+class _SafeHtml(_md.extensions.Extension):
+    """Model output is untrusted -- it can echo a fetched page -- and this HTML
+    is served in the web UI's own origin, where a script could drive the API
+    (/yolo, /send).  So raw HTML renders as text, as in the Rust and C++
+    editions, and a link or image with a script-capable scheme
+    (javascript:, data:, ...) loses its URL."""
+
+    def extendMarkdown(self, md):
+        md.preprocessors.deregister("html_block")
+        md.inlinePatterns.deregister("html")
+        md.treeprocessors.register(_SafeUrls(md), "safe_urls", 0)
+
+
 # One reusable parser guarded by a lock; constructing a fresh Markdown() per
 # message (as _md.markdown() does) is ~6x slower and this runs for every
 # assistant message when a chat page is rendered. The lock keeps concurrent
 # Flask request/worker threads from interleaving reset()/convert().
 _md_parser = _md.Markdown(
-    extensions=["fenced_code", "codehilite", "tables"],
+    extensions=["fenced_code", "codehilite", "tables", _SafeHtml()],
     extension_configs={
         "codehilite": {"css_class": "highlight", "guess_lang": True}
     },

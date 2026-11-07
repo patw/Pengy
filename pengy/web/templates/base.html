@@ -514,14 +514,28 @@
         return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
           .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       }
+      // Spans are [start, end) in code points (Python str indexing), not
+      // UTF-16 units, so an emoji before a match doesn't shift the bolding.
       function highlight(text, spans) {
+        const chars = Array.from(text);
+        const part = (a, b) => esc(chars.slice(a, b).join(''));
         let out = '', pos = 0;
         for (const [start, end] of spans) {
           if (start < pos) continue;
-          out += esc(text.slice(pos, start)) + '<b>' + esc(text.slice(start, end)) + '</b>';
+          out += part(pos, start) + '<b>' + part(start, end) + '</b>';
           pos = end;
         }
-        return out + esc(text.slice(pos));
+        return out + part(pos);
+      }
+      // Code-point spans of each word's first occurrence in a title.
+      function titleSpans(title, terms) {
+        const low = title.toLowerCase();
+        if (Array.from(low).length !== Array.from(title).length) return [];
+        const cp = i => Array.from(low.slice(0, i)).length;
+        return terms.map(t => [low.indexOf(t), t])
+          .filter(([i]) => i >= 0)
+          .map(([i, t]) => [cp(i), cp(i) + Array.from(t).length])
+          .sort((a, b) => a[0] - b[0]);
       }
       function showList() {
         if (controller) { controller.abort(); controller = null; }
@@ -558,12 +572,7 @@
                       + '&terms=' + encodeURIComponent(JSON.stringify(terms));
             }
             const title = res.title || 'Untitled';
-            const lowTitle = title.toLowerCase();
-            const titleSpans = lowTitle.length === title.length
-              ? terms.map(t => [lowTitle.indexOf(t), lowTitle.indexOf(t) + t.length])
-                     .filter(([start]) => start >= 0).sort((a, b) => a[0] - b[0])
-              : [];
-            let html = '<div class="result-title">' + highlight(title, titleSpans) + '</div>';
+            let html = '<div class="result-title">' + highlight(title, titleSpans(title, terms)) + '</div>';
             for (const hit of res.hits) {
               html += '<div class="result-hit">' + (hit.role === 'user' ? 'You: ' : 'AI: ')
                     + highlight(hit.snippet, hit.spans) + '</div>';
@@ -573,7 +582,7 @@
           }
           const n = data.results.length;
           statusEl.textContent = data.truncated
-            ? `First ${n} chats shown. Add words to narrow the search.`
+            ? `First ${n} chats shown. Add words to narrow the search. Esc to go back.`
             : (n ? `${n} chat${n === 1 ? '' : 's'} found. Esc to go back.` : 'No chats match. Esc to go back.');
         } catch (err) {
           if (err.name !== 'AbortError') statusEl.textContent = 'Search failed: ' + err;
