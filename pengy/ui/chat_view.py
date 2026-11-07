@@ -1,5 +1,6 @@
 """Chat view with markdown rendering for Pengy."""
 import base64
+import html
 import json
 import os
 import re
@@ -61,6 +62,7 @@ img {{ max-width: 600px; }}
 .reasoning-link {{ color:{theme['reasoning_fg']}; text-decoration:none; font-weight:bold; }}
 .reasoning-body {{ color:{theme['muted']}; font-size:0.85em; white-space:pre-wrap; word-wrap:break-word; margin-top:4px; }}
 .notice-card {{ border:1px solid {theme['notice_border']}; padding:6px 10px; margin:6px 0; background-color:{theme['notice_bg']}; color:{theme['notice_fg']}; }}
+.search-hit {{ background-color:{theme['selection']}; font-weight:bold; }}
 .error-card {{ border:1px solid {theme['error_border']}; padding:6px 10px; margin:6px 0; background-color:{theme['error_bg']}; color:{theme['error_fg']}; }}
 h1 {{ font-size:1.4em; }}
 h2 {{ font-size:1.3em; }}
@@ -72,6 +74,30 @@ h4, h5, h6 {{ font-size:1em; }}
 # Within this many pixels of the bottom, treat the view as "pinned" so new
 # content auto-scrolls into view instead of pushing the user's reading spot.
 _BOTTOM_MARGIN = 30
+
+# Splits rendered HTML into tags and text, so search words are only marked
+# in the text between tags.
+_TAG_RE = re.compile(r"(<[^>]*>)")
+
+
+def mark_terms(html_text: str, terms: list[str]) -> str:
+    """Wrap each search word in rendered *html_text* in a search-hit span.
+
+    Words are matched case-insensitively against the escaped text, so a word
+    holding ``&`` or ``<`` still finds its entity form.  A word split across
+    tags (e.g. pygments tokens in a code block) is not marked.
+    """
+    # Markdown output leaves quotes bare; user messages escape them as &quot;.
+    escaped = {e for t in terms if t
+               for e in (html.escape(t, quote=False), html.escape(t).replace("&#x27;", "'"))}
+    if not escaped:
+        return html_text
+    pattern = re.compile("|".join(re.escape(t) for t in sorted(escaped, key=len, reverse=True)),
+                         re.IGNORECASE)
+    parts = _TAG_RE.split(html_text)
+    for i in range(0, len(parts), 2):  # even parts are text, odd are tags
+        parts[i] = pattern.sub(lambda m: f'<span class="search-hit">{m.group(0)}</span>', parts[i])
+    return "".join(parts)
 
 
 class ChatView(QTextBrowser):
@@ -91,6 +117,8 @@ class ChatView(QTextBrowser):
         self._theme = get_theme()
         self._expanded_tools = set()
         self._expanded_reasoning: set[int] = set()
+        # Search hits being shown: view index -> words to mark (see reveal_hits).
+        self._hit_marks: dict[int, list[str]] = {}
         self._image_cache: dict[str, bytes] = {}   # url -> raw bytes (b"" = failed)
         self._image_pending: set[str] = set()
         self._image_lock = threading.Lock()
@@ -318,17 +346,25 @@ class ChatView(QTextBrowser):
                 return
         super().mousePressEvent(event)
 
-    def append_message(self, role: str, content, *, reasoning_content: str = None, render: bool = True):
+    def append_message(self, role: str, content, *, reasoning_content: str = None,
+                       render: bool = True, source: int | None = None):
+        """Add one message.  *source* is the user/assistant message's index in
+        ``chat["messages"]``, which search hits point at (see reveal_hits)."""
         if role == "user":
             attachments = []
             if isinstance(content, dict):
                 attachments = content.get("attachments") or []
                 content = content.get("content", "")
-            self._messages.append({"role": "user", "content": content, "attachments": attachments})
+            self._messages.append({"role": "user", "content": content, "attachments": attachments,
+                                   "source": source})
             self._html_cache.append(None)
+            if render:
+                # Sending a message ends a search jump: back to following the chat.
+                self._clear_hit_marks()
+                self._auto_scroll = True
         elif role == "assistant":
             if content:
-                msg = {"role": "assistant", "content": content}
+                msg = {"role": "assistant", "content": content, "source": source}
                 if reasoning_content:
                     msg["reasoning_content"] = reasoning_content
                 self._messages.append(msg)
@@ -375,8 +411,46 @@ class ChatView(QTextBrowser):
         self._html_cache = []
         self._expanded_tools = set()
         self._expanded_reasoning = set()
+        self._hit_marks = {}
         self._auto_scroll = True
         super().clear()
+
+    # ── search hits ───────────────────────────────────────────────────
+
+    def reveal_hits(self, sources: list[int], terms: list[str]) -> bool:
+        """Mark *terms* in the messages whose chat index is in *sources* and
+        scroll the first one into view.  False if none of them is shown here
+        (e.g. the chat was redacted since the search ran)."""
+        wanted = set(sources)
+        found = [i for i, m in enumerate(self._messages)
+                 if m.get("source") is not None and m["source"] in wanted]
+        self._clear_hit_marks()
+        if not found:
+            return False
+        for idx in found:
+            self._hit_marks[idx] = list(terms)
+            self._invalidate(idx)
+        # Stay put on later renders instead of snapping back to the bottom.
+        self._auto_scroll = False
+        self._render()
+        # The anchor's position is only known once Qt has laid out the new
+        # document, and this must run after any pending scroll-to-bottom.
+        QTimer.singleShot(0, self._scroll_to_hit)
+        return True
+
+    def _scroll_to_hit(self):
+        self._rendering = True
+        self.scrollToAnchor("pengy-hit")
+        # A little of the previous message above it, so the hit isn't flush
+        # against the top edge.
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.value() - 24)
+        self._rendering = False
+
+    def _clear_hit_marks(self):
+        for idx in self._hit_marks:
+            self._invalidate(idx)
+        self._hit_marks = {}
 
     def _on_scroll_changed(self, value: int):
         """Update the pinned-to-bottom flag from a *genuine* user scroll.
@@ -403,11 +477,16 @@ class ChatView(QTextBrowser):
         if self._auto_scroll:
             self._rendering = False
             # maximum() is stale until Qt lays out the new document, so defer.
-            QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(
-                self.verticalScrollBar().maximum()))
+            QTimer.singleShot(0, self._scroll_to_bottom)
         else:
             scrollbar.setValue(prev_pos)
             self._rendering = False
+
+    def _scroll_to_bottom(self):
+        # Skipped if a search jump (reveal_hits) landed since this was queued,
+        # as it does right after a chat is opened from a search result.
+        if self._auto_scroll:
+            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
 
     # ── render cache ──────────────────────────────────────────────────
     # Anything that changes a message's *rendered output* must invalidate it:
@@ -444,6 +523,8 @@ class ChatView(QTextBrowser):
             cached = self._html_cache[idx]
             if cached is None:
                 cached = self._render_msg(msg, idx)
+                if self._hit_marks and idx == min(self._hit_marks):
+                    cached = '<a name="pengy-hit"></a>' + cached
                 self._html_cache[idx] = cached
             parts.append(cached)
         parts.append("</body></html>")
@@ -453,6 +534,8 @@ class ChatView(QTextBrowser):
         role = msg["role"]
         if role == "user":
             body = self._escape_html(str(msg.get("content", ""))).replace("\n", "<br>")
+            if idx in self._hit_marks:
+                body = mark_terms(body, self._hit_marks[idx])
             cards = []
             for ref in msg.get("attachments", []) or []:
                 if not isinstance(ref, dict):
@@ -481,6 +564,8 @@ class ChatView(QTextBrowser):
             if reasoning:
                 parts.append(self._render_reasoning_block(idx, reasoning))
             html_content = self._render_markdown(msg["content"])
+            if idx in self._hit_marks:
+                html_content = mark_terms(html_content, self._hit_marks[idx])
             parts.append(
                 '<p class="role-assistant">Assistant &#x1F916;</p>'
                 f'<div style="margin:2px 0 10px 0;">{html_content}</div>'

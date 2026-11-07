@@ -56,7 +56,11 @@
 <a href="{{ url_for('chat_view', chat_id=c.id) }}"
    class="chat-list-item {% if c.id == chat.id %}active{% endif %}"
    data-chat-id="{{ c.id }}">
-  <i class="bi bi-chat-left-text small text-muted flex-shrink-0"></i>
+  <button type="button" class="edit-btn" title="Edit chat (rename, generate title, export)"
+          aria-label="Edit chat"
+          onclick="event.preventDefault(); event.stopPropagation(); openEditChat('{{ c.id }}')">
+    <i class="bi bi-chat-left-text"></i><i class="bi bi-pencil"></i>
+  </button>
   <span class="chat-title">{{ c.title }}</span>
   <form action="{{ url_for('chat_delete', chat_id=c.id) }}" method="post"
         style="display:inline" onclick="event.stopPropagation()">
@@ -83,15 +87,16 @@
   {% for turn in turns %}
 
   {% if turn.type == "user" %}
-  <div class="msg-user">
+  <div class="msg-user"{% if turn.index is not none %} id="msg-{{ turn.index }}"{% endif %}>
     <div class="bubble-user">
-      {% if turn.attachments %}<div class="attachment-grid">{% for attachment in turn.attachments %}{% if attachment.kind == 'image' and attachment.id.startswith('sha256:') %}<img class="attachment-thumb" src="/attachments/{{ attachment.id[7:] }}/thumbnail" alt="{{ attachment.name }}" loading="lazy">{% else %}<div class="attachment-unavailable">Attachment unavailable: {{ attachment.name }}</div>{% endif %}{% endfor %}</div>{% endif %}
-      {{ turn.content }}
+      {#- .bubble-user is white-space: pre-wrap, so template indentation would render -#}
+      {%- if turn.attachments %}<div class="attachment-grid">{% for attachment in turn.attachments %}{% if attachment.kind == 'image' and attachment.id.startswith('sha256:') %}<img class="attachment-thumb" src="/attachments/{{ attachment.id[7:] }}/thumbnail" alt="{{ attachment.name }}" loading="lazy">{% else %}<div class="attachment-unavailable">Attachment unavailable: {{ attachment.name }}</div>{% endif %}{% endfor %}</div>{% endif -%}
+      {{ turn.content -}}
     </div>
   </div>
 
   {% elif turn.type == "assistant" %}
-  <div class="msg-assistant">
+  <div class="msg-assistant"{% if turn.index is not none %} id="msg-{{ turn.index }}"{% endif %}>
     <div class="bubble-assistant">
       <div class="markdown-body">{{ turn.html | safe }}</div>
     </div>
@@ -241,20 +246,32 @@
   </div>
 </div>
 
-<!-- Rename Modal -->
+<!-- Edit Chat Modal: rename, generate a title with the model, export -->
 <div class="modal fade" id="renameModal" tabindex="-1">
-  <div class="modal-dialog modal-sm">
+  <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <h6 class="modal-title">Rename Chat</h6>
+        <h6 class="modal-title">Edit Chat</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
-        <input type="text" id="renameInput" class="form-control"
-               value="{{ chat.title }}" placeholder="Chat title…">
+        <label for="renameInput" class="form-label small text-muted">Title</label>
+        <div class="input-group">
+          <input type="text" id="renameInput" class="form-control"
+                 value="{{ chat.title }}" placeholder="Chat title…">
+          <button class="btn btn-outline-secondary" type="button" id="generateTitleBtn"
+                  onclick="generateTitle()" title="Generate a title with {{ config.model or 'the configured model' }}">
+            <i class="bi bi-stars"></i> Generate
+          </button>
+        </div>
+        <div class="small text-danger mt-2" id="editChatError" hidden></div>
       </div>
       <div class="modal-footer">
+        <a class="btn btn-sm btn-outline-secondary me-auto" id="editChatExport" href="#" target="_blank">
+          <i class="bi bi-download"></i> Export as Markdown
+        </a>
         <button class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button class="btn btn-sm btn-primary" onclick="doRename()">Rename</button>
+        <button class="btn btn-sm btn-primary" onclick="doRename()">Save</button>
       </div>
     </div>
   </div>
@@ -312,7 +329,8 @@ let pendingFiles = [];
 let wakeLock = null;
 
 document.addEventListener('DOMContentLoaded', () => {
-  scrollToBottom();
+  if (!revealSearchHits()) scrollToBottom();
+  window.addEventListener('hashchange', revealSearchHits);
   confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
   questionModal = new bootstrap.Modal(document.getElementById('questionModal'));
   sudoModal    = new bootstrap.Modal(document.getElementById('sudoModal'));
@@ -392,6 +410,66 @@ function isNearBottom() {
 function updateJumpBtn() {
   const btn = document.getElementById('jumpBottomBtn');
   if (btn) btn.classList.toggle('show', !isNearBottom());
+}
+
+// ── Search hits ───────────────────────────────────────────────
+// A sidebar search result links here as #hits=3,7&terms=["nginx"]: the hit
+// messages' indexes in chat.messages (the msg-N ids) and the words to mark.
+// Marks the words in those messages and scrolls to the first one.
+
+function markTerms(root, terms) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const text = node.nodeValue;
+    const low = text.toLowerCase();
+    if (low.length !== text.length) continue;  // positions would not line up
+    const ranges = [];
+    for (const term of terms) {
+      for (let i = low.indexOf(term); i >= 0; i = low.indexOf(term, i + term.length)) {
+        ranges.push([i, i + term.length]);
+      }
+    }
+    if (!ranges.length) continue;
+    ranges.sort((a, b) => a[0] - b[0]);
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    for (const [start, end] of ranges) {
+      if (start < pos) continue;  // overlaps the previous word
+      frag.append(text.slice(pos, start));
+      const mark = document.createElement('mark');
+      mark.className = 'search-hit';
+      mark.textContent = text.slice(start, end);
+      frag.append(mark);
+      pos = end;
+    }
+    frag.append(text.slice(pos));
+    node.replaceWith(frag);
+  }
+}
+
+function revealSearchHits() {
+  const params = new URLSearchParams(location.hash.slice(1));
+  if (!params.has('hits')) return false;
+  let terms = [];
+  try { terms = JSON.parse(params.get('terms') || '[]'); } catch (e) { /* none */ }
+  terms = terms.filter(t => typeof t === 'string' && t);
+  document.querySelectorAll('#messagesArea mark.search-hit').forEach(m => m.replaceWith(m.textContent));
+  document.getElementById('messagesArea').normalize();
+  const hits = params.get('hits').split(',')
+    .map(n => document.getElementById('msg-' + n)).filter(Boolean);
+  // Drop the hash so a reload goes back to following the chat.
+  history.replaceState(null, '', location.pathname + location.search);
+  if (!hits.length) return false;
+  // A result for this same chat only changes the hash, so the phone sidebar
+  // would otherwise stay open over the hit.
+  const offcanvas = document.getElementById('sidebarOffcanvas');
+  if (offcanvas) bootstrap.Offcanvas.getInstance(offcanvas)?.hide();
+  for (const el of hits) markTerms(el, terms);
+  hits[0].scrollIntoView({block: 'start'});
+  updateJumpBtn();
+  return true;
 }
 
 function scrollToBottom() {
@@ -621,29 +699,95 @@ function redactLast() {
   .catch(err => console.error('Redact error:', err));
 }
 
-// ── Rename ────────────────────────────────────────────────────
+// ── Edit Chat (rename / generate title / export) ─────────────
+// Opened from any sidebar row's chat bubble, or by double-clicking the
+// navbar title for the current chat. Generate only fills the field;
+// nothing is written until Save.
+
+let editChatId = CHAT_ID;
+let editChatOriginal = '';
+let generatedTitle = '';
+let titleRequest = 0;
 
 function showRename() {
-  document.getElementById('renameInput').value = document.title.replace(' — Pengy', '');
+  openEditChat(CHAT_ID);
+}
+
+function openEditChat(chatId) {
+  editChatId = chatId;
+  titleRequest++;  // a reply for a previously opened chat must not land here
+  const row = document.querySelector(`[data-chat-id="${chatId}"] .chat-title`);
+  const current = chatId === CHAT_ID
+    ? document.title.replace(' — Pengy', '')
+    : (row ? row.textContent.trim() : '');
+  editChatOriginal = current;
+  generatedTitle = '';
+  document.getElementById('renameInput').value = current;
+  document.getElementById('editChatExport').href = `/chat/${chatId}/export`;
+  setEditChatError('');
+  resetGenerateBtn();
   renameModal.show();
-  setTimeout(() => document.getElementById('renameInput').focus(), 300);
+  setTimeout(() => document.getElementById('renameInput').select(), 300);
+}
+
+function setEditChatError(text) {
+  const el = document.getElementById('editChatError');
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+function resetGenerateBtn() {
+  const btn = document.getElementById('generateTitleBtn');
+  btn.disabled = false;
+  btn.innerHTML = '<i class="bi bi-stars"></i> Generate';
+}
+
+function generateTitle() {
+  const btn = document.getElementById('generateTitleBtn');
+  const request = ++titleRequest;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Generating…';
+  setEditChatError('');
+  fetch(`/chat/${editChatId}/title/generate`, {method: 'POST'})
+    .then(r => r.json().then(data => ({ok: r.ok, data})))
+    .then(({ok, data}) => {
+      if (request !== titleRequest) return;
+      if (!ok || !data.title) {
+        setEditChatError("Couldn't generate a title: " + (data.error || 'unknown error'));
+        return;
+      }
+      const input = document.getElementById('renameInput');
+      generatedTitle = data.title;
+      input.value = data.title;
+      input.focus();
+    })
+    .catch(err => {
+      if (request === titleRequest) setEditChatError("Couldn't generate a title: " + err);
+    })
+    .finally(() => { if (request === titleRequest) resetGenerateBtn(); });
 }
 
 function doRename() {
   const newTitle = document.getElementById('renameInput').value.trim();
   if (!newTitle) return;
+  const chatId = editChatId;
+  titleRequest++;
   renameModal.hide();
-  fetch(`/chat/${CHAT_ID}/rename`, {
+  // Saving an untouched title is a no-op, so it can't mark an automatic title
+  // as hand-picked (which would hide it from Bulk Rename).
+  if (newTitle === editChatOriginal && !generatedTitle) return;
+  const source = newTitle === generatedTitle ? 'model' : 'user';
+  fetch(`/chat/${chatId}/rename`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({title: newTitle}),
+    body: JSON.stringify({title: newTitle, source}),
   })
   .then(r => r.json())
   .then(data => {
     if (data.title) {
-      const el = document.querySelector(`[data-chat-id="${CHAT_ID}"] .chat-title`);
+      const el = document.querySelector(`[data-chat-id="${chatId}"] .chat-title`);
       if (el) el.textContent = data.title;
-      document.title = data.title + ' — Pengy';
+      if (chatId === CHAT_ID) document.title = data.title + ' — Pengy';
     }
   });
 }

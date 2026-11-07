@@ -230,8 +230,8 @@ class TestGroupMessages:
         ]
         turns = _group_messages(messages)
         assert len(turns) == 2
-        assert turns[0] == {"type": "user", "content": "hello"}
-        assert turns[1] == {"type": "assistant", "html": _render_md("hi there")}
+        assert turns[0] == {"type": "user", "content": "hello", "index": 0}
+        assert turns[1] == {"type": "assistant", "html": _render_md("hi there"), "index": 1}
 
     def test_tool_use_with_result(self):
         messages = [
@@ -830,6 +830,18 @@ class TestTemplateRendering:
         assert "function setProcessing(val)" in html
         assert html.index("async function acquireWakeLock()") < html.index("function setProcessing(val)")
         assert html.index("function releaseWakeLock()") < html.index("function setProcessing(val)")
+
+    def test_user_bubble_has_no_template_whitespace(self, tmp_dirs):
+        """.bubble-user is pre-wrap, so indentation around the text renders as
+        a blank band and an indent above the message."""
+        from pengy.core.chat_manager import create_chat, save_chat
+
+        chat = create_chat()
+        chat["messages"] = [{"role": "user", "content": "hello\nthere"}]
+        save_chat(chat)
+        with app.test_client() as c:
+            html = c.get(f"/chat/{chat['id']}").data.decode()
+        assert '<div class="bubble-user">hello\nthere</div>' in html
 
     def test_settings_template_renders(self, tmp_dirs):
         with app.test_client() as c:

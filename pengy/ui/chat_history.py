@@ -1,33 +1,88 @@
 """Chat history sidebar for Pengy."""
-import re
+import html
 import math
+import threading
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QListWidget,
     QListWidgetItem, QMenu, QFrame, QLabel, QHBoxLayout,
-    QFileDialog, QMessageBox, QComboBox,
+    QMessageBox, QComboBox, QLineEdit, QStackedWidget,
 )
-from PySide6.QtCore import Signal, Qt, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Signal, Qt, QTimer, QSize
+from PySide6.QtGui import QAction, QKeySequence, QShortcut, QTextDocument
 
+from pengy.core.chat_search import parse_query, search_chats
 from pengy.ui.theme import get_theme, scaled_size
-from pengy.ui.icons import apply_button_icon
+from pengy.ui.icons import apply_button_icon, themed_icon
+
+
+class _ResultsList(QListWidget):
+    """Search results whose rich-text rows re-wrap when the sidebar is resized."""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.relayout_rows()
+
+    def relayout_rows(self):
+        for i in range(self.count()):
+            self.relayout_row(self.item(i))
+
+    def relayout_row(self, item):
+        # QLabel.heightForWidth() undercounts wrapped rich text, so measure the
+        # same HTML in a QTextDocument at the width the row will really get.
+        width = max(50, self.viewport().width() - 4)
+        label = self.itemWidget(item)
+        if label is None:
+            return
+        margins = label.contentsMargins()
+        doc = QTextDocument()
+        doc.setDefaultFont(label.font())
+        doc.setDocumentMargin(0)
+        doc.setHtml(label.text())
+        doc.setTextWidth(width - 8 - margins.left() - margins.right())
+        height = math.ceil(doc.size().height()) + margins.top() + margins.bottom() + 8
+        item.setSizeHint(QSize(width, height))
+
+
+# Result rows keep (hit message indexes, search words) under this role.
+_HITS_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+def highlight(text: str, spans: list) -> str:
+    """HTML-escape *text*, bolding the [start, end) *spans*."""
+    out, pos = [], 0
+    for start, end in spans:
+        if start < pos:
+            continue
+        out.append(html.escape(text[pos:start]))
+        out.append("<b>" + html.escape(text[start:end]) + "</b>")
+        pos = end
+    out.append(html.escape(text[pos:]))
+    return "".join(out)
 
 
 class ChatHistoryWidget(QWidget):
     """Widget for managing chat history in the sidebar."""
 
     chat_selected = Signal(str)
+    # A search result was clicked: chat id, the hit messages' indexes in
+    # chat["messages"], and the search words to mark in them.
+    search_hit_selected = Signal(str, list, list)
     new_chat_requested = Signal()
     settings_requested = Signal()
     tasks_requested = Signal()
     model_changed = Signal(str)
     effort_changed = Signal(str)
+    edit_requested = Signal(str)
+    # (generation, event) from the search thread; stale generations are dropped.
+    _search_event = Signal(int, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_chat_id = None
         self._current_model = ""
         self._theme = get_theme()
+        self._search_generation = 0
+        self._search_cancel = threading.Event()
         self.setup_ui()
         self.apply_theme(self._theme)
 
@@ -36,40 +91,69 @@ class ChatHistoryWidget(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
 
-        # New Chat button
+        # New Chat, Settings and Tasks share one row (Settings and Tasks as
+        # icon buttons), which frees the row the search box sits in.
+        top_row = QHBoxLayout()
+        top_row.setSpacing(4)
         self.new_chat_btn = QPushButton("New Chat")
         self.new_chat_btn.setFixedHeight(36)
         self.new_chat_btn.clicked.connect(lambda: self.new_chat_requested.emit())
-        layout.addWidget(self.new_chat_btn)
+        top_row.addWidget(self.new_chat_btn, 1)
 
-        # Settings button
-        self.settings_btn = QPushButton("Settings")
-        self.settings_btn.setFixedHeight(36)
+        self.settings_btn = QPushButton()
+        self.settings_btn.setToolTip("Settings")
+        self.settings_btn.setAccessibleName("Settings")
         self.settings_btn.clicked.connect(lambda: self.settings_requested.emit())
-        layout.addWidget(self.settings_btn)
+        top_row.addWidget(self.settings_btn)
 
-        # Tasks button
-        self.tasks_btn = QPushButton("Tasks")
-        self.tasks_btn.setFixedHeight(36)
+        self.tasks_btn = QPushButton()
+        self.tasks_btn.setToolTip("Tasks — run a saved prompt template")
+        self.tasks_btn.setAccessibleName("Tasks")
         self.tasks_btn.clicked.connect(lambda: self.tasks_requested.emit())
-        layout.addWidget(self.tasks_btn)
+        top_row.addWidget(self.tasks_btn)
+        layout.addLayout(top_row)
 
-        layout.addSpacing(8)
+        # Search: typing filters the list by title; Enter searches messages.
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search chats (Ctrl+K)")
+        self.search_input.setToolTip(
+            "Type to filter by title. Press Enter to search message text too.\n"
+            "Words can be in any order; \"quote\" an exact phrase.")
+        self.search_input.setClearButtonEnabled(True)
+        self._search_icon_action = self.search_input.addAction(
+            themed_icon("search", self._theme["muted"]), QLineEdit.ActionPosition.LeadingPosition)
+        self.search_input.textChanged.connect(self._on_search_text_changed)
+        self.search_input.returnPressed.connect(self.run_search)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self.search_input,
+                  context=Qt.ShortcutContext.WidgetShortcut,
+                  activated=self.search_input.clear)
+        layout.addWidget(self.search_input)
 
-        # Divider
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(divider)
+        layout.addSpacing(2)
 
-        layout.addSpacing(4)
-
-        # Chat list
+        # Chat list, and the search results that replace it while a message
+        # search is showing.
+        self.list_stack = QStackedWidget()
         self.chat_list = QListWidget()
         self.chat_list.itemClicked.connect(self.on_item_clicked)
         self.chat_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.chat_list.customContextMenuRequested.connect(self.show_context_menu)
-        layout.addWidget(self.chat_list, 1)
+        self.list_stack.addWidget(self.chat_list)
+
+        results_page = QWidget()
+        results_layout = QVBoxLayout(results_page)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.setSpacing(4)
+        self.search_status = QLabel("")
+        self.search_status.setWordWrap(True)
+        results_layout.addWidget(self.search_status)
+        self.results_list = _ResultsList()
+        self.results_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self.results_list.itemClicked.connect(self._on_result_clicked)
+        results_layout.addWidget(self.results_list, 1)
+        self.list_stack.addWidget(results_page)
+        layout.addWidget(self.list_stack, 1)
+        self._search_event.connect(self._on_search_event)
 
         layout.addSpacing(8)
 
@@ -180,8 +264,12 @@ class ChatHistoryWidget(QWidget):
             QFrame {{ border-color: {theme['border']}; }}
         """)
         control_h = scaled_size(36, theme)
-        for button in (self.new_chat_btn, self.settings_btn, self.tasks_btn):
-            button.setFixedHeight(control_h)
+        self.new_chat_btn.setFixedHeight(control_h)
+        for button in (self.settings_btn, self.tasks_btn):
+            button.setFixedSize(control_h, control_h)
+        self.search_input.setFixedHeight(scaled_size(30, theme))
+        self._search_icon_action.setIcon(themed_icon("search", theme["muted"]))
+        self.search_status.setStyleSheet(f"color: {theme['muted']};")
         self.status_label.setStyleSheet(f"font-weight: bold; color: {theme['fg']};")
         apply_button_icon(self.new_chat_btn, "new-chat", theme,
                           size=scaled_size(16, theme))
@@ -219,15 +307,15 @@ class ChatHistoryWidget(QWidget):
         """
 
         action_size = scaled_size(24, self._theme)
-        save_btn = QPushButton()
-        save_btn.setFixedSize(action_size, action_size)
-        save_btn.setToolTip("Save chat as markdown")
-        save_btn.setAccessibleName("Save chat as markdown")
-        apply_button_icon(save_btn, "save", self._theme,
+        edit_btn = QPushButton()
+        edit_btn.setFixedSize(action_size, action_size)
+        edit_btn.setToolTip("Edit chat (rename, generate title, export)")
+        edit_btn.setAccessibleName("Edit chat")
+        apply_button_icon(edit_btn, "edit", self._theme,
                           size=scaled_size(14, self._theme))
-        save_btn.setStyleSheet(btn_style)
-        save_btn.clicked.connect(lambda: self._save_chat_markdown(chat_id))
-        row_layout.addWidget(save_btn)
+        edit_btn.setStyleSheet(btn_style)
+        edit_btn.clicked.connect(lambda: self.edit_requested.emit(chat_id))
+        row_layout.addWidget(edit_btn)
 
         del_btn = QPushButton()
         del_btn.setFixedSize(action_size, action_size)
@@ -254,6 +342,8 @@ class ChatHistoryWidget(QWidget):
             item.setSizeHint(widget.sizeHint())
             self.chat_list.addItem(item)
             self.chat_list.setItemWidget(item, widget)
+        if self.search_input.text():
+            self._apply_title_filter()
 
     def add_chat(self, chat_id: str, title: str):
         """Insert one new row at the top, without touching the other rows.
@@ -271,6 +361,114 @@ class ChatHistoryWidget(QWidget):
         self.chat_list.insertItem(0, item)
         self.chat_list.setItemWidget(item, widget)
 
+    # ── Search ────────────────────────────────────────────────────────────
+
+    def focus_search(self):
+        """Ctrl+K: put the cursor in the search box."""
+        self.search_input.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search_input.selectAll()
+
+    def _on_search_text_changed(self, text: str):
+        # Any edit makes shown message results stale: back to the (title-
+        # filtered) chat list until Enter is pressed again.
+        self._cancel_search()
+        self.list_stack.setCurrentIndex(0)
+        self._apply_title_filter()
+
+    def _apply_title_filter(self):
+        """Hide rows whose title lacks any search word (instant, no file reads)."""
+        terms = parse_query(self.search_input.text())
+        for i in range(self.chat_list.count()):
+            item = self.chat_list.item(i)
+            title = self._item_title(item).lower()
+            self.chat_list.setRowHidden(i, not all(t in title for t in terms))
+
+    def _cancel_search(self):
+        self._search_generation += 1
+        self._search_cancel.set()
+
+    def run_search(self):
+        """Enter: search titles and message text on a background thread."""
+        query = self.search_input.text()
+        if not parse_query(query):
+            return
+        self._cancel_search()
+        cancel = self._search_cancel = threading.Event()
+        generation = self._search_generation
+        self.results_list.clear()
+        self.search_status.setText("Searching…")
+        self.list_stack.setCurrentIndex(1)
+
+        def run():
+            try:
+                for event in search_chats(query, cancelled=cancel.is_set):
+                    if cancel.is_set():
+                        return
+                    self._search_event.emit(generation, event)
+            except Exception as exc:  # noqa: BLE001 - shown in the sidebar
+                self._search_event.emit(generation, {"type": "error", "message": str(exc)})
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_search_event(self, generation: int, event: dict):
+        if generation != self._search_generation:
+            return
+        kind = event["type"]
+        if kind == "result":
+            self._add_result_row(event)
+            n = self.results_list.count()
+            self.search_status.setText(f"{n} chat{'s' if n != 1 else ''} found, searching…")
+        elif kind == "progress":
+            n = self.results_list.count()
+            self.search_status.setText(
+                f"{n} chat{'s' if n != 1 else ''} found, searching… "
+                f"{event['scanned']}/{event['total']}")
+        elif kind == "done":
+            n = event["results"]
+            text = f"{n} chat{'s' if n != 1 else ''} found" if n else "No chats match."
+            if event.get("truncated"):
+                text = f"First {n} chats shown. Add words to narrow the search."
+            self.search_status.setText(text + "  Esc to go back.")
+        elif kind == "error":
+            self.search_status.setText(f"Search failed: {event['message']}")
+
+    def _add_result_row(self, result: dict):
+        terms = parse_query(self.search_input.text())
+        title = result.get("title") or "Untitled"
+        title_spans = []
+        low = title.lower()
+        for term in terms:
+            i = low.find(term)
+            if i >= 0 and len(low) == len(title):
+                title_spans.append([i, i + len(term)])
+        lines = [f"<b>{highlight(title, sorted(title_spans)) if title_spans else html.escape(title)}</b>"]
+        when = str(result.get("created_at", ""))[:10]
+        muted = self._theme["muted"]
+        if when:
+            lines[0] += f" <span style='color:{muted};'>{html.escape(when)}</span>"
+        for hit in result.get("hits", []):
+            who = "You" if hit["role"] == "user" else "AI"
+            lines.append(f"<span style='color:{muted};'>{who}:</span> "
+                         f"{highlight(hit['snippet'], hit['spans'])}")
+        label = QLabel("<br>".join(lines))
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setWordWrap(True)
+        label.setContentsMargins(4, 4, 4, 4)
+        label.setStyleSheet(f"color: {self._theme['fg']}; background: transparent;")
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, result["id"])
+        item.setData(_HITS_ROLE, ([h["index"] for h in result.get("hits", [])], terms))
+        self.results_list.addItem(item)
+        self.results_list.setItemWidget(item, label)
+        self.results_list.relayout_row(item)
+
+    def _on_result_clicked(self, item: QListWidgetItem):
+        chat_id = item.data(Qt.ItemDataRole.UserRole)
+        sources, terms = item.data(_HITS_ROLE) or ([], [])
+        self.current_chat_id = chat_id
+        self.search_hit_selected.emit(chat_id, list(sources), list(terms))
+
     def on_item_clicked(self, item: QListWidgetItem):
         """Handle chat selection."""
         chat_id = item.data(Qt.ItemDataRole.UserRole)
@@ -284,42 +482,14 @@ class ChatHistoryWidget(QWidget):
             return
 
         menu = QMenu(self)
+        chat_id = item.data(Qt.ItemDataRole.UserRole)
+        edit_action = QAction("Edit…", self)
+        edit_action.triggered.connect(lambda: self.edit_requested.emit(chat_id))
+        menu.addAction(edit_action)
         delete_action = QAction("Delete", self)
         delete_action.triggered.connect(lambda: self._delete_item(item))
         menu.addAction(delete_action)
         menu.exec(self.chat_list.mapToGlobal(position))
-
-    def _save_chat_markdown(self, chat_id: str):
-        """Export a chat's messages as a markdown file."""
-        from pengy.core.chat_manager import get_chat
-        chat = get_chat(chat_id)
-        if not chat:
-            return
-
-        lines = [f"# {chat.get('title', 'Chat')}\n"]
-        for msg in chat.get("messages", []):
-            role = msg.get("role")
-            content = msg.get("content") or ""
-            if role == "user":
-                lines.append("**You**\n")
-                lines.append(content)
-                lines.append("\n---\n")
-            elif role == "assistant":
-                lines.append("**Assistant**\n")
-                lines.append(content)
-                lines.append("\n---\n")
-        markdown = "\n".join(lines)
-
-        safe_title = re.sub(r'[^\w\s-]', '', chat.get("title", "chat")).strip()
-        safe_title = re.sub(r'\s+', '_', safe_title) or "chat"
-        default_path = f"{safe_title}.md"
-
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Chat as Markdown", default_path, "Markdown (*.md);;All Files (*)"
-        )
-        if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(markdown)
 
     def _delete_by_id(self, chat_id: str):
         """Delete a chat by ID."""

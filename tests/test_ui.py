@@ -185,7 +185,7 @@ class TestPortableIcons:
 
         names = (
             "settings", "delete", "save", "play", "edit", "refresh",
-            "close", "stop", "attach", "tasks", "new-chat", "file", "image",
+            "close", "stop", "attach", "tasks", "new-chat", "file", "image", "search",
         )
         for name in names:
             pixmap = themed_icon(name, "#123456").pixmap(24, 24)
@@ -202,8 +202,11 @@ class TestPortableIcons:
 
     def test_main_controls_no_longer_depend_on_emoji(self, chat_input, qapp):
         sidebar = ChatHistoryWidget()
-        assert sidebar.settings_btn.text() == "Settings"
-        assert sidebar.tasks_btn.text() == "Tasks"
+        # Settings and Tasks are icon buttons beside New Chat (to free a row
+        # for search), so their names live in the accessible name and tooltip.
+        assert sidebar.settings_btn.accessibleName() == "Settings"
+        assert sidebar.tasks_btn.accessibleName() == "Tasks"
+        assert sidebar.settings_btn.toolTip() and sidebar.tasks_btn.toolTip()
         assert sidebar.settings_btn.property("pengyIcon") == "settings"
         assert sidebar.tasks_btn.property("pengyIcon") == "tasks"
         assert chat_input._attach_btn.text() == ""
@@ -694,7 +697,7 @@ class TestAssistantPreambleRendering:
         view = self._RecordingView()
         # _render_message never touches self, so an unbound call avoids
         # standing up a whole MainWindow.
-        MainWindow._render_message(None, view, msg)
+        MainWindow._render_message(None, view, msg, 0)
         return view.calls
 
     def test_narration_renders_before_tool_cards(self):

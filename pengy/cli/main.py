@@ -21,6 +21,9 @@ from pathlib import Path
 from pengy.core.config import recovery_options, compaction_policy, set_compaction_policy
 from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.llm_client import LLMClient
+from pengy.core.chat_title import generate_title
+from pengy.core.chat_search import text_of, parse_query, search_chats
+from pengy.core.chat_manager import TITLE_SOURCE_MODEL, TITLE_SOURCE_USER
 from pengy.core.chat_manager import (
     load_index, get_chat, create_chat, save_chat, save_chat_progress, delete_chat,
     clean_dangling_tool_calls, elide_old_tool_results, redact_last_message,
@@ -62,8 +65,8 @@ _HISTFILE: Path | None = None
 # Every slash command the REPL dispatches, for tab completion.
 # Keep in sync with PengyCLI._handle_slash and PengyCLI._cmd_help.
 SLASH_COMMANDS = (
-    "/help", "/new", "/show", "/tail", "/rename", "/clear", "/export",
-    "/yolo", "/config", "/model", "/models", "/list", "/load", "/baseurl",
+    "/help", "/new", "/show", "/tail", "/rename", "/title", "/clear", "/export",
+    "/yolo", "/config", "/model", "/models", "/list", "/load", "/search", "/baseurl",
     "/apikey", "/llm-timeout", "/timeout", "/download-max", "/agent", "/context-keep",
     "/auto-compact", "/system", "/delete", "/attach", "/attachments", "/compact", "/redact",
     "/tasks", "/task", "/about", "/quit", "/exit", "/q",
@@ -360,6 +363,7 @@ class PengyCLI:
         self._no_user_notice = False  # report the headless-confirmation notice once
         self._output_mode = "pretty"  # pretty | raw | json | silent
         self._turn_error = None  # set by _report_turn_error, read by single-shot mode
+        self._search_terms: list[str] = []  # last /search, marked by /load <#> <msg#>
         self._update_llm_client()
 
         # "yes to all this turn" — resets each time the LLM returns a fresh
@@ -595,6 +599,9 @@ class PengyCLI:
         elif cmd == "/rename":
             self._cmd_rename(args)
 
+        elif cmd == "/title":
+            self._cmd_title()
+
         elif cmd == "/clear":
             self._cmd_clear()
 
@@ -612,6 +619,9 @@ class PengyCLI:
 
         elif cmd == "/models":
             self._cmd_models()
+
+        elif cmd == "/search":
+            self._cmd_search(args)
 
         elif cmd == "/list":
             self._cmd_list()
@@ -684,6 +694,7 @@ class PengyCLI:
         table.add_row("/show [N]", "Show full conversation (optional: last N messages)")
         table.add_row("/tail [N]", "Show the last N messages (default 5)")
         table.add_row("/rename <title>", "Rename the current chat")
+        table.add_row("/title", "Generate a title for the current chat with the model")
         table.add_row("/clear", "Clear the terminal screen")
         table.add_row("/export [path]", "Export current chat as Markdown")
         table.add_row("/config", "Show current configuration")
@@ -704,7 +715,8 @@ class PengyCLI:
         table.add_row("/tasks", "List saved prompt-template Tasks")
         table.add_row("/task <#>", "Run a Task by its /tasks index, prompting for any %placeholders%")
         table.add_row("/list", "List recent chats")
-        table.add_row("/load <index>", "Load a chat by its /list index")
+        table.add_row("/load <index> [msg#]", "Load a chat by its /list index; msg# (from /search) prints that message")
+        table.add_row("/search <words>", "Search chat titles and messages; /load the # shown")
         table.add_row("/delete <index>", "Delete a chat by its /list index")
         table.add_row("/attach", "Show file attachment help")
         table.add_row("/attachments", "Show durable attachment storage usage (read-only)")
@@ -799,8 +811,26 @@ class PengyCLI:
         new_title = " ".join(args)
         old_title = self.current_chat.get("title", "?")
         self.current_chat["title"] = new_title
+        self.current_chat["title_source"] = TITLE_SOURCE_USER
         save_chat(self.current_chat)
         self.console.print(f"[green]✓ Renamed:[/green] [bold]{old_title}[/bold] → [bold]{new_title}[/bold]")
+
+    def _cmd_title(self):
+        """Ask the configured model for a title and rename the current chat to it."""
+        if not self.current_chat:
+            self.console.print("[dim]No active chat.[/dim]")
+            return
+        try:
+            with self.console.status("[dim]Generating title…[/dim]"):
+                new_title = generate_title(self.config, self.current_chat)
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            self.console.print(f"[red]Couldn't generate a title:[/red] {escape(str(exc))}")
+            return
+        old_title = self.current_chat.get("title", "?")
+        self.current_chat["title"] = new_title
+        self.current_chat["title_source"] = TITLE_SOURCE_MODEL
+        save_chat(self.current_chat)
+        self.console.print(f"[green]✓ Renamed:[/green] [bold]{escape(old_title)}[/bold] → [bold]{escape(new_title)}[/bold]")
 
     def _cmd_clear(self):
         """Clear the terminal screen."""
@@ -1008,12 +1038,56 @@ class PengyCLI:
 
         self.console.print(table)
 
+    def _cmd_search(self, args: list[str]):
+        """Search titles and user/assistant text; numbers are /list indices."""
+        query = " ".join(args)
+        terms = parse_query(query)
+        if not terms:
+            self.console.print('[dim]Usage: /search <words>  (any order; "quote" a phrase)[/dim]')
+            return
+        # Number results the way /list does, so /load <#> opens one directly.
+        position = {entry["id"]: i for i, entry in enumerate(load_index(), 1)}
+        results, done = [], {}
+        with self.console.status("[dim]Searching…[/dim]") as status:
+            for event in search_chats(query):
+                if event["type"] == "result":
+                    results.append(event)
+                elif event["type"] == "progress":
+                    status.update(f"[dim]Searching… {event['scanned']}/{event['total']}[/dim]")
+                elif event["type"] == "done":
+                    done = event
+        if not results:
+            self.console.print("[dim]No chats match.[/dim]")
+            return
+        for result in results:
+            line = Text()
+            line.append(f"{position.get(result['id'], '?'):>4}  ", style="dim")
+            title = Text(_sanitize_display(result.get("title") or "Untitled"), style="bold")
+            title.highlight_words(terms, style="bold yellow", case_sensitive=False)
+            line.append_text(title)
+            line.append(f"  {str(result.get('created_at', ''))[:10]}", style="dim")
+            self.console.print(line)
+            for hit in result["hits"]:
+                # #N is the message number /show uses and /load <#> <N> prints.
+                who = "You:" if hit["role"] == "user" else "AI: "
+                snippet = Text(f"      #{hit['index'] + 1:<4} {who} ", style="dim")
+                body = Text(_sanitize_display(hit["snippet"]))
+                body.highlight_words(terms, style="bold yellow", case_sensitive=False)
+                snippet.append_text(body)
+                self.console.print(snippet)
+        note = (f"First {len(results)} chats shown; add words to narrow the search."
+                if done.get("truncated") else
+                f"{len(results)} chat{'s' if len(results) != 1 else ''} found.")
+        self._search_terms = terms
+        self.console.print(f"[dim]{note} /load <#> to open one, /load <#> <msg#> to read a match.[/dim]")
+
     def _cmd_load(self, args: list[str]):
         if not args:
-            self.console.print("[dim]Usage: /load <index>  (use /list to see indices)[/dim]")
+            self.console.print("[dim]Usage: /load <index> [msg#]  (use /list to see indices)[/dim]")
             return
         try:
             idx = int(args[0]) - 1
+            msg_no = int(args[1].lstrip("#")) if len(args) > 1 else None
         except ValueError:
             self.console.print("[red]Invalid index. Use /list to see available chats.[/red]")
             return
@@ -1038,8 +1112,29 @@ class PengyCLI:
             f"[green]✓ Loaded:[/green] [bold]{self.current_chat['title']}[/bold] "
             f"[dim]({msg_count} messages)[/dim]"
         )
+        if msg_no is not None:
+            self._show_message(msg_no)
+            return
         # Show last exchange for context
         self._cmd_show(["3"])
+
+    def _show_message(self, msg_no: int):
+        """Print message #msg_no (1-based, as /show numbers it) in full, with
+        the last /search's words marked."""
+        msgs = self.current_chat.get("messages", [])
+        if not 1 <= msg_no <= len(msgs):
+            self.console.print(f"[red]No message #{msg_no}; this chat has {len(msgs)}.[/red]")
+            return
+        msg = msgs[msg_no - 1]
+        role = msg.get("role")
+        body = Text(_sanitize_display(text_of(msg.get("content")) or "(no text)"))
+        body.highlight_words(self._search_terms, style="bold yellow", case_sensitive=False)
+        label = {"user": "You", "assistant": "Assistant"}.get(role, str(role).title())
+        self.console.print(Panel(
+            body, title=f"#{msg_no} {label}", title_align="left",
+            border_style="blue" if role == "user" else "green",
+            subtitle=f"/show {len(msgs) - msg_no + 1} to read on from here", subtitle_align="right",
+        ))
 
     def _cmd_delete(self, args: list[str]):
         if not args:

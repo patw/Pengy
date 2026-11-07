@@ -144,9 +144,28 @@ Flask server-side-rendered interface. See [Web UI](#web-ui) section below for de
 ```
 
 ### Left Pane (Sidebar)
-- **+ New Chat button** — Creates a new chat session
-- **⚙ Settings button** — Opens the settings dialog
-- **Chat history list** — Scrollable, sorted newest first; click to load, right-click or trash icon (🗑) to delete
+- **Top row** — **+ New Chat** (stretches), then **⚙ Settings** and **Tasks** as square icon buttons (tooltip + accessible name carry the label). Sharing one row frees the row the search box uses.
+- **Search box** — see "Chat Search" below. Ctrl+K (or Ctrl+Shift+F) focuses it; Esc clears it.
+- **Chat history list** — Scrollable, sorted newest first; click to load, right-click or trash icon (🗑) to delete; pencil to Edit Chat. While a message search is showing, the results list takes its place.
+
+### Chat Search
+Case-insensitive word matching over chat history, newest first. No index and no scoring: a scan of the per-chat files (~0.1–0.4 s for 360 chats / 112 MB), so it runs on **Enter**, off the UI thread, while typing only filters titles. Core: `pengy/core/chat_search.py`; the Rust and C++ editions must follow these rules exactly.
+
+- **Query** — split on whitespace; `"double quotes"` keep a phrase as one word (inner whitespace collapsed to one space); words are lowercased (`str.lower()` / `to_lowercase()` / `QString::toLower()`) and de-duplicated. An empty query searches nothing.
+- **What is searched** — the title, plus the text of `user` and `assistant` messages (string content, or the `text` parts of list content). **Not** tool calls or tool results: on a real history, raw-file matching hit 31 chats for "nfs" where 2 actually discussed it — the rest was tool output.
+- **Match** — every word must appear somewhere in the chat (title or any searched message; words may be in different messages). Substring match, no stemming or accent folding.
+- **Order** — first, chats whose *title* holds every word (from the index, no file read, `hits` empty), newest first; then the remaining chats with messages, newest first. Stop after 100 results and report `truncated`.
+- **Pre-check** — before parsing a chat file, each word that is plain ASCII and contains no `"` or `\` must occur in the file's lowercased bytes, or the file is skipped. Other words can only be decided after parsing (Python writes non-ASCII as `\uXXXX`; every edition escapes quotes and backslashes).
+- **Hits** — per chat, up to 3 messages containing words, preferring those holding more of the words, then earlier ones; returned in message order as `{index, role, snippet, spans}`. `index` is the position in `chat["messages"]`, which jump-to-message uses (below).
+- **Snippet** — strip Markdown markers (```` ```lang ````, `**`, `__`, `` ` ``), collapse whitespace, take 80 characters starting 30 before the first matching word (shifted left at the end of the text), with `…` where cut; `spans` are `[start, end)` offsets of every word inside the returned snippet, for bolding. If lowercasing changes the text's length, start at the beginning and return no spans.
+- **Events** (`search_chats()`): `result` `{id, title, created_at, title_match, hits}`, `progress` `{scanned, total}` after each file, `done` `{results, truncated, cancelled}`; cancellation is checked between files.
+
+Frontends: the desktop sidebar (typing hides rows whose title lacks a word; Enter shows results with snippets in place of the list, streamed with an `n/total` status; any edit or Esc returns to the list; clicking a result opens the chat); the web sidebar (same, results from `GET /search?q=` in one JSON response); the CLI `/search <words>`, which numbers results with their `/list` index so `/load <#>` opens one.
+
+**Jump to message.** Opening a result with hits shows its hit messages instead of the end of the chat. Title-only matches (no hits) open normally.
+- **Desktop** — clicking a result opens (or switches to) the chat, marks the words in each hit message (`search-hit` span: theme `selection` background, bold; only in the message body, not its label or reasoning), and scrolls so the first hit sits just below the top edge. Each rendered user/assistant message records its `chat["messages"]` index (`source`), including messages appended live, so this also works on an already-open tab. The view stops following new output until the user scrolls to the bottom or sends a message; sending clears the marks. If no hit is in the view (e.g. redacted since the search ran), the chat is just shown.
+- **Web** — user and assistant turns carry `id="msg-<index>"` (index taken *before* the dangling-tool-call repair, which can insert placeholders). A result links to `/chat/<id>#hits=<i>,<j>&terms=<JSON array>`; on load (and on `hashchange`, for a result in the chat already open) the page wraps each word in the hit messages' text nodes in `<mark class="search-hit">`, scrolls the first into view instead of to the bottom, drops the hash with `history.replaceState`, and closes the phone sidebar.
+- **CLI** — `/search` prefixes each snippet with `#N`, the 1-based message number `/show` uses. `/load <#> <N>` (a leading `#` on N is accepted) loads the chat and prints message N in full as plain text in a panel, the last `/search`'s words highlighted, instead of the last 3 messages; an out-of-range N says how many messages the chat has.
 - **Quick settings panel** — Status dot, per-tab model and Effort selectors, cumulative chat token totals, and last-final-response tok/s. Tool confirmation remains in Settings.
 
 ### Per-chat Effort and last-response throughput (v1.11.0)
@@ -269,7 +288,8 @@ Exit is bounded: cleanup takes milliseconds, and if the main thread cannot get t
 | `/agent <string>` | Set the user agent string |
 | `/context-keep <n>` | Set context elision keep-turns (0 = keep all) |
 | `/list` | List recent chats with index, title, message count, and creation date |
-| `/load <index>` | Load a chat by its `/list` index |
+| `/load <index> [msg#]` | Load a chat by its `/list` index; with `msg#` (as `/search` and `/show` number messages), print that message instead of the last 3 |
+| `/search <words>` | Search titles and user/assistant messages (see "Chat Search"); results are numbered with their `/list` index |
 | `/delete <index>` | Delete a chat by its `/list` index |
 | `/attach` | Show attachment help; use `@path` inline in a prompt |
 | `/attachments` | Show durable attachment-storage usage (read-only) |
@@ -362,6 +382,7 @@ The worker remains in the `_workers` dict until the SSE endpoint has drained its
 | POST | `/chat/<id>/delete` | Delete chat and redirect to index |
 | GET | `/chat/<id>/export` | Download the chat as a Markdown file |
 | POST | `/chat/<id>/rename` | Rename a chat |
+| GET | `/search?q=<words>` | Chat search (see "Chat Search"): `{results: [...], truncated}` |
 | POST | `/chat/<id>/command` | Web slash commands (`/new /yolo /model /rename /export /help`) typed in the chat input |
 | GET | `/models` | Fetch available models from the endpoint (settings page Fetch button) |
 | GET/POST | `/settings` | View/update all config fields |

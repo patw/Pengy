@@ -159,6 +159,9 @@ def _summarize(chat: dict) -> dict:
         "created_at": chat.get("created_at", ""),
         "msg_count": len(chat.get("messages", [])),
         "preview": _preview_of(chat),
+        # Always present (None = automatic title) so a missing key means
+        # "entry written before this field existed / by another edition".
+        "title_source": chat.get("title_source"),
     }
 
 
@@ -396,13 +399,41 @@ def save_chat(chat: dict) -> None:
     _update_index_entry(chat)
 
 
+# Where a chat's title came from, stored as chat["title_source"].  Absent means
+# the automatic first-message title (and every chat from before this field).
+# Bulk rename only touches absent ones, which makes it resumable and leaves
+# hand-picked titles alone.
+TITLE_SOURCE_MODEL = "model"
+TITLE_SOURCE_USER = "user"
+TITLE_SOURCES = (TITLE_SOURCE_MODEL, TITLE_SOURCE_USER)
+
+
+def set_chat_title(chat_id: str, title: str, source: str | None = None) -> bool:
+    """Change only the title (and its source) of a stored chat.
+
+    Returns ``False`` if the chat no longer exists.  Re-reads the chat
+    immediately before writing instead of saving a copy the caller loaded
+    earlier, so a long-running caller (bulk rename) cannot write back stale
+    messages over ones another frontend saved in the meantime.
+    """
+    chat = get_chat(chat_id)
+    if not chat:
+        return False
+    chat["title"] = title
+    if source:
+        chat["title_source"] = source
+    save_chat(chat)
+    return True
+
+
 def save_chat_progress(chat: dict) -> bool:
     """Save an in-flight chat without clobbering out-of-band metadata edits.
 
     A worker holds its own snapshot of the chat dict for the whole run, so a
     rename that lands mid-run (a different copy, saved by another thread) would
-    be overwritten by the worker's next write.  Adopt the on-disk title first;
-    messages still come from the worker's copy, which is the newer one.
+    be overwritten by the worker's next write.  Adopt the on-disk title and
+    title_source first; messages still come from the worker's copy, which is
+    the newer one.
 
     Returns ``False`` when the write failed.  Mid-turn persistence is not a
     precondition of the turn: the model's work is done and the tools have
@@ -414,9 +445,10 @@ def save_chat_progress(chat: dict) -> bool:
         return True
     on_disk = _safe_json_load(_chat_file(chat["id"]), expect=dict)
     if on_disk:
-        title = on_disk.get("title")
-        if title and title != chat.get("title"):
-            chat["title"] = title
+        for key in ("title", "title_source"):
+            value = on_disk.get(key)
+            if value and value != chat.get(key):
+                chat[key] = value
     try:
         save_chat(chat)
         return True

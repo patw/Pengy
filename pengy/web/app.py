@@ -26,9 +26,12 @@ from pengy.core.config import recovery_options, set_compaction_policy
 from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.model_cache import cached_models_for, load_model_cache, save_model_cache
 from pengy.core.llm_client import LLMClient
+from pengy.core.chat_title import generate_title
+from pengy.core.chat_search import search_chats
 from pengy.core.chat_manager import (
     create_chat, delete_chat, get_chat, load_index, save_chat, save_chat_progress,
     clean_dangling_tool_calls, elide_old_tool_results, redact_last_message, add_usage,
+    TITLE_SOURCES, TITLE_SOURCE_MODEL, TITLE_SOURCE_USER,
 )
 from pengy.core.image_utils import preprocess as preprocess_image
 from pengy.core.attachments import derivative_path, import_image_bytes, resolve_history, attachment_label
@@ -312,7 +315,13 @@ def _build_messages(chat: dict, config: dict) -> list[dict]:
 
 
 def _group_messages(raw_messages: list[dict]) -> list[dict]:
-    """Convert raw messages list to display-ready turn groups."""
+    """Convert raw messages list to display-ready turn groups.
+
+    User and assistant turns carry ``index``, the message's position in
+    *raw_messages*, which search hits point at.  The repair below can insert
+    placeholder tool results, so positions are taken before it.
+    """
+    positions = {id(m): i for i, m in enumerate(raw_messages)}
     messages = clean_dangling_tool_calls(list(raw_messages))
     turns = []
     i = 0
@@ -321,7 +330,8 @@ def _group_messages(raw_messages: list[dict]) -> list[dict]:
         role = msg.get("role", "")
 
         if role == "user":
-            turns.append({"type": "user", "content": msg.get("content", "")})
+            turns.append({"type": "user", "content": msg.get("content", ""),
+                          "index": positions.get(id(msg))})
             i += 1
 
         elif role == "assistant":
@@ -330,7 +340,8 @@ def _group_messages(raw_messages: list[dict]) -> list[dict]:
 
             if tool_calls:
                 if content:
-                    turns.append({"type": "assistant", "html": _render_md(content)})
+                    turns.append({"type": "assistant", "html": _render_md(content),
+                                  "index": positions.get(id(msg))})
 
                 events = []
                 for tc in tool_calls:
@@ -367,7 +378,8 @@ def _group_messages(raw_messages: list[dict]) -> list[dict]:
 
             else:
                 if content:
-                    turns.append({"type": "assistant", "html": _render_md(content)})
+                    turns.append({"type": "assistant", "html": _render_md(content),
+                                  "index": positions.get(id(msg))})
                 i += 1
 
         elif role in ("tool", "system"):
@@ -1257,14 +1269,37 @@ def chat_rename(chat_id: str):
     new_title = (data.get("title") or "").strip()
     if not new_title:
         return jsonify({"error": "Empty title"}), 400
+    # "model" when the client saves an unedited generated title; anything a
+    # person typed is "user", which Bulk Rename never overwrites.
+    source = data.get("source")
+    if source not in TITLE_SOURCES:
+        source = TITLE_SOURCE_USER
 
     chat = get_chat(chat_id)
     if not chat:
         return jsonify({"error": "Chat not found"}), 404
 
     chat["title"] = new_title
+    chat["title_source"] = source
     save_chat(chat)
     return jsonify({"status": "ok", "title": new_title})
+
+
+@app.route("/chat/<chat_id>/title/generate", methods=["POST"])
+def chat_generate_title(chat_id: str):
+    """Suggest a title with the configured model. Does not save it."""
+    chat = get_chat(chat_id)
+    if not chat:
+        return jsonify({"error": "Chat not found"}), 404
+    config = load_config()
+    config["model"] = config.get("model") or _first_cached_model(config)
+    try:
+        title = generate_title(config, chat)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 - reported to the browser
+        return jsonify({"error": str(exc) or exc.__class__.__name__}), 502
+    return jsonify({"title": title})
 
 
 @app.route("/chat/<chat_id>/redact", methods=["POST"])
@@ -1362,13 +1397,29 @@ def chat_command(chat_id: str):
         chat = get_chat(chat_id)
         if chat:
             chat["title"] = new_title
+            chat["title_source"] = TITLE_SOURCE_USER
+            save_chat(chat)
+            return jsonify({"type": "rename", "title": new_title})
+
+    if cmd in ("/title",):
+        chat = get_chat(chat_id)
+        if chat:
+            title_config = dict(config)
+            title_config["model"] = title_config.get("model") or _first_cached_model(title_config)
+            try:
+                new_title = generate_title(title_config, chat)
+            except Exception as exc:  # noqa: BLE001 - reported in the chat
+                return jsonify({"type": "message",
+                                "message": f"Couldn't generate a title: {exc}"})
+            chat["title"] = new_title
+            chat["title_source"] = TITLE_SOURCE_MODEL
             save_chat(chat)
             return jsonify({"type": "rename", "title": new_title})
 
     if cmd in ("/help",):
         return jsonify({"type": "message", "message": (
             "Slash commands: /new /yolo [none|safe|all] /model <name> "
-            "/rename <title> /export /help"
+            "/rename <title> /title /export /help"
         )})
 
     return jsonify({"type": "message", "message": f"Unknown command: {cmd}. Try /help."})
@@ -1379,6 +1430,23 @@ def chat_command(chat_id: str):
 # client fills placeholders, renders here, then feeds the result through the
 # normal /send path — same "render, then route through the ordinary send
 # flow" shape as the GUI's task_played signal.
+
+# ─── Chat search ──────────────────────────────────────────────────────────────
+# Case-insensitive word matching over titles and user/assistant text (see
+# pengy/core/chat_search.py). The sidebar filters titles client-side as you
+# type and calls this on Enter.
+
+@app.route("/search")
+def search_view():
+    query = request.args.get("q", "")
+    results, done = [], {}
+    for event in search_chats(query):
+        if event["type"] == "result":
+            results.append(event)
+        elif event["type"] == "done":
+            done = event
+    return jsonify({"results": results, "truncated": bool(done.get("truncated"))})
+
 
 @app.route("/tasks")
 def list_tasks():

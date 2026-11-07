@@ -9,13 +9,13 @@ from PySide6.QtWidgets import (
     QButtonGroup, QScrollArea, QGroupBox, QTabBar, QMessageBox,
 )
 from PySide6.QtCore import Qt, QThread, QTimer
-from PySide6.QtGui import QTextOption
+from PySide6.QtGui import QKeySequence, QShortcut, QTextOption
 
 from pengy.core.config import recovery_options
 from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
 from pengy.core.model_cache import cached_models_for
 from pengy.core.chat_manager import (
-    load_index, create_chat, save_chat, get_chat, delete_chat,
+    load_index, create_chat, save_chat, get_chat, delete_chat, TITLE_SOURCE_MODEL,
     clean_dangling_tool_calls, elide_old_tool_results, redact_last_message,
     add_usage,
 )
@@ -28,6 +28,10 @@ from pengy.ui.chat_input import ChatInputWidget
 from pengy.ui.chat_worker import ChatWorker
 from pengy.ui.settings_dialog import SettingsDialog
 from pengy.ui.tasks_dialog import TasksDialog
+from pengy.ui.edit_chat_dialog import EditChatDialog
+from pengy.ui.bulk_rename import (
+    BulkRenameDialog, BulkRenameWorker, bulk_rename_targets, confirm_bulk_rename,
+)
 from pengy.ui.theme import get_theme, qt_app_stylesheet, scaled_size
 from pengy.ui.icons import apply_button_icon
 
@@ -79,8 +83,13 @@ class MainWindow(QMainWindow):
         self.load_chat_list()
 
         self.chat_history.chat_selected.connect(self._on_chat_selected)
+        self.chat_history.search_hit_selected.connect(self._on_search_hit_selected)
         self.chat_history.settings_requested.connect(self.open_settings)
         self.chat_history.tasks_requested.connect(self.open_tasks)
+        self.chat_history.edit_requested.connect(self.edit_chat)
+        # Ctrl+K (and the familiar Ctrl+Shift+F) jump to the sidebar search.
+        for keys in ("Ctrl+K", "Ctrl+Shift+F"):
+            QShortcut(QKeySequence(keys), self, activated=self.chat_history.focus_search)
         self.chat_history.model_changed.connect(self._on_model_changed)
         self.chat_history.effort_changed.connect(self._on_effort_changed)
         self._refresh_model_combo()
@@ -195,8 +204,8 @@ class MainWindow(QMainWindow):
         chat_view.apply_theme(self._theme)
 
         # Render existing messages into the new ChatView
-        for msg in chat.get("messages", []):
-            self._render_message(chat_view, msg)
+        for index, msg in enumerate(chat.get("messages", [])):
+            self._render_message(chat_view, msg, index)
         chat_view.render_now()
 
         self.open_tabs[chat["id"]] = session
@@ -327,6 +336,13 @@ class MainWindow(QMainWindow):
                     return
         else:
             self._load_into_new_tab(chat_id)
+
+    def _on_search_hit_selected(self, chat_id: str, sources: list, terms: list):
+        """A search result was clicked: open its chat and show the hits."""
+        self._on_chat_selected(chat_id)
+        session = self._tab_for_chat(chat_id)
+        if session and sources:
+            session.chat_view.reveal_hits(sources, terms)
 
     def _load_into_new_tab(self, chat_id: str):
         """Load a chat from disk into a new tab and switch to it."""
@@ -502,6 +518,7 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         """Open the settings dialog."""
         dialog = SettingsDialog(self.config, self)
+        dialog.bulk_rename_requested.connect(lambda: self.bulk_rename_chats(dialog))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.get_config()
             save_config(self.config)
@@ -521,15 +538,67 @@ class MainWindow(QMainWindow):
         dialog.task_played.connect(lambda prompt: self.send_message(prompt))
         dialog.exec()
 
+    def bulk_rename_chats(self, parent=None):
+        """Retitle every chat with the saved default model (Settings → UI)."""
+        parent = parent or self
+        redo = confirm_bulk_rename(parent, self.config)
+        if redo is None:
+            return
+        chat_ids = bulk_rename_targets(redo)
+        worker = BulkRenameWorker(self.config, chat_ids, redo)
+        worker.renamed.connect(self._apply_title)
+        dialog = BulkRenameDialog(worker, len(chat_ids), parent)
+        worker.start()
+        dialog.exec()
+
+    def _apply_title(self, chat_id: str, title: str):
+        """Reflect a bulk-rename title (already on disk) in the sidebar and any open tab."""
+        session = self.open_tabs.get(chat_id)
+        if session:
+            # The tab saves its own copy, and one of those saves may have landed
+            # between the worker's write and this slot, so put the title in the
+            # copy and write it again.
+            session.chat["title"] = title
+            session.chat["title_source"] = TITLE_SOURCE_MODEL
+            save_chat(session.chat)
+            self._update_tab_title(session)
+        self.chat_history.update_chat_title(chat_id, title)
+
+    def edit_chat(self, chat_id: str):
+        """Rename / generate a title for / export a chat from the sidebar."""
+        # An open tab's chat dict is the live copy (it may hold messages the
+        # disk hasn't caught up with, and its next save would clobber a title
+        # written only to disk), so edit that one when there is one.
+        session = self.open_tabs.get(chat_id)
+        chat = session.chat if session else get_chat(chat_id)
+        if not chat:
+            return
+        dialog = EditChatDialog(chat, self.config, theme=self._theme, parent=self)
+        if dialog.exec() != EditChatDialog.DialogCode.Accepted:
+            return
+        title, source = dialog.title(), dialog.title_source()
+        if title == chat.get("title") and source == chat.get("title_source"):
+            return
+        chat["title"] = title
+        if source:
+            chat["title_source"] = source
+        else:
+            chat.pop("title_source", None)
+        save_chat(chat)
+        self.chat_history.update_chat_title(chat_id, title)
+        if session:
+            self._update_tab_title(session)
+
     # ── Message rendering ─────────────────────────────────────────
 
-    def _render_message(self, chat_view: ChatView, msg: dict):
-        """Render a single message into a ChatView (used when loading a tab)."""
+    def _render_message(self, chat_view: ChatView, msg: dict, index: int):
+        """Render ``chat["messages"][index]`` into a ChatView (used when loading a tab)."""
         role = msg.get("role")
         if role == "user":
             labels = "\n".join(attachment_label(ref) for ref in msg.get("attachments", []) if isinstance(ref, dict))
             content = msg.get("content", "")
-            chat_view.append_message("user", {"content": content, "attachments": msg.get("attachments", [])}, render=False)
+            chat_view.append_message("user", {"content": content, "attachments": msg.get("attachments", [])},
+                                     render=False, source=index)
         elif role == "assistant":
             # Narration comes first: the model wrote it *before* deciding on the
             # tool calls in the same message, and that is the order the live
@@ -538,7 +607,7 @@ class MainWindow(QMainWindow):
                 chat_view.append_message(
                     "assistant", msg["content"],
                     reasoning_content=msg.get("reasoning_content"),
-                    render=False,
+                    render=False, source=index,
                 )
             if msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
@@ -584,7 +653,8 @@ class MainWindow(QMainWindow):
         user_msg = {"role": "user", "content": text, **({"attachments": refs} if refs else {})}
         session.chat["messages"].append(user_msg)
         display_content = "\n".join([*(attachment_label(ref) for ref in refs), text]).strip()
-        session.chat_view.append_message("user", {"content": text, "attachments": refs})
+        session.chat_view.append_message("user", {"content": text, "attachments": refs},
+                                         source=len(session.chat["messages"]) - 1)
         # Persist before request construction: pasted/temp images are now durable.
         save_chat(session.chat)
 
@@ -745,6 +815,7 @@ class MainWindow(QMainWindow):
                 session.chat_view.append_message(
                     "assistant", preamble,
                     reasoning_content=response["message"].get("reasoning_content"),
+                    source=len(session.chat["messages"]),
                 )
             session.chat["messages"].append(response["message"])
             save_chat(session.chat)
@@ -904,8 +975,8 @@ class MainWindow(QMainWindow):
         save_chat(session.chat)
 
         session.chat_view.clear()
-        for msg in session.chat["messages"]:
-            self._render_message(session.chat_view, msg)
+        for index, msg in enumerate(session.chat["messages"]):
+            self._render_message(session.chat_view, msg, index)
         session.chat_view.render_now()
 
     # ── Tool confirmation ─────────────────────────────────────────
@@ -1075,7 +1146,8 @@ class MainWindow(QMainWindow):
             assistant_msg = response.get("message") or {"role": "assistant", "content": content}
             session.chat["messages"].append(assistant_msg)
             reasoning = assistant_msg.get("reasoning_content") or assistant_msg.get("reasoning")
-            session.chat_view.append_message("assistant", content, reasoning_content=reasoning)
+            session.chat_view.append_message("assistant", content, reasoning_content=reasoning,
+                                             source=len(session.chat["messages"]) - 1)
         save_chat(session.chat)
         if session is self._tab_for_chat(self.active_chat_id):
             self.chat_history.update_token_usage(

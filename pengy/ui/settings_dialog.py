@@ -41,6 +41,8 @@ class SettingsDialog(QDialog):
 
     _models_fetched = Signal(list)
     _models_fetch_failed = Signal(str)
+    #: The owner (MainWindow) runs it: it must keep open tabs in sync.
+    bulk_rename_requested = Signal()
 
     def __init__(self, config: dict, parent=None):
         super().__init__(parent)
@@ -97,6 +99,18 @@ class SettingsDialog(QDialog):
                 break
         self.theme_accent_combo.setToolTip("Highlight color for buttons, links, and selection highlights.")
         ui_layout.addRow(_label("Accent color:", "Highlight color for buttons, links, and selection highlights."), self.theme_accent_combo)
+
+        self.bulk_rename_btn = QPushButton("Bulk Rename Chats")
+        self.bulk_rename_btn.setToolTip(
+            "Generate a new title for every existing chat with the default model.")
+        self.bulk_rename_btn.clicked.connect(self.bulk_rename_requested.emit)
+        ui_layout.addRow(_label("Chat titles:", "Retitle your whole chat history with the model."),
+                         self.bulk_rename_btn)
+        bulk_note = QLabel("Uses the saved default model, one request per chat. "
+                           "Replaces every chat's current title.")
+        bulk_note.setWordWrap(True)
+        bulk_note.setStyleSheet(f"color: {self._theme['muted']};")
+        ui_layout.addRow("", bulk_note)
 
         tabs.addTab(ui_tab, "UI")
 
