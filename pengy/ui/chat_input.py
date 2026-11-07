@@ -49,6 +49,44 @@ def _is_text_file(path: Path) -> bool:
         return False
 
 
+def _local_file_paths(mime: QMimeData) -> list[Path]:
+    """Local files carried by a drag, filtered to ones that still exist."""
+    if not mime.hasUrls():
+        return []
+    return [Path(url.toLocalFile()) for url in mime.urls()
+            if url.isLocalFile() and Path(url.toLocalFile()).is_file()]
+
+
+def _image_from_mime(mime: QMimeData) -> Path | None:
+    """Save an image carried by a drag to a temp file and return its path.
+
+    Browsers, chat clients and screenshot tools hand images over as raw image
+    data instead of a file URL, so a URL-only drop handler ignores them
+    silently. Some sources provide both forms, so callers should try
+    _local_file_paths() first and fall back to this.
+    """
+    if not mime.hasImage():
+        return None
+    img_data = mime.imageData()
+    if isinstance(img_data, QPixmap):
+        image = img_data.toImage()
+    elif isinstance(img_data, QImage):
+        image = img_data
+    else:
+        image = QImage(img_data)
+    if image.isNull():
+        return None
+    fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="pengy_clip_")
+    os.close(fd)
+    if not image.save(tmp_path):
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return None
+    return Path(tmp_path)
+
+
 class _InputEdit(QTextEdit):
     submit_pressed = Signal()
     image_pasted = Signal(Path)
@@ -116,20 +154,10 @@ class _InputEdit(QTextEdit):
         self._autosize()
 
     def insertFromMimeData(self, source: QMimeData):
-        if source.hasImage():
-            img_data = source.imageData()
-            if isinstance(img_data, QPixmap):
-                image = img_data.toImage()
-            elif isinstance(img_data, QImage):
-                image = img_data
-            else:
-                image = QImage(img_data)
-            if not image.isNull():
-                fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix="pengy_clip_")
-                os.close(fd)
-                if image.save(tmp_path):
-                    self.image_pasted.emit(Path(tmp_path))
-                    return
+        image_path = _image_from_mime(source)
+        if image_path is not None:
+            self.image_pasted.emit(image_path)
+            return
         super().insertFromMimeData(source)
 
     def _set_file_dragging(self, active: bool):
@@ -138,10 +166,8 @@ class _InputEdit(QTextEdit):
             self.file_drag_active.emit(active)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() and any(
-            url.isLocalFile() and Path(url.toLocalFile()).is_file()
-            for url in event.mimeData().urls()
-        ):
+        mime = event.mimeData()
+        if _local_file_paths(mime) or mime.hasImage():
             self._set_file_dragging(True)
             event.acceptProposedAction()
         else:
@@ -157,13 +183,17 @@ class _InputEdit(QTextEdit):
 
     def dropEvent(self, event):
         self._set_file_dragging(False)
-        if event.mimeData().hasUrls():
-            paths = [Path(url.toLocalFile()) for url in event.mimeData().urls()
-                     if url.isLocalFile() and Path(url.toLocalFile()).is_file()]
-            if paths:
-                self.files_dropped.emit(paths)
-                event.acceptProposedAction()
-                return
+        mime = event.mimeData()
+        paths = _local_file_paths(mime)
+        if paths:
+            self.files_dropped.emit(paths)
+            event.acceptProposedAction()
+            return
+        image_path = _image_from_mime(mime)
+        if image_path is not None:
+            self.image_pasted.emit(image_path)
+            event.acceptProposedAction()
+            return
         event.ignore()
 
     def eventFilter(self, obj, event):
@@ -220,7 +250,7 @@ class ChatInputWidget(QWidget):
         self._edit.submit_pressed.connect(self._on_submit)
         self._edit.image_pasted.connect(self._on_image_pasted)
         self._edit.files_dropped.connect(self._attach_files)
-        self._edit.file_drag_active.connect(self._show_drop_cue)
+        self._edit.file_drag_active.connect(self.show_drop_cue)
         row_layout.addWidget(self._edit)
 
         layout.addWidget(input_row)
@@ -231,7 +261,28 @@ class ChatInputWidget(QWidget):
         self._drop_hint.hide()
         layout.addWidget(self._drop_hint)
 
-    def _show_drop_cue(self, active: bool):
+    def can_accept_drag(self, mime: QMimeData) -> bool:
+        """Whether the payload of a drag can be attached here.
+
+        Exposed so a window-wide drop target can share this widget's rules
+        instead of duplicating them.
+        """
+        return bool(_local_file_paths(mime)) or mime.hasImage()
+
+    def handle_drop(self, mime: QMimeData) -> bool:
+        """Attach a dropped payload. Returns True if anything was taken."""
+        paths = _local_file_paths(mime)
+        if paths:
+            self._attach_files(paths)
+            return True
+        image_path = _image_from_mime(mime)
+        if image_path is not None:
+            self._on_image_pasted(image_path)
+            return True
+        return False
+
+    def show_drop_cue(self, active: bool):
+        """Toggle the "drop to attach" affordance for the current drag."""
         self._drop_hint.setVisible(active)
         self._edit.setProperty("fileDragActive", active)
         # Re-polish to refresh the hover-only border without changing the draft.
