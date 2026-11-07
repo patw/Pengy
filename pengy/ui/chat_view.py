@@ -81,6 +81,11 @@ class ChatView(QTextBrowser):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # QTextBrowser sets acceptDrops by default; a read-only one declines
+        # the drag in that case, so drops already bubble up to MainWindow.
+        # Turn it off explicitly anyway: that fallback is Qt-internal, and an
+        # editable transcript would otherwise start swallowing them.
+        self.setAcceptDrops(False)
         self._messages = []
         # Rendered HTML per message, parallel to _messages (None = needs render).
         # _build_html() re-ran markdown + pygments over the *entire* history on
