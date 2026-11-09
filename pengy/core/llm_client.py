@@ -88,6 +88,15 @@ _MAX_EMPTY_RETRIES = 1
 # retry at the default 300 s timeout prevents admitting another attempt.
 # Identical policy in the Rust and C++ editions.
 _RETRY_CHAIN_GRACE_SECS = 31.0
+# A checkpoint of "at most 500 words" needs ~700-900 answer tokens. At 2048 an
+# answer-room engine (Basalt) gives the thinking 1536 and the answer 512, so the
+# summary always ends at the cap and recovery can never commit.
+_SUMMARY_MAX_TOKENS = 8192
+# A checkpoint this long was written, even if the allowance cut it off.
+_MIN_SUMMARY_CHARS = 200
+# Ceiling for an automatically derived output allowance: enough for a long
+# answer, small enough not to invite a 200 K-token monologue.
+_MAX_AUTO_OUTPUT_TOKENS = 32768
 
 # Only context errors get a size-reduction retry; generic bad requests do not.
 _MAX_CONTEXT_RETRIES = 4
@@ -579,6 +588,50 @@ def _completion_tokens(usage) -> int | None:
     return value if isinstance(value, int) and value >= 0 else None
 
 
+def _answer_room(window_tokens: int, estimate: int | None) -> int:
+    """Output allowance that still leaves room to answer, or 0 to send none.
+
+    Only meaningful once a provider response has calibrated *estimate*; before
+    that there is nothing honest to compute from and the cap stays absent.
+    """
+    if not window_tokens or estimate is None:
+        return 0
+    return max(0, min(window_tokens - estimate, _MAX_AUTO_OUTPUT_TOKENS))
+
+
+# Phrases a provider uses when it refuses the allowance parameter itself, e.g.
+# OpenAI's reasoning models answer 400 to max_tokens and want max_completion_tokens.
+_PARAMETER_REJECTION_PHRASES = (
+    "unsupported", "not supported", "does not support", "unrecognized",
+    "unknown parameter",
+)
+# Routes that refused the *derived* allowance in this process. Process-local on
+# purpose: the next start costs one rejected request, never a persisted
+# capability that could go stale. The image-rejection cache persists because it
+# changes the request body; this only removes a hint Pengy added itself.
+_REJECTED_OUTPUT_CAPS: set[tuple[str, str]] = set()
+
+
+def _is_output_parameter_error(exc, parameter: str) -> bool:
+    """Whether the provider rejected the allowance parameter itself.
+
+    Distinct from a context error: the body names the parameter and says it is
+    unsupported. Only the automatically derived allowance is ever dropped -- a
+    user-configured output limit keeps its existing explicit failure.
+    """
+    if not parameter or getattr(exc, "status_code", 0) not in (400, 422):
+        return False
+    text = str(getattr(exc, "message", "") or "")
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        details = body.get("error", body)
+        if isinstance(details, dict):
+            text += " " + " ".join(str(details.get(key) or "")
+                                   for key in ("message", "code", "type"))
+    text = text.lower()
+    return parameter in text and any(p in text for p in _PARAMETER_REJECTION_PHRASES)
+
+
 def _length_suggests_context_pressure(choice, usage, output_token_limit: int) -> bool:
     """Whether a length stop is worth a context-reduction retry.
 
@@ -1014,6 +1067,8 @@ class LLMClient:
             raise ConfigError("empty_reply_thinking_off must be empty, reasoning_effort, or enable_thinking")
         pressure_key = json.dumps([self.base_url.rstrip('/'), selected_model, chat_id]) if chat_id else ""
         pressure = Pressure.load(pressure_key, current_messages, identity(recovery.state), window["tokens"] if window else 0)
+        auto_cap_route = (self.base_url.rstrip('/'), selected_model)
+        auto_cap_suppressed = auto_cap_route in _REJECTED_OUTPUT_CAPS
         proactive_commits, proactive_failed, long_length_retried, thinking_disabled = 0, False, False, False
 
         # One wall-clock grace for every summary call in this turn's recovery
@@ -1026,7 +1081,7 @@ class LLMClient:
                 "model": model or self.model,
                 "messages": [{"role": "system", "content": SUMMARY_PROMPT},
                              {"role": "user", "content": source}],
-                output_token_parameter: 2048,
+                output_token_parameter: _SUMMARY_MAX_TOKENS,
             }
             _apply_thinking_off(summary_kwargs, thinking_off)
             summary_retries = 0
@@ -1079,9 +1134,16 @@ class LLMClient:
             if not summary_choices:
                 raise RuntimeError("Context summary request returned no choices; original history retained.")
             choice = summary_choices[0]
-            if choice.finish_reason != "stop" or choice.message.tool_calls or not (choice.message.content or "").strip():
+            summary_text = (choice.message.content or "").strip()
+            # A checkpoint cut off at the allowance is still usable history: a
+            # truncated summary beats discarding the whole transcript and paying
+            # for the same prompt again. Only an empty or tool-calling reply is
+            # a real failure.
+            usable = (choice.finish_reason == "stop"
+                      or (choice.finish_reason == "length" and len(summary_text) >= _MIN_SUMMARY_CHARS))
+            if choice.message.tool_calls or not usable:
                 raise RuntimeError("Context summary was incomplete; original history retained. Try a new chat or adjust the provider's reasoning/output budget.")
-            return choice.message.content
+            return summary_text
 
         while True:
             # A validated provider-only reduction persists across tool rounds.
@@ -1125,6 +1187,7 @@ class LLMClient:
                 if cancel_fn and cancel_fn():
                     raise _Cancelled()
                 try:
+                    derived_cap_sent = False
                     request_kwargs = {
                         "model": model or self.model,
                         "messages": request_messages,
@@ -1135,6 +1198,15 @@ class LLMClient:
                         request_kwargs["reasoning_effort"] = reasoning_effort
                     if output_token_limit > 0:
                         request_kwargs[output_token_parameter] = output_token_limit
+                    elif window and not window["input_only"] and not auto_cap_suppressed:
+                        # Derive the allowance instead of omitting it: a hard-wall
+                        # engine clamps an absent cap to whatever is left, which is
+                        # how a 262 K prompt came back as a 25-token "answer".
+                        room = _answer_room(window["tokens"], pressure.estimate(
+                            input_chars(request_messages, _tools_mod.TOOLS)))
+                        if room:
+                            request_kwargs[output_token_parameter] = room
+                            derived_cap_sent = True
                     if thinking_disabled: _apply_thinking_off(request_kwargs, thinking_off)
                     request_started = time.perf_counter()
                     response = self.client.chat.completions.create(**request_kwargs)
@@ -1234,6 +1306,14 @@ class LLMClient:
                             f"{context_retries} tool-output reductions. The full tool outputs "
                             "remain in chat history. Try a shorter request or a larger-context model."
                         ) from e
+                    if (derived_cap_sent and not auto_cap_suppressed
+                            and _is_output_parameter_error(e, output_token_parameter)):
+                        # The route refuses the allowance parameter itself. Drop the
+                        # derived one and retry instead of failing the turn; it is
+                        # remembered for this route so no later request pays for it.
+                        auto_cap_suppressed = True
+                        _REJECTED_OUTPUT_CAPS.add(auto_cap_route)
+                        continue
                     transient = _transient_retry(e, self._endpoint_answered)
                     if transient is not None:
                         # The endpoint answered, saying it is not available right

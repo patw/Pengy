@@ -29,8 +29,19 @@ def input_chars(messages, tools):
     return None if a is None or b is None else a + b
 
 
+ANSWER_RESERVE_TOKENS = 2048
+
+
 def budgets(window, percent, output, input_only=False):
-    hard = window if input_only else max(0, window-output)
+    """Soft threshold and hard input ceiling for one request.
+
+    With no configured output limit the hard line used to be the whole window,
+    so a request could be admitted with 33 tokens left to answer in -- and a
+    hard-wall engine (Basalt) then answers with those 33 tokens. Reserve the
+    answer even when the caller did not name one.
+    """
+    reserve = 0 if input_only else (output if output > 0 else ANSWER_RESERVE_TOKENS)
+    hard = window if input_only else max(0, window-reserve)
     return min(window*percent//100, hard), hard
 
 

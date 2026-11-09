@@ -5,7 +5,7 @@ import json
 import pytest
 from unittest.mock import patch
 
-from pengy.core.llm_client import GenerationLimitError
+from pengy.core.llm_client import GenerationLimitError, _SUMMARY_MAX_TOKENS
 from pengy.core.context_recovery import Recovery, fingerprint, synthetic, SUMMARY_PROMPT
 from tests.test_context_recovery import client, stub, overflow, _completion_obj
 from tests.test_llm_loop import completion, tool_call, collect_auto
@@ -104,7 +104,7 @@ def test_explicit_overflow_uses_configured_output_allowance_and_summaries(client
         events = collect_auto(client.chat(history(), output_token_limit=4096, output_token_parameter="max_completion_tokens"))
     assert events[-1]["content"] == "done"
     assert requests[0]["max_completion_tokens"] == 4096
-    assert requests[1]["max_completion_tokens"] == 2048
+    assert requests[1]["max_completion_tokens"] == _SUMMARY_MAX_TOKENS
     assert events[0]["strategy"] == "history_summary"
 
 

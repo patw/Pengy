@@ -7,7 +7,7 @@ import pytest
 from pengy.core.context_pressure import Pressure, input_chars, budgets, identity
 from pengy.core import tools, context_windows
 from pengy.core.context_recovery import Recovery
-from pengy.core.llm_client import GenerationLimitError, EmptyResponseError, ConfigError
+from pengy.core.llm_client import GenerationLimitError, EmptyResponseError, ConfigError, _SUMMARY_MAX_TOKENS
 from tests.test_context_recovery import client, stub, _completion_obj, overflow
 from tests.test_auto_context_recovery import history, length_stop
 from tests.test_llm_loop import completion, tool_call, collect_auto
@@ -161,7 +161,7 @@ def test_summary_uses_only_configured_thinking_off(client,stub):
                                        empty_reply_thinking_off=mechanism,reasoning_effort='high'))
         assert events[-1]['content']=='answer'
         summary=stub.requests[-2]['body'];normal=stub.requests[-1]['body']
-        assert 'tools' not in summary and summary['max_tokens']==2048
+        assert 'tools' not in summary and summary['max_tokens']==_SUMMARY_MAX_TOKENS
         if mechanism=='reasoning_effort':assert summary['reasoning_effort']=='none'
         elif mechanism=='enable_thinking':assert summary['chat_template_kwargs']=={'enable_thinking':False}
         else:assert 'reasoning_effort' not in summary and 'chat_template_kwargs' not in summary
