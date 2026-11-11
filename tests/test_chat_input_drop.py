@@ -133,3 +133,87 @@ def test_submitted_and_removed_chips_leave_the_parent_immediately(qapp, tmp_path
     assert widget._chips_row.findChildren(
         QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly) == []
     assert widget._chips_row.layout().count() == 1  # only the trailing stretch
+
+
+def test_raw_image_drag_data_is_attached(qapp):
+    """Browsers and chat clients drag images as QImage data, not file URLs.
+
+    A URL-only handler ignored those drops outright, which is why dragging a
+    picture out of WeChat or a web page did nothing at all.
+    """
+    widget = ChatInputWidget()
+    image = QImage(4, 4, QImage.Format.Format_RGB32)
+    image.fill(0x3366FF)
+    mime = QMimeData()
+    mime.setImageData(image)
+
+    enter = QDragEnterEvent(QPoint(5, 5), Qt.DropAction.CopyAction, mime,
+                            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    widget._edit.dragEnterEvent(enter)
+    assert enter.isAccepted()
+    assert not widget._drop_hint.isHidden()
+
+    event = QDropEvent(QPoint(5, 5), Qt.DropAction.CopyAction, mime,
+                       Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    widget._edit.dropEvent(event)
+    assert event.isAccepted()
+    assert len(widget._attachments) == 1
+    assert widget._attachments[0].suffix == ".png"
+    assert widget._attachments[0].is_file()
+    assert widget._edit.toPlainText() == ""
+
+
+def test_window_drop_target_attaches_files_from_anywhere(qapp, tmp_path):
+    """Dropping onto the transcript or sidebar must reach the composer.
+
+    Only the input box accepted drops, so a drag aimed anywhere else in the
+    window was silently discarded.
+    """
+    from pengy.ui.main_window import MainWindow
+
+    window = MainWindow()
+    try:
+        text = tmp_path / "notes.md"
+        text.write_text("hello")
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(text))])
+
+        enter = QDragEnterEvent(QPoint(5, 5), Qt.DropAction.CopyAction, mime,
+                                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        window.dragEnterEvent(enter)
+        assert enter.isAccepted()
+        assert not window.chat_input._drop_hint.isHidden()
+
+        event = QDropEvent(QPoint(5, 5), Qt.DropAction.CopyAction, mime,
+                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        window.dropEvent(event)
+        assert event.isAccepted()
+        assert window.chat_input._attachments == [text]
+        assert window.chat_input._drop_hint.isHidden()
+
+        # A URL with no local file and no image data stays rejected.
+        web = QMimeData()
+        web.setUrls([QUrl("https://example.com/file.txt")])
+        rejected = QDropEvent(QPoint(5, 5), Qt.DropAction.CopyAction, web,
+                              Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        window.dropEvent(rejected)
+        assert not rejected.isAccepted()
+        assert window.chat_input._attachments == [text]
+    finally:
+        window.deleteLater()
+
+
+def test_transcript_does_not_swallow_drops(qapp):
+    """The transcript must never claim a drop meant for the composer.
+
+    A read-only QTextBrowser declines drops today, but that is Qt-internal
+    behaviour; the flag is turned off explicitly so it stays true if the view
+    ever becomes editable.
+    """
+    from pengy.ui.chat_view import ChatView
+
+    view = ChatView()
+    try:
+        assert not view.acceptDrops()
+    finally:
+        view.deleteLater()
