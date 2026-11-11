@@ -216,6 +216,11 @@ _UNSUPPORTED_IMAGE_PHRASES = (
     "image inputs are not supported", "image input is not supported",
     "images are not supported", "image_url is not supported",
     "unsupported image input", "unsupported vision input",
+    # Fireworks' GLM router answers this to *any* image part (a 1x1 PNG too)
+    # while text-only requests on the same route succeed, so it means "no vision
+    # here", not "this image is corrupt". Measured 2026-11-10 against
+    # glm-latest / the `smart` tag; `fast` and `kimi-latest` accept the bytes.
+    "invalid image or video input",
 )
 
 

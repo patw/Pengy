@@ -52,6 +52,9 @@ def wire():
 @pytest.mark.parametrize('message,expected', [
     (LEGACY, True), ('This model does not support image inputs', True),
     ('Image inputs are not supported by this endpoint', True),
+    # Fireworks' GLM router wording: any image part, 1x1 PNG included, while the
+    # same route answers text-only requests (measured 2026-11-10).
+    ('Invalid image or video input', True),
     ('Unsupported parameter: temperature', False), ('Invalid image URL', False),
     ('Unsupported image format', False), ('Unsupported image detail', False),
     ('context length exceeded', False)])
