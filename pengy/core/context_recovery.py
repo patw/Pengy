@@ -80,6 +80,10 @@ SUMMARY_PROMPT = (
     "Do not add advice or execute tools. Return only a concise factual checkpoint, at most 500 words."
 )
 MAX_RETRIES = 4
+
+# Messages at the end of the conversation that even the last-resort stage keeps
+# intact: the model must still see the work it just did.
+DEEP_TAIL_MESSAGES = 4
 CHUNK_CHARS = 32000
 MAX_SUMMARY_CALLS = 16
 
@@ -158,7 +162,8 @@ class Recovery:
         self.path = checkpoint_path(chat_id) if chat_id else None
         self.state = {"v": 1, "endpoint": endpoint.rstrip("/"), "model": model,
                       "instructions": instruction_key(messages), "prefix": [],
-                      "drop": 0, "summary": "", "tools": {}, "calls": {}, "reasoning": False}
+                      "drop": 0, "summary": "", "tools": {}, "calls": {}, "reasoning": False,
+                      "deep": None}
         self.attempts = 0
         self.summary_calls = 0
         if enabled and self.path:
@@ -167,6 +172,7 @@ class Recovery:
                 if isinstance(loaded, dict) and valid_state(loaded, messages, endpoint, model):
                     self.state = loaded
                     self.state.setdefault("calls", {})
+                    self.state.setdefault("deep", None)
             except (OSError, ValueError, TypeError):
                 pass
 
@@ -190,6 +196,10 @@ class Recovery:
             return [dict(m) for m in messages]
         result, index = [], 0
         last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user" and not synthetic(m)), default=-1)
+        # Everything before `deep_from` is elided even inside the active turn: only
+        # the last `deep` messages are still protected (see _deep_reduce).
+        deep = self.state.get("deep")
+        deep_from = len(messages) - deep if deep else None
         for i, original in enumerate(messages):
             m = dict(original)
             if tracked(m):
@@ -198,7 +208,8 @@ class Recovery:
                     continue
             elif synthetic(m) and index <= self.state["drop"]:
                 continue
-            if self.state["reasoning"] and i < last_user and m.get("role") == "assistant":
+            if (self.state["reasoning"] and m.get("role") == "assistant"
+                    and (i < last_user or (deep_from is not None and i < deep_from))):
                 # Tagged opaque replay state is required even with preservation off.
                 # Unknown reasoning_details may contain provider-required signatures.
                 m.pop("reasoning", None)
@@ -277,10 +288,12 @@ class Recovery:
 
     def _reduce(self, messages: list[dict], summarize: Callable[[str], str], *, proactive: bool = False) -> dict | None:
         """Commit a strictly smaller plan; failed summaries never discard history."""
-        if not self.enabled or self.attempts >= MAX_RETRIES:
+        if not self.enabled:
             return None
         before = self.apply(messages)
         before_size = payload_chars(before)
+        if self.attempts >= MAX_RETRIES:
+            return self._deep_reduce(messages, before, before_size)
         # Keep attempt 4 available for history rather than spending every
         # reduction on reasoning/tool bodies. Planning makes no model calls.
         reserved_summary = self._summary_plan(messages) if self.attempts == MAX_RETRIES - 1 else None
@@ -325,7 +338,7 @@ class Recovery:
         turns_removed = 0
         if candidate is None:
             summary_plan = reserved_summary or self._summary_plan(messages)
-            if summary_plan is None: return None
+            if summary_plan is None: return self._deep_reduce(messages, before, before_size)
             drop, turns_removed, chunks, source_length = summary_plan
             if proactive and self.summary_calls + len(chunks) > 8: return None
             summaries = []
@@ -343,7 +356,50 @@ class Recovery:
             return None
         self.attempts += 1
         self.save(messages)
-        return {"type": "context_compacted", "attempt": self.attempts, "max_attempts": MAX_RETRIES,
+        max_attempts = max(self.attempts, MAX_RETRIES)
+        return {"type": "context_compacted", "attempt": self.attempts, "max_attempts": max_attempts,
                 "strategy": candidate, "chars_removed": before_size - after_size,
                 "turns_summarized": turns_removed,
-                "message": f"Context recovery — {candidate.replace('_', ' ')}; {before_size-after_size:,} fewer characters, {turns_removed} older turns summarized. Full history retained. Retrying {self.attempts}/{MAX_RETRIES}."}
+                "message": f"Context recovery — {candidate.replace('_', ' ')}; {before_size-after_size:,} fewer characters, {turns_removed} older turns summarized. Full history retained. Retrying {self.attempts}/{max_attempts}."}
+
+    def _deep_reduce(self, messages: list[dict], before: list[dict], before_size: int) -> dict | None:
+        """Last resort: elide all but the newest few messages of the ACTIVE turn.
+
+        Every stage above protects the current turn — apply() only strips reasoning
+        before the last user message, and tool-argument elision has the same
+        boundary — on the theory that a long agentic turn needs to see its own
+        work. When that protection is all that stands between the payload and the
+        window, the turn dies with "retried after 4 context reduction(s) without
+        success", and the only way through is for a new user message to arrive and
+        move the boundary.
+
+        That is exactly what a manual "try again" does (measured 2026-11-11: the
+        retry reported `historical reasoning; 306008 fewer characters` then
+        `tool call arguments; 371360 fewer characters` and answered). This does the
+        same thing without waiting for the user: keep the newest
+        DEEP_TAIL_MESSAGES messages intact, elide everything older in the turn.
+        Runs at most once per chat, and only after every cheaper stage is spent.
+        """
+        keep = DEEP_TAIL_MESSAGES
+        if self.state.get("deep") is not None or len(messages) <= keep:
+            return None
+        saved = (self.state.get("deep"), self.state["reasoning"], dict(self.state["calls"]))
+        boundary = len(messages) - keep
+        self.state["deep"] = keep
+        self.state["reasoning"] = True
+        for i, m in enumerate(messages):
+            if (i < boundary and m.get("tool_calls")
+                    and arguments_chars(m) > CALL_MIN_CHARS
+                    and not self.state["calls"].get(fingerprint(m))):
+                self.state["calls"][fingerprint(m)] = 1
+        after_size = payload_chars(self.apply(messages))
+        if after_size >= before_size:
+            self.state["deep"], self.state["reasoning"], self.state["calls"] = saved
+            return None
+        self.attempts += 1
+        self.save(messages)
+        max_attempts = max(self.attempts, MAX_RETRIES)
+        return {"type": "context_compacted", "attempt": self.attempts, "max_attempts": max_attempts,
+                "strategy": "active_turn", "chars_removed": before_size - after_size,
+                "turns_summarized": 0,
+                "message": f"Context recovery — active turn; {before_size-after_size:,} fewer characters, 0 older turns summarized. Full history retained. Retrying {self.attempts}/{max_attempts}."}

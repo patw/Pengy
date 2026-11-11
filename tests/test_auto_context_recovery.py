@@ -245,3 +245,44 @@ def test_exhausted_short_length_recovery_reports_retries(client):
         with pytest.raises(GenerationLimitError, match=r"retried after \d+ context reduction") as error:
             collect_auto(client.chat(history(), recovery_keep_turns=0))
     assert "Redoing it:" in str(error.value)
+
+
+def active_turn_history(rounds=8):
+    """ONE user turn, then a long agentic stretch: all of it is the active task."""
+    messages = [{"role": "system", "content": "You are Pengy."},
+                {"role": "user", "content": "build the whole thing, all of it"}]
+    for n in range(rounds):
+        messages.append({"role": "assistant", "content": "", "reasoning": "r" * 8000,
+                         "tool_calls": [{"id": f"c{n}", "type": "function",
+                                         "function": {"name": "run_bash",
+                                                      "arguments": json.dumps({"command": "x" * 8000})}}]})
+        messages.append({"role": "tool", "tool_call_id": f"c{n}", "content": "y" * 20000})
+    return messages
+
+
+def test_active_turn_elision_recovers_without_a_new_user_message():
+    """Measured 2026-11-11: a job died with "retried after 4 context reduction(s)";
+    typing "try again" recovered instantly because the new user message moved the
+    active-turn boundary. The last-resort stage does that without the user."""
+    from pengy.core.context_recovery import DEEP_TAIL_MESSAGES, payload_chars
+    messages = active_turn_history()
+    original = copy.deepcopy(messages)
+    recovery = Recovery(messages, "http://test/v1", "m")
+    strategies = []
+    for _ in range(6):
+        event = recovery.reduce(messages, lambda source: "checkpoint")
+        if not event:
+            break
+        strategies.append(event["strategy"])
+    assert strategies[-1] == "active_turn", strategies
+    view = recovery.apply(messages)
+    keep = len(messages) - DEEP_TAIL_MESSAGES
+    # Everything older in the ACTIVE turn loses its reasoning...
+    assert all("reasoning" not in m for m in view[:keep] if m.get("role") == "assistant")
+    # ...while the newest messages keep theirs: the model still sees its last work.
+    assert all("reasoning" in m for m in view[keep:] if m.get("role") == "assistant")
+    # The view is much smaller, and the transcript itself is untouched.
+    assert payload_chars(view) < payload_chars(messages) / 2
+    assert messages == original
+    # One shot per chat: a further attempt has nothing left to offer.
+    assert recovery.reduce(messages, lambda source: "checkpoint") is None
