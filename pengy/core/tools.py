@@ -2224,6 +2224,23 @@ def _powershell_prelude(script_path: str) -> str:
     return _POWERSHELL_PRELUDE.replace("{path}", script_path.replace("'", "''"))
 
 
+# CSI colours, OSC hyperlinks/titles, and any other two-character escape.
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[\s\S]?)")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from captured PowerShell output.
+
+    pwsh colourises error records even when stdout and stderr are pipes, and
+    the prelude's ``$PSStyle.OutputRendering = 'PlainText'`` only suppresses that
+    from 7.5 on: on 7.4.6 ``Write-Error 'bad'`` still arrives as
+    ``ESC[31;1mWrite-Error: ESC[31;1mbadESC[0m`` (measured 2026-11-11, with TERM
+    unset and inherited alike). The codes are noise to a model, so they are
+    stripped where output is captured rather than trusting the installed version.
+    """
+    return _ANSI_RE.sub("", text)
+
+
 def _run_powershell(command: str, ctx: "ToolContext" = None,
                     cwd: str | None = None) -> str:
     """Run a PowerShell script locally (Windows' run_powershell tool)."""
@@ -2262,13 +2279,14 @@ def _run_powershell(command: str, ctx: "ToolContext" = None,
             ctx.unregister_process(proc)
         output, _ = _format_command_output(
             stdout_b, stderr_b, proc.returncode, False, encoding="utf-8")
-        return _snip_tool_output(output) or "(No output)"
+        return _snip_tool_output(_strip_ansi(output)) or "(No output)"
     except subprocess.TimeoutExpired as exc:
         _kill_proc_group(proc)
         ctx.unregister_process(proc)
         stdout_b, stderr_b = _output_after_timeout(proc, exc)
-        return _timed_out_output(f"Error: Command timed out after {_tool_timeout} seconds",
-                                 stdout_b, stderr_b, encoding="utf-8")
+        return _strip_ansi(
+            _timed_out_output(f"Error: Command timed out after {_tool_timeout} seconds",
+                              stdout_b, stderr_b, encoding="utf-8"))
     except Exception as e:
         ctx.unregister_process(proc)
         return f"Error running PowerShell: {e}"

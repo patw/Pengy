@@ -420,3 +420,21 @@ def test_provider_view_repairs_the_request_not_the_history():
     view = _provider_view(history, "local")
     assert json.loads(view[1]["tool_calls"][0]["function"]["arguments"])["_repaired"] is True
     assert history[1]["tool_calls"][0]["function"]["arguments"] == BROKEN
+
+
+def test_powershell_output_never_carries_ansi():
+    """pwsh colours error records even into a pipe, and OutputRendering=PlainText
+    only suppresses it from 7.5: 7.4.6 sends ESC[31;1mWrite-Error: ... (measured
+    2026-11-11). The capture path strips it whatever version is installed."""
+    from pengy.core.tools import _strip_ansi
+    # The exact shape pwsh 7.4.6 produced for `Write-Error 'bad'`.
+    assert _strip_ansi("\x1b[31;1mWrite-Error: \x1b[31;1mbad\x1b[0m") == "Write-Error: bad"
+    # Raw console writes bypass OutputRendering entirely, so this is the
+    # version-independent case the Rust live test covers.
+    assert _strip_ansi("\x1b[31mraw-colour\x1b[0m done") == "raw-colour done"
+    # OSC 8 hyperlinks, a CSI with no parameters, and a lone trailing ESC.
+    assert _strip_ansi("x\x1b]8;;http://example.com\x07link\x1b]8;;\x07y") == "xlinky"
+    assert _strip_ansi("a\x1b[Kb") == "ab"
+    assert _strip_ansi("trail\x1b") == "trail"
+    # Ordinary text, including tabs and newlines, is untouched.
+    assert _strip_ansi("plain\ttab\nnext") == "plain\ttab\nnext"
