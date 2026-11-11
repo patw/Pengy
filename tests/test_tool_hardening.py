@@ -16,7 +16,11 @@ import threading
 import pytest
 
 from pengy.core import tools
-from pengy.core.tool_args import normalize_arguments, parse_raw_arguments
+from pengy.core.tool_args import (
+    normalize_arguments,
+    parse_raw_arguments,
+    repair_unparseable_arguments,
+)
 from pengy.core.tools import TOOLS, execute_tool
 
 PARAMS = {t["function"]["name"]: t["function"]["parameters"] for t in TOOLS}
@@ -357,3 +361,62 @@ def test_timeouts_return_output_printed_before_the_kill(monkeypatch):
     assert python == ("Error: Python execution timed out after 1 seconds. "
                       "Output before it was killed:\nworking\n")
     assert silent == "Error: Command timed out after 1 seconds"
+
+
+# ── replaying arguments that never parsed ────────────────────────────────────
+# A length-capped generation stores an arguments string that stops mid-object.
+# Running it already fails cleanly; *replaying* it to an engine that parses every
+# call's arguments is a 400 for the whole request, on every later turn.
+
+BROKEN = '{"changes": [{"operations": [{"kind": "replace", "old": "a", "new": "b"}]}'
+
+
+def _history():
+    return [
+        {"role": "user", "content": "add --art"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_broken", "type": "function",
+             "function": {"name": "apply_changes", "arguments": BROKEN}},
+            {"id": "call_ok", "type": "function",
+             "function": {"name": "read_file", "arguments": '{"path": "/tmp/f"}'}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_broken",
+         "content": "Error: the arguments for apply_changes were not valid JSON"},
+    ]
+
+
+def test_unparseable_arguments_are_repaired_for_the_request():
+    history = _history()
+    view, repaired = repair_unparseable_arguments(history)
+    assert repaired == 1, "only the unparseable call is repaired"
+    calls = view[1]["tool_calls"]
+    # Pairing survives: the id/type/name the tool result answers to are kept.
+    assert calls[0]["id"] == "call_broken"
+    assert calls[0]["type"] == "function"
+    assert calls[0]["function"]["name"] == "apply_changes"
+    handle = json.loads(calls[0]["function"]["arguments"])
+    assert handle["_repaired"] is True
+    assert handle["chars"] == len(BROKEN)
+    assert len(handle["sha256"]) == 16
+    # Negative control: a valid call is untouched.
+    assert calls[1]["function"]["arguments"] == '{"path": "/tmp/f"}'
+    # Idempotent.
+    assert repair_unparseable_arguments(view)[1] == 0
+
+
+def test_repair_never_mutates_persisted_history():
+    history = _history()
+    before = json.loads(json.dumps(history))
+    repair_unparseable_arguments(history)
+    assert history == before, "the transcript is the user's data; only the view changes"
+    # The caller's list object itself is left alone too.
+    assert history[1]["tool_calls"][0]["function"]["arguments"] == BROKEN
+
+
+def test_provider_view_repairs_the_request_not_the_history():
+    from pengy.core.llm_client import _provider_view
+
+    history = _history()
+    view = _provider_view(history, "local")
+    assert json.loads(view[1]["tool_calls"][0]["function"]["arguments"])["_repaired"] is True
+    assert history[1]["tool_calls"][0]["function"]["arguments"] == BROKEN

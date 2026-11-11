@@ -16,7 +16,7 @@ from pengy.core.image_capabilities import images_rejected, remember_image_reject
 from pengy.core.context_recovery import Recovery, SUMMARY_PROMPT
 from pengy.core.context_pressure import Pressure, input_chars, budgets, identity
 from pengy.core import context_windows as window_cache
-from pengy.core.tool_args import parse_raw_arguments
+from pengy.core.tool_args import parse_raw_arguments, repair_unparseable_arguments
 
 def _apply_thinking_off(kwargs, mechanism):
     if mechanism == "reasoning_effort": kwargs["reasoning_effort"] = "none"
@@ -494,6 +494,20 @@ def _without_cross_model_proxy_state(messages: list[dict], model: str) -> list[d
             copy.pop("reasoning_details", None)
         result.append(copy)
     return result
+
+
+def _provider_view(messages: list[dict], model: str) -> list[dict]:
+    """The request-side copy of the history: proxy state filtered, arguments repaired.
+
+    Kept as one funnel so no provider view can be built with an unparseable
+    tool-call arguments string still in it -- see
+    ``tool_args.repair_unparseable_arguments`` for why replaying one turns every
+    later turn on a strict engine into a 400.  Persisted history is never
+    modified.
+    """
+    request_messages, _ = repair_unparseable_arguments(
+        _without_cross_model_proxy_state(messages, model))
+    return request_messages
 
 
 def _serialize_assistant_message(message, preserve_reasoning: bool = False) -> dict:
@@ -1147,7 +1161,7 @@ class LLMClient:
 
         while True:
             # A validated provider-only reduction persists across tool rounds.
-            request_messages = _without_cross_model_proxy_state(
+            request_messages = _provider_view(
                 recovery.apply(current_messages), model or self.model)
             image_input_rejected = image_input_rejected or images_rejected(self.base_url, model or self.model)
             if image_input_rejected:
@@ -1167,7 +1181,7 @@ class LLMClient:
                         event["reason"] = "proactive"
                         event["message"] = f"Compacting before the window fills — {event['chars_removed']:,} fewer characters. Full history retained."
                         yield event
-                        request_messages = _without_cross_model_proxy_state(recovery.apply(current_messages), selected_model)
+                        request_messages = _provider_view(recovery.apply(current_messages), selected_model)
                         if image_input_rejected: _suppress_images(request_messages, image_rejection)
                         pressure.compacted(pressure.estimate(input_chars(request_messages, _tools_mod.TOOLS)), threshold)
                     else: proactive_failed = True
@@ -1253,7 +1267,7 @@ class LLMClient:
                             request_messages = recovery.apply(current_messages)
                             if image_input_rejected:
                                 _suppress_images(request_messages, image_rejection)
-                            request_messages = _without_cross_model_proxy_state(request_messages, model or self.model)
+                            request_messages = _provider_view(request_messages, model or self.model)
                             continue
                         raise GenerationLimitError(_generation_limit_message(
                             choice.message.content, bool(choice.message.tool_calls),
@@ -1285,7 +1299,7 @@ class LLMClient:
                                 request_messages = recovery.apply(current_messages)
                                 if image_input_rejected:
                                     _suppress_images(request_messages, image_rejection)
-                                request_messages = _without_cross_model_proxy_state(request_messages, model or self.model)
+                                request_messages = _provider_view(request_messages, model or self.model)
                                 continue
                             raise RuntimeError("Model context limit reached; could not fit the protected task after bounded recovery. Full history retained; try a shorter request or a new chat.") from e
                         if context_retries < _MAX_CONTEXT_RETRIES:

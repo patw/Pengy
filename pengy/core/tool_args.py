@@ -26,6 +26,7 @@ request.  Keep the semantics identical in the Rust and C++ editions
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -199,3 +200,79 @@ def parse_raw_arguments(raw: str | None) -> dict:
     except ValueError:
         return {_RAW_KEY: raw}
     return value if isinstance(value, dict) else {_RAW_KEY: raw}
+
+
+_REPAIR_NOTE = (
+    "The original arguments for this call were not valid JSON (a truncated or "
+    "malformed generation) and the call was never run. Detail kept: character "
+    "count, sha256 and a short preview."
+)
+
+
+def repair_unparseable_arguments(messages: list[dict]) -> tuple[list[dict], int]:
+    """Copy *messages* for a provider request, repairing tool calls that cannot parse.
+
+    A truncated or malformed generation (the model stopped mid-object, the output
+    allowance ran out) is stored verbatim.  That keeps the transcript honest and
+    running it already fails cleanly with "not valid JSON" -- but *replaying* the
+    raw string is not safe: an engine that parses every call's arguments (Basalt,
+    llama.cpp's tool parser) rejects the whole request with
+    ``400 Expecting ',' delimiter: line 1 column N`` at the offset where the stored
+    string ran out.  So one bad entry in an old chat breaks every later turn on
+    that route, while the same chat keeps working on a lenient hosted API.
+
+    Each unparseable call is replaced by a stable handle (character count,
+    SHA-256, 160-character preview) that keeps its ``id``/``type``/``name``, so the
+    assistant -> tool-result pairing and the prompt prefix cache stay valid.
+
+    Returns ``(messages_for_the_request, repaired_count)``.  Neither the messages
+    list nor any message reached through it is modified: only repaired messages
+    are copied, and their ``tool_calls`` are rebuilt rather than edited in place.
+
+    Keep the semantics identical in the Rust and C++ editions
+    (``repair_unparseable_arguments`` in ``tool_args.rs``,
+    ``repairUnparseableArguments`` in ``provider_messages.cpp``).
+    """
+    out: list[dict] = []
+    repaired = 0
+    for message in messages:
+        calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if not isinstance(calls, list) or not calls:
+            out.append(message)
+            continue
+        rebuilt = []
+        changed = False
+        for call in calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            raw = function.get("arguments") if isinstance(function, dict) else None
+            if not isinstance(raw, str) or not raw.strip():
+                rebuilt.append(call)
+                continue
+            try:
+                json.loads(raw)
+            except ValueError:
+                pass
+            else:
+                rebuilt.append(call)
+                continue
+            handle = json.dumps({
+                "_repaired": True,
+                "note": _REPAIR_NOTE,
+                "chars": len(raw),
+                "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16],
+                "preview": raw[:160],
+            })
+            changed = True
+            repaired += 1
+            rebuilt.append({
+                "id": call.get("id", ""),
+                "type": call.get("type", "function"),
+                "function": {"name": function.get("name", ""), "arguments": handle},
+            })
+        if not changed:
+            out.append(message)
+            continue
+        copy = dict(message)
+        copy["tool_calls"] = rebuilt
+        out.append(copy)
+    return out, repaired
