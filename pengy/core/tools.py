@@ -528,9 +528,9 @@ _BASE_TOOLS = [
                                         "properties": {
                                             "kind": {"type": "string", "enum": ["replace", "insert_after", "delete"]},
                                             "old": {"type": "string", "description": "Exact text for replace/delete"},
-                                            "anchor": {"type": "string", "description": "Exact text to insert after"},
+                                            "anchor": {"type": "string", "description": "Exact text to insert after; the splice lands at the end of the match, not the end of its line"},
                                             "new": {"type": "string", "description": "Replacement text"},
-                                            "text": {"type": "string", "description": "Text to insert"},
+                                            "text": {"type": "string", "description": "Text to insert immediately after the anchor; start it with a newline to put it on its own line(s)"},
                                             "expected_matches": {"type": "integer", "description": "Required match count (default 1)"},
                                         },
                                         "required": ["kind"],
@@ -1404,6 +1404,43 @@ def _replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = 
         return f"Error replacing text in file: {e}"
 
 
+def _insert_join_note(current: str, anchor: str, text: str, path: Path, matches: int) -> str | None:
+    """The result line announcing an ``insert_after`` that shares a line, if it does.
+
+    ``insert_after`` is a character splice, not a line insert, so the inserted
+    text can end up on a line with existing text from either side:
+
+    * the anchor does not end a line and *text* does not start with one, so the
+      first line of *text* is appended to the anchor's own line (``beta`` plus
+      ``X`` becomes ``betaX``);
+    * the anchor does end a line and *text* does not end with one, so the last
+      line of *text* runs into the line that follows (``beta\\n`` plus ``X``
+      becomes ``beta\\nXgamma``).
+
+    In .env, YAML, CSV, a Makefile, a shell ``export`` line or a commented-out
+    setting either result is valid text, so the corruption is silent and
+    surfaces much later.  The note names the file and line and the missing
+    newline; it is a contract reminder, not an error, because the edit did
+    exactly what was asked.  ``None`` means nothing shares a line.  Same rule
+    and same wording in the Rust and C++ editions.
+    """
+    if not text:
+        return None
+    anchor_end = current.index(anchor) + len(anchor)
+    more = f" (+{matches - 1} more)" if matches > 1 else ""
+    if text[:1] not in ("\n", "\r") and anchor[-1:] not in ("\n", "\r"):
+        line = current.count("\n", 0, anchor_end) + 1
+        return (f"note: insert_after joined text to the end of line {line}{more} in {path}: "
+                "the anchor does not end a line and text does not start with a newline. "
+                "Start text with a newline to insert whole lines.")
+    if text[-1:] not in ("\n", "\r") and anchor_end < len(current) and current[anchor_end] not in "\r\n":
+        line = current.count("\n", 0, anchor_end) + 1
+        return (f"note: insert_after joined text to the start of line {line}{more} in {path}: "
+                "the anchor ends a line and text does not end with a newline, so the inserted "
+                "text runs into the line that follows. End text with a newline to insert whole lines.")
+    return None
+
+
 def _forbidden_text_location(content: str, needle: str) -> str:
     """Where *needle* first occurs in *content*, for a failed ``does_not_contain``.
 
@@ -1444,6 +1481,7 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
     total_ops = 0
     total_bytes = 0
     errors: list[str] = []
+    notes: list[str] = []
 
     def resolve(raw_path: str) -> Path:
         if not isinstance(raw_path, str) or not raw_path.strip():
@@ -1518,6 +1556,9 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
                     count = current.count(anchor)
                     if count != expected:
                         raise ValueError(f"operation {op_index}: anchor matches {count} locations; expected {expected}")
+                    join_note = _insert_join_note(current, anchor, text, path, expected)
+                    if join_note is not None:
+                        notes.append(join_note)
                     current = current.replace(anchor, anchor + text, expected)
                 else:
                     raise ValueError(f"operation {op_index}: unknown kind {kind!r}")
@@ -1571,8 +1612,11 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
                 )
             )
     diff = "".join(diff_parts)
+    # Notes sit between the header and the diff so they appear on a dry run and a
+    # real write alike; with no notes the output is unchanged byte for byte.
+    note_text = "".join(f"{note}\n" for note in notes)
     if dry_run:
-        return f"Dry run: no changes applied.\nFiles: {len(prepared)}\n\n{diff}".rstrip()
+        return f"Dry run: no changes applied.\nFiles: {len(prepared)}\n{note_text}\n{diff}".rstrip()
 
     # Stage every file before replacing any, so a write failure (disk full,
     # permissions) leaves all targets untouched; only the renames remain after.
@@ -1593,7 +1637,7 @@ def _apply_changes(changes: list[dict], dry_run: bool = False,
             item.discard()
         return f"Error: rename failed after validation; changes may be partially applied: {exc}"
 
-    return f"Applied changes to {len(prepared)} file(s).\n\n{diff}".rstrip()
+    return f"Applied changes to {len(prepared)} file(s).\n{note_text}\n{diff}".rstrip()
 
 
 _SUDO_STDIN_RE = re.compile(r'\bsudo\s+-S\b')

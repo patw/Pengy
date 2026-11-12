@@ -958,6 +958,88 @@ class TestTools:
         assert "before" in result and "after" in result
         assert path.read_text() == "before\n"
 
+    def _insert_notes(self, path, content, operations):
+        """Dry-run *operations* over *content* and return (note lines, result)."""
+        from pengy.core.tools import execute_tool
+
+        path.write_text(content)
+        result = execute_tool("apply_changes", {
+            "changes": [{"path": str(path), "operations": operations}],
+            "dry_run": True,
+        })
+        return [line for line in result.splitlines() if line.startswith("note:")], result
+
+    def test_apply_changes_insert_after_says_when_it_shares_a_line(self, tmp_path):
+        """insert_after is a character splice; a shared line must be announced.
+
+        From the 2026-11-12 defect report: `text` without a leading newline was
+        spliced onto the end of the anchor's line.  nftables rejected it, but in
+        .env, YAML, CSV, a Makefile or a commented-out setting the result is
+        valid text, so the corruption was silent and surfaced much later.  The
+        splice semantics are deliberately unchanged (an inline, mid-token insert
+        is a legitimate effect); the result now names the file and the line.
+        """
+        from pengy.core.tools import execute_tool
+
+        target = tmp_path / "t.txt"
+
+        # The reported case: text has no leading newline.
+        notes, result = self._insert_notes(target, "alpha\nbeta\ngamma\n", [
+            {"kind": "insert_after", "anchor": "beta", "text": "INSERTED-1\nINSERTED-2"}])
+        assert len(notes) == 1, notes
+        assert notes[0] == (
+            f"note: insert_after joined text to the end of line 2 in {target}: "
+            "the anchor does not end a line and text does not start with a newline. "
+            "Start text with a newline to insert whole lines."
+        ), notes[0]
+        # The note sits between the header and the diff, so a preview shows it.
+        assert result.startswith("Dry run: no changes applied.\nFiles: 1\nnote: "), result
+        assert "\n\n--- " in result, result
+
+        # The same hazard from the other side: the anchor ends the line and the
+        # text does not end with a newline, so it runs into the following line.
+        notes, _ = self._insert_notes(target, "alpha\nbeta\ngamma\n", [
+            {"kind": "insert_after", "anchor": "beta\n", "text": "X"}])
+        assert len(notes) == 1, notes
+        assert "joined text to the start of line 3" in notes[0]
+
+        # A mid-token anchor joins too, and the note does not pretend otherwise.
+        notes, _ = self._insert_notes(target, "alpha\nbeta\ngamma\n", [
+            {"kind": "insert_after", "anchor": "et", "text": "-MID-"}])
+        assert len(notes) == 1 and "end of line 2" in notes[0]
+
+        # Repeated anchors report how many locations joined.
+        notes, _ = self._insert_notes(target, "dup\ndup\ntail\n", [
+            {"kind": "insert_after", "anchor": "dup", "text": "X", "expected_matches": 2}])
+        assert len(notes) == 1 and "(+1 more)" in notes[0]
+
+        # Every documented whole-line form is silent: leading newline, trailing
+        # newline, both, an anchor that ends the last line, and an empty text.
+        for anchor, text in [("beta", "\nINSERTED"), ("beta\n", "INSERTED\n"),
+                             ("beta", "\nINSERTED\n"), ("gamma\n", "X"), ("beta", "")]:
+            notes, _ = self._insert_notes(target, "alpha\nbeta\ngamma\n", [
+                {"kind": "insert_after", "anchor": anchor, "text": text}])
+            assert notes == [], (anchor, text, notes)
+
+        # A real write keeps the exact splice and carries the note the dry run
+        # showed, so the preview and the write agree.
+        target.write_text("alpha\nbeta\ngamma\n")
+        result = execute_tool("apply_changes", {"changes": [{"path": str(target), "operations": [
+            {"kind": "insert_after", "anchor": "beta", "text": "X"}]}]})
+        assert "note: insert_after joined text to the end of line 2" in result
+        assert target.read_bytes() == b"alpha\nbetaX\ngamma\n"
+
+    def test_apply_changes_join_note_keeps_crlf_files_crlf(self, tmp_path):
+        """The note must not change line endings: a CRLF file stays CRLF."""
+        from pengy.core.tools import execute_tool
+
+        path = tmp_path / "crlf.txt"
+        path.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")
+        result = execute_tool("apply_changes", {"changes": [{"path": str(path), "operations": [
+            {"kind": "insert_after", "anchor": "beta", "text": "X"}]}]})
+        assert "joined text to the end of line 2" in result
+        assert path.read_bytes() == b"alpha\r\nbetaX\r\ngamma\r\n"
+
     def test_apply_changes_rejects_ambiguous_match_without_writing_any_file(self, tmp_path):
         from pengy.core.tools import execute_tool
 
