@@ -1733,12 +1733,20 @@ def _sudo_invocation_spans(command: str) -> list[tuple[int, int]]:
                 continue
             i += 1
         raw = command[start:i]
-        if raw.startswith("<<") and len(raw) > 2:
+        # `<<EOF` opens a heredoc body; `<<<` is a here-string (no body, so the
+        # rest of the command is still code) and `<<-EOF` is the tab-stripping
+        # form whose delimiter is EOF, not -EOF.  Getting either wrong swallowed
+        # the rest of the command, so a real sudo after it was never seen and the
+        # call ran with no password path at all.
+        if raw.startswith("<<") and not raw.startswith("<<<") and len(raw) > 2:
             delimiter = raw[2:]
+            if delimiter.startswith("-"):
+                delimiter = delimiter[1:]
             if ((delimiter.startswith("'") and delimiter.endswith("'"))
                     or (delimiter.startswith('"') and delimiter.endswith('"'))):
                 delimiter = delimiter[1:-1]
-            heredoc_delimiters.append(delimiter)
+            if delimiter:
+                heredoc_delimiters.append(delimiter)
         if not quoted and is_sudo_command(raw):
             spans.append((start, i))
         words.append(raw)

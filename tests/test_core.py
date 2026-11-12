@@ -1731,6 +1731,40 @@ class TestToolContext:
         ):
             assert _sudo_invocation_spans(command), command
 
+    def test_sudo_span_parser_matches_the_shared_case_table(self):
+        """One table, three editions (spec.md, "sudo support").
+
+        A heredoc BODY is data, so text inside one never asks for a password; a
+        here-string (`<<<`) opens no body and `<<-` names the same delimiter as
+        `<<`, so neither may swallow the rest of the command; and a real
+        invocation after any of them must still be seen. The last two used to
+        swallow everything after them, so `cat <<< x` followed by a genuine sudo
+        ran with no password path at all.
+        """
+        from pengy.core.tools import _sudo_invocation_spans
+        s = "sudo"
+        cases = [
+            (f"cat > f <<'EOF'\n{s} is a word\nEOF", False),
+            (f"cat > f <<'EOF'\n{s} apt update\nEOF", False),
+            (f"cat > f <<'EOF'\nsee ({s} rule\nEOF", False),
+            (f"cat > f <<'EOF'\ntext\nEOF\n{s} ls", True),
+            (f"{s} ls && cat <<'EOF'\n{s} word\nEOF", True),
+            (f'cat <<< "hi"\n{s} ls', True),
+            (f"cat <<-EOF\n\tbody\n\tEOF\n{s} ls", True),
+            (f"cat <<A <<B\na1\nA\nb1\nB\n{s} ls", True),
+            (f"cat <<A <<B\n{s} a\nA\n{s} b\nB", False),
+            (f'cat <<"E O F"\n{s} x\nE O F', False),
+            (f"cat <<EOF\n{s} ls", False),
+            (f"{s} apt update", True),
+            (f'echo "{s} apt"', False),
+            (f"# {s} apt\necho ok", False),
+            (f"env -i {s} ls", True),
+            (f"command {s} ls", True),
+            (f"({s} true)", True),
+        ]
+        for command, expected in cases:
+            assert bool(_sudo_invocation_spans(command)) is expected, command
+
     def test_sudo_rewrite_only_changes_invocations(self):
         from pengy.core.tools import _rewrite_sudo_for_askpass, _sudo_invocation_spans
         command = "sudo -S true; echo sudo; sudo -A id; cat <<'EOF'\nsudo text\nEOF"
