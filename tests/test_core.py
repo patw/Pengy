@@ -1175,6 +1175,33 @@ class TestTools:
             })
             assert "axb" in regex
 
+    def test_search_content_reports_being_capped(self, tmp_path):
+        """`max_results` counts match BLOCKS, and a capped search says so.
+
+        Adjacent matches group into one block however long it runs, so a limit
+        bounds hunks rather than matched lines. A single-file search used to
+        drop the limit flag on the floor: five blocks came back with nothing to
+        say the rest of the log existed.
+        """
+        from pengy.core.tools import execute_tool
+
+        separated = tmp_path / "sep.txt"
+        separated.write_text("\n".join(f"hit{i}" if i % 2 == 0 else f"miss{i}" for i in range(300)))
+        capped = execute_tool("search_content", {"pattern": "hit", "path": str(separated), "max_results": 5})
+        assert capped.count("📄") == 5
+        assert "results truncated at 5 match blocks" in capped
+
+        # One contiguous run is a single block, so the cap never fires.
+        adjoining = tmp_path / "run.txt"
+        adjoining.write_text("\n".join(f"hit{i}" for i in range(300)))
+        one_block = execute_tool("search_content", {"pattern": "hit", "path": str(adjoining), "max_results": 5})
+        assert one_block.count("📄") == 1
+        assert "truncated" not in one_block
+
+        # A directory search reports the cap in its summary line.
+        dir_out = execute_tool("search_content", {"pattern": "hit", "path": str(tmp_path), "max_results": 5})
+        assert "match block(s)" in dir_out and "results truncated" in dir_out
+
     def test_download_filename_cannot_escape_downloads(self):
         """The model picks this name and may be acting on a fetched page's
         instructions, so a path component must never leave ~/Downloads."""
@@ -1789,12 +1816,54 @@ class TestToolContext:
         result = execute_tool("run_bash", {"command": "pwd", "cwd": "/nonexistent_dir_xyz"})
         assert "cwd not found" in result
 
+    def test_read_file_counts_lines_like_wc(self, tmp_path):
+        """Lines are counted like `wc -l`: a trailing newline is not a line.
+
+        It used to report N+1 for every file ending in a newline, so the header
+        lied and offset=N+1 returned a phantom empty line instead of "past the
+        end". Whole-file reads must stay byte-identical either way.
+        """
+        from pengy.core.tools import execute_tool
+
+        f = tmp_path / "t.txt"
+        f.write_text("a\nb\n")
+        assert execute_tool("read_file", {"path": str(f)}) == "a\nb\n"
+        assert execute_tool("read_file", {"path": str(f), "offset": 1}).splitlines()[0] == \
+            f"[Lines 1-2 of 2 in {f}]"
+        assert "2 lines" in execute_tool("read_file", {"path": str(f), "offset": 3})
+
+        # No trailing newline: same count, and a page at the end still clamps.
+        f.write_text("a\nb")
+        assert execute_tool("read_file", {"path": str(f), "offset": 1}).splitlines()[0] == \
+            f"[Lines 1-2 of 2 in {f}]"
+        assert execute_tool("read_file", {"path": str(f), "offset": 2, "limit": 9}).splitlines()[1:] == ["b"]
+
+        # A blank line at the end IS a line; an empty file is empty, not one blank line.
+        f.write_text("a\n\n")
+        assert execute_tool("read_file", {"path": str(f), "offset": 1}).splitlines()[0] == \
+            f"[Lines 1-2 of 2 in {f}]"
+        empty = tmp_path / "empty.txt"
+        empty.write_text("")
+        assert execute_tool("read_file", {"path": str(empty)}) == ""
+
     def test_run_python_cwd(self, tmp_path):
         from pengy.core.tools import execute_tool
         sub = tmp_path / "sub"
         sub.mkdir()
         execute_tool("run_python", {"code": "open('marker.txt','w').write('x')", "cwd": str(sub)})
         assert (sub / "marker.txt").exists()
+
+    def test_run_python_returns_stderr_as_well_as_stdout(self):
+        """The description said "only printed output comes back"; stderr comes
+        back too, and that is the right contract — a traceback the model cannot
+        see is a traceback it misdiagnoses. Pinned so the text and the code
+        cannot drift apart again in either direction."""
+        from pengy.core.tools import execute_tool
+
+        out = execute_tool("run_python", {"code": "import sys\nprint('OUT')\nsys.stderr.write('ERR')"})
+        assert "OUT" in out and "ERR" in out
+        failing = execute_tool("run_python", {"code": "raise SystemExit('boom')"})
+        assert "boom" in failing and "Exit code: 1" in failing
 
     def test_kill_all_only_affects_own_context(self):
         """kill_all() on one context must not touch another's subprocess."""

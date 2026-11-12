@@ -510,13 +510,13 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "apply_changes",
-            "description": "Apply several exact-text edits across existing files, all or nothing. dry_run=true returns the unified diff without writing.",
+            "description": "Apply several exact-text edits across existing files, all or nothing.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "changes": {
                         "type": "array",
-                        "description": "Per file: path and operations. An operation is replace (old, new), delete (old) or insert_after (anchor, text); old/anchor must match expected_matches times (default 1)",
+                        "description": "Per file: path and operations. An operation is replace (old, new), delete (old) or insert_after (anchor, text)",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -540,7 +540,7 @@ _BASE_TOOLS = [
                             "required": ["path", "operations"],
                         },
                     },
-                    "dry_run": {"type": "boolean", "description": "Preview only; nothing is written"},
+                    "dry_run": {"type": "boolean", "description": "Return the unified diff without writing"},
                     "postconditions": {
                         "type": "array",
                         "description": "Optional {path, contains, does_not_contain} plain-substring checks on a file's whole edited text, comments and strings included; a failed check cancels every edit",
@@ -563,7 +563,7 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Run a bash command and return its output. Non-interactive: stdin is closed, so prompts fail instead of waiting -- pass non-interactive flags. Without host it runs here; with host (an ssh destination, key login already working) it runs on that machine and cwd/paths are that machine's. Do not wrap the command in ssh yourself. For root, include an explicit sudo in the command AND set elevated=true: elevated alone is rejected, not silently ignored, and Pengy then asks the user for that host's sudo password. Killed after the tool timeout.",
+            "description": "Run a bash command and return its output. Non-interactive (stdin closed): pass non-interactive flags. With host, it runs on that ssh target and cwd/paths are its own; never wrap the command in ssh yourself. For root, include sudo in the command and set elevated=true -- elevated alone is rejected. Killed after the tool timeout.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -663,7 +663,7 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "run_python",
-            "description": "Run Python code in a fresh process; only printed output comes back. Killed after the tool timeout.",
+            "description": "Run Python code in a fresh process; stdout and stderr both come back. Killed after the tool timeout.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -753,7 +753,7 @@ _BASE_TOOLS = [
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "Maximum matches (default 50)",
+                        "description": "Maximum match blocks (adjacent matches group; default 50)",
                     },
                     "ignore_case": {
                         "type": "boolean",
@@ -769,7 +769,7 @@ _BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "Find files by glob pattern; ** matches any depth. Skips hidden and build/vendor directories; at most 200 results.",
+            "description": "Find files by glob pattern; ** matches any depth. Skips hidden and build/dist/target directories; at most 200 results.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1122,19 +1122,27 @@ def _read_file(path: str, offset: int | None = None,
             return f"Error: File appears to be binary (not text): {path}"
 
         lines = text.split("\n")
-        total = len(lines)
+        # split() leaves a phantom "" after a trailing newline, so "a\nb\n"
+        # would report 3 lines where wc -l says 2 (and offset=3 would "work").
+        # Slicing keeps the whole list, because a whole-file read must still
+        # return the text byte for byte; only the count we report and the
+        # past-the-end check use real lines.
+        raw_total = len(lines)
+        total = raw_total - 1 if raw_total and lines[-1] == "" else raw_total
+        if not text:
+            return ""
         start = 1 if offset is None else max(1, offset)
         if start > total:
             return (
                 f"Error: offset {start} is past the end of {path}, "
                 f"which has {total:,} lines."
             )
-        count = (total - start + 1) if limit is None else max(1, limit)
-        end = min(total, start + count - 1)
+        count = (raw_total - start + 1) if limit is None else max(1, limit)
+        end = min(raw_total, start + count - 1)
 
         body = "\n".join(lines[start - 1:end])
         body, kept, truncated = _truncate_head_lines(body)
-        shown_end = start + kept - 1
+        shown_end = min(start + kept - 1, total)
 
         # A plain whole-file read that fit stays bare — no header to parse.
         if not truncated and offset is None and limit is None:
@@ -2877,11 +2885,18 @@ def _search_content(pattern: str, path: str, file_glob: str | None,
 
     # If the path is a single file, search just that file
     if root.is_file():
-        _search_one_file(root, compiled, context_lines, results,
-                         max_results, None)
+        hit_limit = _search_one_file(root, compiled, context_lines, results,
+                                     max_results, None)
         if not results:
             return f"No matches found for '{pattern}' in {path}"
-        return "\n\n".join(results)
+        out = "\n\n".join(results)
+        # A capped search must never look complete: this branch used to drop the
+        # limit flag on the floor, so a big log came back as five blocks with no
+        # sign that the rest existed.
+        if hit_limit:
+            out += (f"\n\n(results truncated at {max_results} match blocks; "
+                    f"raise max_results or narrow the pattern)")
+        return _snip_tool_output(out)
 
     # Walk the directory
     try:
@@ -2937,7 +2952,7 @@ def _search_content(pattern: str, path: str, file_glob: str | None,
 
     out = "\n\n".join(results)
     summary = (
-        f"Found {len(results)} match(es) for '{pattern}' "
+        f"Found {len(results)} match block(s) for '{pattern}' "
         f"across {files_searched} file(s)"
     )
     if truncated:
