@@ -138,7 +138,7 @@ def main():
 
     from pathlib import Path
     from PySide6.QtWidgets import QApplication
-    from PySide6.QtGui import QIcon
+    from pengy.ui.app_icon import application_icon
 
     from pengy.core.config import load_config
     from pengy.ui.main_window import MainWindow
@@ -155,7 +155,7 @@ def main():
     app.setApplicationName("Pengy")
     app.setOrganizationName("Pengy")
     if _ICON_PATH.exists():
-        app.setWindowIcon(QIcon(str(_ICON_PATH)))
+        app.setWindowIcon(application_icon(_ICON_PATH))
 
     app.setFont(ui_font(config))
     app.setStyleSheet(qt_app_stylesheet(get_theme(config)))
