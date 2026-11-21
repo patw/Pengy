@@ -362,7 +362,7 @@ class TestQtJumpToHit:
         while view.verticalScrollBar().value() in (0, view.verticalScrollBar().maximum()):
             qapp.processEvents()
             assert time.time() < deadline, "did not scroll to the hit"
-        assert not view._auto_scroll
+        assert view._follow is False
 
         # A message index no longer in the view (redacted) is reported.
         assert not view.reveal_hits([42], ["nginx"])
@@ -376,6 +376,6 @@ class TestQtJumpToHit:
         view.render_now()
         view.reveal_hits([0], ["nginx"])
         view.append_message("user", "next", source=1)
-        assert view._hit_marks == {} and view._auto_scroll
+        assert view._hit_marks == {} and view._follow
         assert "search-hit" not in "".join(view._html_cache)
         view.deleteLater()

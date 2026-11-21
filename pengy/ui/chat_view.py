@@ -7,8 +7,9 @@ import re
 import threading
 import urllib.request
 from PySide6.QtWidgets import QTextBrowser, QMenu
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QImage, QMouseEvent, QTextDocument
+from PySide6.QtCore import Qt, QPoint, QTimer, QUrl, Signal
+from PySide6.QtGui import (QDesktopServices, QImage, QMouseEvent, QTextCursor,
+                           QTextDocument)
 
 from pengy.ui.image_preview import ImagePreview
 from pengy.ui.image_save import save_image_as
@@ -71,9 +72,23 @@ h4, h5, h6 {{ font-size:1em; }}
 """
 
 
-# Within this many pixels of the bottom, treat the view as "pinned" so new
-# content auto-scrolls into view instead of pushing the user's reading spot.
+# Within this many pixels of the bottom the view counts as "at the end of the
+# feed", so scrolling back to the bottom resumes following instead of leaving
+# the view stranded a few pixels short of it.
 _BOTTOM_MARGIN = 30
+
+# Scrollbar actions that move the view *towards* older output (QAbstractSlider
+# .SliderAction: SingleStepSub=2, PageStepSub=4, SliderToMinimum=5).  They are
+# read as "the user wants to read history", immediately, because
+# actionTriggered() fires *before* the new value is applied.
+_UPWARD_ACTIONS = (2, 4, 5)
+
+# Keys the view handles by scrolling itself; only these can move the viewport.
+# (Space pages down in this read-only view, Shift+Space pages up.)
+_SCROLL_KEYS = frozenset({
+    Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
+    Qt.Key.Key_Home, Qt.Key.Key_End, Qt.Key.Key_Space,
+})
 
 # Splits rendered HTML into tags and text, so search words are only marked
 # in the text between tags.
@@ -124,14 +139,30 @@ class ChatView(QTextBrowser):
         self._image_lock = threading.Lock()
         self._image_loaded.connect(self._render)
         self._preview = None
-        # Auto-scroll tracking. setHtml() replaces the whole document and
-        # resets the scrollbar to the top, so scrollbar.value() right after a
-        # render is 0 — *not* a reliable "the user scrolled here" signal. We
-        # keep an explicit _auto_scroll flag updated only by genuine user
-        # scrolling (see _on_scroll_changed), and guard the spurious reset.
-        self._auto_scroll = True
-        self._rendering = False
-        self.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+        # ── follow-the-feed state ─────────────────────────────────────
+        # Intent comes from *real input events only* (wheel, keys, scrollbar
+        # drag).  setHtml() replaces the whole document: it resets the bar,
+        # Qt reports valueChanged() for that reset, and the maximum keeps
+        # moving for several layout passes afterwards — so the scrollbar's
+        # geometry is not evidence of what the user wants.  The previous
+        # design inferred intent from it (is value() near maximum()?) and the
+        # transient reset-to-0 was read as "the user scrolled up": the pin was
+        # cleared, and every render after that restored a stale pixel offset,
+        # leaving the view stranded in history while new output arrived.
+        self._follow = True
+        # When not following: (document position, sub-line offset) of the
+        # character at the top of the viewport, re-applied after each render so
+        # the reading spot holds still while output grows below it.
+        self._pending_anchor: tuple[int, int] | None = None
+        self._settle_queued = False
+        self._dragging = False         # user is holding the scrollbar thumb
+        self._render_pending = False   # a render was deferred by that drag
+        bar = self.verticalScrollBar()
+        bar.actionTriggered.connect(self._on_scroll_action)
+        bar.rangeChanged.connect(self._on_range_changed)
+        bar.sliderPressed.connect(self._on_slider_pressed)
+        bar.sliderMoved.connect(self._on_slider_moved)
+        bar.sliderReleased.connect(self._on_slider_released)
         self.md_extensions = ["fenced_code", "codehilite", "tables", "footnotes"]
         # One reusable parser; constructing a fresh Markdown() per message is
         # ~6x slower and this method is called for every message on every render.
@@ -361,7 +392,8 @@ class ChatView(QTextBrowser):
             if render:
                 # Sending a message ends a search jump: back to following the chat.
                 self._clear_hit_marks()
-                self._auto_scroll = True
+                self._follow = True
+                self._pending_anchor = None
         elif role == "assistant":
             if content:
                 msg = {"role": "assistant", "content": content, "source": source}
@@ -400,8 +432,12 @@ class ChatView(QTextBrowser):
             self._render()
 
     def render_now(self):
-        """Force a full re-render. Use after a batch of append_message(render=False)."""
-        self._render()
+        """Force a full re-render. Use after a batch of append_message(render=False).
+
+        ``force`` skips the scrollbar-drag deferral: a caller that re-renders on
+        purpose (tab opened, chat redacted) must not be told to wait.
+        """
+        self._render(force=True)
 
     def clear(self):
         if self._preview is not None:
@@ -412,7 +448,9 @@ class ChatView(QTextBrowser):
         self._expanded_tools = set()
         self._expanded_reasoning = set()
         self._hit_marks = {}
-        self._auto_scroll = True
+        self._follow = True
+        self._pending_anchor = None
+        self._render_pending = False
         super().clear()
 
     # ── search hits ───────────────────────────────────────────────────
@@ -431,62 +469,175 @@ class ChatView(QTextBrowser):
             self._hit_marks[idx] = list(terms)
             self._invalidate(idx)
         # Stay put on later renders instead of snapping back to the bottom.
-        self._auto_scroll = False
+        self._follow = False
+        self._pending_anchor = None
         self._render()
         # The anchor's position is only known once Qt has laid out the new
-        # document, and this must run after any pending scroll-to-bottom.
+        # document, and this must run after any pending settle.
         QTimer.singleShot(0, self._scroll_to_hit)
         return True
 
     def _scroll_to_hit(self):
-        self._rendering = True
         self.scrollToAnchor("pengy-hit")
         # A little of the previous message above it, so the hit isn't flush
         # against the top edge.
         bar = self.verticalScrollBar()
         bar.setValue(bar.value() - 24)
-        self._rendering = False
+        # Hold this spot (not the bottom) on the renders that follow.
+        self._pending_anchor = self._anchor_top()
 
     def _clear_hit_marks(self):
         for idx in self._hit_marks:
             self._invalidate(idx)
         self._hit_marks = {}
 
-    def _on_scroll_changed(self, value: int):
-        """Update the pinned-to-bottom flag from a *genuine* user scroll.
+    # ── follow the feed / hold the reading spot ───────────────────────
 
-        Suppressed while _rendering: setHtml() programmatically resets the bar
-        to 0, which is not a user action and must not clear our auto-scroll
-        intent (the bug that made the view snap back up to old history).
+    def wheelEvent(self, event):
+        # A wheel notch is a genuine scroll, and super() applies the new value
+        # synchronously, so intent can be read straight afterwards.
+        self._end_drag()             # a lost slider release must not freeze the view
+        super().wheelEvent(event)
+        self._note_user_scroll()
+
+    def keyPressEvent(self, event):
+        self._end_drag()
+        super().keyPressEvent(event)
+        if event.key() in _SCROLL_KEYS:
+            self._note_user_scroll()
+
+    def _on_scroll_action(self, action: int):
+        """Scrollbar arrows / trough clicks.
+
+        Fires *before* the new value is applied, so the resulting position is
+        only known on the next tick.  An upward action stops following
+        immediately — otherwise a render landing in that gap would drag the
+        view back to the bottom and undo the click.
         """
-        if self._rendering:
+        if action in _UPWARD_ACTIONS:
+            self._follow = False
+            self._pending_anchor = self._anchor_top()
+        QTimer.singleShot(0, self._note_user_scroll)
+
+    def _on_slider_pressed(self):
+        # Holding the thumb: do not rebuild the document under it. setHtml()
+        # resets the bar mid-drag, which both fights the drag (the thumb jumps
+        # away from the pointer) and loses the drag's own value. Catch up once
+        # the user lets go.
+        self._dragging = True
+
+    def _on_slider_moved(self, value: int):
+        # sliderMoved() carries the value the drag is heading for, so it can be
+        # judged without waiting for the bar to settle.
+        self._note_user_scroll(value)
+
+    def _on_slider_released(self):
+        self._end_drag()
+        self._note_user_scroll()
+
+    def _end_drag(self):
+        """The thumb is no longer held: apply whatever output arrived meanwhile."""
+        if not self._dragging:
             return
-        sb = self.verticalScrollBar()
-        self._auto_scroll = value >= sb.maximum() - _BOTTOM_MARGIN
+        self._dragging = False
+        if self._render_pending:
+            self._render_pending = False
+            self._render()
 
-    def _render(self):
-        scrollbar = self.verticalScrollBar()
-        prev_pos = scrollbar.value()
-        # setHtml() rebuilds the document and resets the scrollbar to the top.
-        # Guard valueChanged for the setHtml + position-restore so that spurious
-        # reset-to-0 isn't read as "the user scrolled up." The deferred
-        # scroll-to-bottom below runs *after* the guard lifts, so its
-        # valueChanged correctly re-arms _auto_scroll.
-        self._rendering = True
-        self.setHtml(self._build_html())
-        if self._auto_scroll:
-            self._rendering = False
-            # maximum() is stale until Qt lays out the new document, so defer.
-            QTimer.singleShot(0, self._scroll_to_bottom)
+    def _note_user_scroll(self, value: int | None = None):
+        """A real input event moved the viewport: (re)decide whether to follow.
+
+        Following resumes as soon as the user brings the view back to the
+        bottom — "give me the live feed again" — and stops the moment they
+        move away from it.
+        """
+        bar = self.verticalScrollBar()
+        position = bar.value() if value is None else value
+        self._follow = position >= bar.maximum() - _BOTTOM_MARGIN
+        if self._follow:
+            self._pending_anchor = None
+            self._schedule_settle()      # close the last few pixels
         else:
-            scrollbar.setValue(prev_pos)
-            self._rendering = False
+            self._pending_anchor = self._anchor_top()
 
-    def _scroll_to_bottom(self):
-        # Skipped if a search jump (reveal_hits) landed since this was queued,
-        # as it does right after a chat is opened from a search result.
-        if self._auto_scroll:
-            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+    def _anchor_top(self) -> tuple[int, int] | None:
+        """Document position and sub-line offset of the character at the top of
+        the viewport.  None without a laid-out viewport (a hidden tab), where
+        the geometry means nothing and must not be recorded."""
+        if not self.isVisible() or self.viewport().height() <= 0:
+            return None
+        cursor = self.cursorForPosition(QPoint(0, 0))
+        return (cursor.position(), self.cursorRect(cursor).y())
+
+    def _apply_anchor(self, anchor: tuple[int, int]):
+        """Put *anchor* back at the top of the viewport."""
+        position, offset = anchor
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(position)
+        delta = self.cursorRect(cursor).y() - offset
+        if delta:
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.value() + delta)
+
+    def _schedule_settle(self):
+        """Re-assert the scroll position once Qt has finished laying out.
+
+        setHtml() relayouts asynchronously and the scrollbar maximum changes
+        over several passes (measured: 0 -> 2986 -> 3307 -> 3266 for one
+        append), so a jump to the bottom issued immediately afterwards lands on
+        a stale maximum and leaves the view short of the end.
+        """
+        if not self._settle_queued:
+            self._settle_queued = True
+            QTimer.singleShot(0, self._settle)
+
+    def _settle(self):
+        self._settle_queued = False
+        if self._dragging:
+            return                       # the user owns the bar right now
+        if self._follow:
+            bar = self.verticalScrollBar()
+            if bar.value() != bar.maximum():
+                bar.setValue(bar.maximum())
+        elif self._pending_anchor is not None:
+            self._apply_anchor(self._pending_anchor)
+
+    def _on_range_changed(self, _minimum: int, _maximum: int):
+        # The document is still settling (images resolving, tables reflowing):
+        # re-anchor to the position already decided instead of trusting the
+        # maximum seen one tick ago.
+        if self._follow or self._pending_anchor is not None:
+            self._schedule_settle()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_settle()
+
+    def resizeEvent(self, event):
+        # Qt re-lays the document out at the new width: keep following the end,
+        # or hold the reading spot, instead of letting the resize decide.
+        super().resizeEvent(event)
+        self._schedule_settle()
+
+    def _render(self, force: bool = False):
+        if self._dragging and not force:
+            self._render_pending = True  # rebuilt on slider release
+            return
+        # Record the reading spot *before* the document is replaced: the
+        # character that was at the top of the viewport is what has to stay
+        # there. A pixel offset is not enough — appending output can resize
+        # anything above it (an image finishing its load, a tool card
+        # collapsing), which moves the offset but not the character.
+        if self._follow:
+            self._pending_anchor = None
+        else:
+            anchor = self._anchor_top()
+            if anchor is not None:
+                self._pending_anchor = anchor
+            # Hidden tab: anchor_top() cannot measure, so keep the last anchor
+            # (captured while it was last visible) instead of overwriting it.
+        self.setHtml(self._build_html())
+        self._schedule_settle()
 
     # ── render cache ──────────────────────────────────────────────────
     # Anything that changes a message's *rendered output* must invalidate it:

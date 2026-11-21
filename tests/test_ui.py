@@ -593,72 +593,177 @@ class TestChatViewRenderCache:
 
 
 # ────────────────────────────────────────────────────────────────────
-# Auto-scroll pin  (regression: "snaps back up to old history")
+# Following the feed  (regression: "bounces back up to old history")
 # ────────────────────────────────────────────────────────────────────
-# setHtml() replaces the whole document and resets the scrollbar to 0. The old
-# _render() decided "am I at the bottom?" by reading scrollbar.value() *after*
-# that reset — so any render landing while a previous render's deferred
-# scroll-to-bottom was still pending read value()==0, concluded the user had
-# scrolled up, and pinned the view to the top of the history. These guard the
-# explicit _auto_scroll flag that replaced that brittle check.
+# setHtml() replaces the whole document: Qt resets the bar, reports
+# valueChanged() for that reset, and keeps moving the maximum for several
+# layout passes afterwards.  Reading intent out of that geometry is what
+# stranded the view mid-history while output kept arriving.  Intent now comes
+# from real input events only (wheel / keys / scrollbar), and the reading spot
+# is held by document position instead of by pixel offset.  These tests drive
+# the widget the way a person does, because a programmatic setValue() must NOT
+# read as a scroll.
 
-class TestAutoScrollPin:
+def settle(qapp, rounds: int = 4):
+    """Flush Qt's layout passes and the deferred scroll work between them."""
+    for _ in range(rounds):
+        qapp.processEvents()
+
+
+class TestFollowTheFeed:
     @pytest.fixture
     def view(self, qapp):
         from pengy.ui.chat_view import ChatView
         v = ChatView()
         v.resize(400, 600)
         v.show()
-        qapp.processEvents()
         # Fill with enough content to make the document taller than the viewport.
         for i in range(60):
             v.append_message("assistant", ("line %d " % i) * 20, render=False)
+        v.render_now()
+        settle(qapp)
         yield v
         v.deleteLater()
         qapp.processEvents()
 
-    def test_pin_survives_a_render(self, view, qapp):
-        assert view._auto_scroll is True
-        view._render()
-        qapp.processEvents()
-        assert view._auto_scroll is True
+    @staticmethod
+    def _wheel(view, qapp, notches: int):
+        """One wheel gesture; positive *notches* scroll towards older output."""
+        from PySide6.QtCore import QPoint, QPointF
+        from PySide6.QtGui import QWheelEvent
+        target = view.viewport()
+        event = QWheelEvent(
+            QPointF(20, 20), target.mapToGlobal(QPoint(20, 20)),
+            QPoint(0, 0), QPoint(0, 120 * notches),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        )
+        QApplication.sendEvent(target, event)
+        settle(qapp)
 
-    def test_interleaved_render_keeps_the_pin(self, view, qapp):
-        # Two renders back-to-back before the event loop flushes the deferred
-        # scroll — the exact sequence (e.g. an image loaded mid-stream) that
-        # used to read value()==0 and snap the view to the top.
-        view._render()
-        view._render()
-        qapp.processEvents()
-        assert view._auto_scroll is True
-
-    def test_genuine_scroll_up_clears_the_pin(self, view, qapp):
-        view._render()
-        qapp.processEvents()
-        view.verticalScrollBar().setValue(0)
-        qapp.processEvents()
-        assert view._auto_scroll is False
-
-    def test_cleared_pin_does_not_yank_to_bottom(self, view, qapp):
-        view._render()
-        qapp.processEvents()
+    def test_new_output_follows_the_end(self, view, qapp):
         sb = view.verticalScrollBar()
-        sb.setValue(0)
-        qapp.processEvents()
-        assert view._auto_scroll is False
-        view._render()
-        qapp.processEvents()
-        # Stayed near the top (where the user was reading), not the bottom.
-        assert view.verticalScrollBar().value() < sb.maximum() // 2
+        assert view._follow is True
+        for n in range(3):
+            view.append_message("assistant", f"chunk {n} " * 40)
+            settle(qapp)
+            assert sb.value() == sb.maximum(), "did not stay pinned to the end"
 
-    def test_clear_resets_pin(self, view, qapp):
+    def test_follow_survives_repeated_renders(self, view, qapp):
         view._render()
-        qapp.processEvents()
+        view._render()
+        settle(qapp)
+        assert view._follow is True
+
+    def test_programmatic_scroll_does_not_stop_following(self, view, qapp):
+        # setHtml() and Qt's own relayout move the bar without the user doing
+        # anything. That is the read that used to clear the pin and leave the
+        # view stuck in history.
         view.verticalScrollBar().setValue(0)
-        qapp.processEvents()
-        assert view._auto_scroll is False
+        settle(qapp)
+        assert view._follow is True
+        view.append_message("assistant", "more output " * 40)
+        settle(qapp)
+        sb = view.verticalScrollBar()
+        assert sb.value() == sb.maximum()
+
+    def test_programmatic_scroll_keeps_the_view_at_the_end(self, view, qapp):
+        # Geometry-only version of the same invariant (no private state): a
+        # scroll the user did not make must not strand the view in history.
+        sb = view.verticalScrollBar()
+        sb.setValue(0)          # what setHtml() / Qt's relayout do to the bar
+        view.append_message("assistant", "more output " * 40)
+        settle(qapp)
+        assert sb.value() == sb.maximum()
+
+    def test_wheel_up_stops_following(self, view, qapp):
+        self._wheel(view, qapp, +3)
+        assert view._follow is False
+
+    def test_output_while_reading_holds_the_position(self, view, qapp):
+        self._wheel(view, qapp, +8)
+        sb = view.verticalScrollBar()
+        reading = sb.value()
+        assert view._follow is False and reading < sb.maximum() - 30
+        for n in range(4):
+            view.append_message("assistant", f"new output {n} " * 40)
+            settle(qapp)
+            assert sb.value() == reading, "the view drifted while the user was reading"
+        assert view._follow is False
+
+    def test_scrolling_back_to_the_bottom_resumes_following(self, view, qapp):
+        self._wheel(view, qapp, +8)
+        sb = view.verticalScrollBar()
+        assert view._follow is False
+        # Back to the bottom: that is "give me the live feed again".
+        self._wheel(view, qapp, -60)
+        assert view._follow is True
+        assert sb.value() == sb.maximum()
+        view.append_message("assistant", "live again " * 40)
+        settle(qapp)
+        assert sb.value() == sb.maximum()
+
+    def test_keyboard_scroll_stops_following(self, view, qapp):
+        view.setFocus()
+        event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_PageUp,
+                          Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(view, event)
+        settle(qapp)
+        assert view._follow is False
+
+    def test_scrollbar_click_up_stops_following(self, view, qapp):
+        from PySide6.QtWidgets import QAbstractSlider
+        sb = view.verticalScrollBar()
+        sb.triggerAction(QAbstractSlider.SliderAction.SliderPageStepSub)
+        settle(qapp)
+        assert view._follow is False
+
+    def test_dragging_the_scrollbar_defers_the_render(self, view, qapp):
+        # Rebuilding the document under a held thumb resets the bar mid-drag:
+        # that is the "worse when you touch the scrollbar" half of the report.
+        from pengy.ui.chat_view import ChatView
+        view.verticalScrollBar().sliderPressed.emit()
+        view.append_message("assistant", "arrives mid-drag " * 40)
+        assert view._render_pending is True
+        assert "arrives mid-drag" not in view.toPlainText()
+
+        view.verticalScrollBar().sliderReleased.emit()
+        settle(qapp)
+        assert view._render_pending is False
+        assert "arrives mid-drag" in view.toPlainText()
+        assert isinstance(view, ChatView)
+
+    def test_output_while_the_tab_is_hidden_returns_to_the_end(self, view, qapp):
+        # Switching tabs mid-turn is normal: the hidden view keeps receiving
+        # output, and coming back must show the newest of it.
+        sb = view.verticalScrollBar()
+        view.hide()
+        settle(qapp)
+        view.append_message("assistant", "produced while hidden " * 40)
+        settle(qapp)
+        view.show()
+        settle(qapp)
+        assert view._follow is True
+        assert sb.value() == sb.maximum()
+
+    def test_hidden_tab_keeps_the_reading_spot(self, view, qapp):
+        sb = view.verticalScrollBar()
+        self._wheel(view, qapp, +8)
+        reading = sb.value()
+        view.hide()
+        settle(qapp)
+        view.append_message("assistant", "produced while hidden " * 40)
+        settle(qapp)
+        view.show()
+        settle(qapp)
+        assert view._follow is False
+        assert sb.value() == reading
+
+    def test_clear_resets_follow(self, view, qapp):
+        self._wheel(view, qapp, +8)
+        assert view._follow is False
         view.clear()
-        assert view._auto_scroll is True
+        assert view._follow is True
 
 
 # ────────────────────────────────────────────────────────────────────

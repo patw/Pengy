@@ -229,7 +229,7 @@ when final text is empty. Existing cumulative `chat.usage` remains separate.
 - **Reasoning:** a collapsible card above the assistant message when the model returned reasoning
 - **Notice / error cards:** harness messages (context recovery, failed turns) on their own surface, never labelled as the assistant
 - Syntax-highlighted code blocks (Pygments; the theme's style — friendly in light, monokai in dark)
-- Follows new content only while scrolled to the bottom; scrolling up holds position. A search jump (see "Chat Search") marks the hit messages and holds position until the next send
+- Follows new output by default and stays on the last line as it arrives. Scrolling back (wheel, keyboard, scrollbar) holds the reading position, and coming back to the bottom resumes following. Intent comes from real input events only — the view re-rendering itself must never flip the mode — and the position held is a document position, not a pixel offset, so output growing below it (or an image finishing its load above it) does not drag the view. A scrollbar drag defers re-rendering until the thumb is released. A search jump (see "Chat Search") marks the hit messages and holds position until the next send
 
 ### Right-Bottom Pane (Chat Input)
 - **📎 Attach button** — Opens file picker; accepts text files (detected by extension, MIME type, and UTF-8 sniff) and images (JPEG, PNG, GIF, WebP); other binary files are rejected with an error dialog
