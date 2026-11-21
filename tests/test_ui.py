@@ -759,6 +759,43 @@ class TestFollowTheFeed:
         assert view._follow is False
         assert sb.value() == reading
 
+    def test_output_burst_holds_the_reading_spot(self, view, qapp):
+        # A real turn emits several cards back to back, so several renders land
+        # before the deferred scroll work runs. Re-reading the viewport in
+        # render() then captured the document *start* (setHtml had already reset
+        # the bar) and parked the view at the very top of the chat.
+        self._wheel(view, qapp, +8)
+        sb = view.verticalScrollBar()
+        reading = sb.value()
+        assert view._follow is False
+        for n in range(3):
+            view.append_message("tool_request",
+                                {"tool_call_id": f"b{n}", "name": "bash", "args": {}})
+            view.append_message("tool_result",
+                                {"tool_call_id": f"b{n}", "content": "out\n" * 40})
+            view.append_message("assistant", f"narration {n} " * 30)
+        settle(qapp)
+        assert sb.value() == reading, "a burst of output moved the reading spot"
+
+    def test_wheel_during_a_pending_settle_scrolls_from_the_reading_spot(self, view, qapp):
+        # The bar sits at 0 between a render and its settle. A wheel notch taken
+        # there scrolled from the top instead of from where the reader was.
+        self._wheel(view, qapp, +8)
+        sb = view.verticalScrollBar()
+        reading = sb.value()
+        view.append_message("assistant", "burst " * 40)
+        self._wheel(view, qapp, +1)   # lands while the settle is still queued
+        settle(qapp)
+        assert 0 < sb.value() < reading, f"moved to {sb.value()} from {reading}"
+        assert view._follow is False
+
+    def test_burst_while_following_stays_at_the_end(self, view, qapp):
+        sb = view.verticalScrollBar()
+        for n in range(3):
+            view.append_message("assistant", f"chunk {n} " * 40)
+        settle(qapp)
+        assert sb.value() == sb.maximum()
+
     def test_clear_resets_follow(self, view, qapp):
         self._wheel(view, qapp, +8)
         assert view._follow is False

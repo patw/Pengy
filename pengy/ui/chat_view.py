@@ -494,14 +494,18 @@ class ChatView(QTextBrowser):
     # ── follow the feed / hold the reading spot ───────────────────────
 
     def wheelEvent(self, event):
-        # A wheel notch is a genuine scroll, and super() applies the new value
-        # synchronously, so intent can be read straight afterwards.
+        # A wheel notch is a genuine scroll: super() applies the new value
+        # synchronously, so intent can be read straight afterwards. The settle
+        # runs first so the notch lands on the position the reader is actually
+        # on — a render leaves the bar at the top until that runs.
         self._end_drag()             # a lost slider release must not freeze the view
+        self._flush_pending_scroll()
         super().wheelEvent(event)
         self._note_user_scroll()
 
     def keyPressEvent(self, event):
         self._end_drag()
+        self._flush_pending_scroll()
         super().keyPressEvent(event)
         if event.key() in _SCROLL_KEYS:
             self._note_user_scroll()
@@ -519,11 +523,24 @@ class ChatView(QTextBrowser):
             self._pending_anchor = self._anchor_top()
         QTimer.singleShot(0, self._note_user_scroll)
 
+    def _flush_pending_scroll(self):
+        """Run a queued settle before input reads or scrolls the viewport.
+
+        A render leaves the bar at the top until the settle runs. Scrolling from
+        there — or capturing the reading spot there — is what sent the view to
+        the top of the chat: the wheel moved from 0, and the anchor became the
+        document start.
+        """
+        if self._settle_queued:
+            self._settle()
+
     def _on_slider_pressed(self):
         # Holding the thumb: do not rebuild the document under it. setHtml()
         # resets the bar mid-drag, which both fights the drag (the thumb jumps
         # away from the pointer) and loses the drag's own value. Catch up once
         # the user lets go.
+        self._end_drag()
+        self._flush_pending_scroll()
         self._dragging = True
 
     def _on_slider_moved(self, value: int):
@@ -532,8 +549,10 @@ class ChatView(QTextBrowser):
         self._note_user_scroll(value)
 
     def _on_slider_released(self):
-        self._end_drag()
+        # Read intent and the reading spot while the bar still holds the drag's
+        # value: the catch-up render in _end_drag() resets it.
         self._note_user_scroll()
+        self._end_drag()
 
     def _end_drag(self):
         """The thumb is no longer held: apply whatever output arrived meanwhile."""
@@ -623,19 +642,13 @@ class ChatView(QTextBrowser):
         if self._dragging and not force:
             self._render_pending = True  # rebuilt on slider release
             return
-        # Record the reading spot *before* the document is replaced: the
-        # character that was at the top of the viewport is what has to stay
-        # there. A pixel offset is not enough — appending output can resize
-        # anything above it (an image finishing its load, a tool card
-        # collapsing), which moves the offset but not the character.
         if self._follow:
             self._pending_anchor = None
-        else:
-            anchor = self._anchor_top()
-            if anchor is not None:
-                self._pending_anchor = anchor
-            # Hidden tab: anchor_top() cannot measure, so keep the last anchor
-            # (captured while it was last visible) instead of overwriting it.
+        # Not following: keep the anchor already held. NEVER re-read the viewport
+        # here — setHtml() below resets the bar to the top, so a second render in
+        # the same burst (a turn emits several cards back to back) would capture
+        # the document start and park the view there. The reading spot is
+        # captured when the user moves the bar and nowhere else.
         self.setHtml(self._build_html())
         self._schedule_settle()
 
