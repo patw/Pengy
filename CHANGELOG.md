@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.15.5 — 2026-11-21
 
 - **The chat view follows output again, and scrolling back now stays where you put it.** The view decided whether to keep following by reading the scrollbar after each render — but `setHtml()` replaces the document, resets the bar, reports `valueChanged` for that reset, and keeps moving the maximum over several layout passes afterwards (measured: 0 → 2986 → 3307 → 3266 for one append). A reset read as "the user scrolled up" cleared the pin, and every render after it restored a stale pixel offset: the view ended up stranded in history with new output quietly arriving below it. It was worse with the scrollbar in hand, because the rebuild reset the bar under the thumb mid-drag. Intent now comes from real input only (wheel, the view's scroll keys, scrollbar actions and drags), the reading position is held by document position rather than pixel offset — so output growing below it, or an image finishing its load above it, does not move it — and returning to the bottom resumes following, closing the last few pixels. Renders are deferred while the thumb is held, a resize or tab switch re-asserts the mode instead of leaving it to Qt, and a hidden tab comes back where it left off (or at the end, if it was following).
 
