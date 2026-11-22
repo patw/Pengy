@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.16.1 — 2026-11-22
 
 - **The interactive CLI has a real editor again, and it queues what you type during a turn.** `pengy-cli`'s REPL has read stdin with a bare `sys.stdin.readline()` since v1.5 (`4de26eb`), when Rich's prompts and `readline` were fighting over the terminal: no history, no editing, no completion. This replaces that with `prompt_toolkit` (`pengy/cli/repl_input.py`) -- history in `~/.local/state/pengy/cli_history` (the same file the Rust and C++ editions use), slash-command completion, line editing, and the queue of messages typed while a turn ran printed above the prompt. Type-ahead itself is captured by a reader thread (`pengy/cli/typing.py`, same design as `cli/src/typing.rs` and the C++ `namespace TypeAhead`): one message is released per finished turn, the toolbar counts what is waiting, **Up/Down on an empty line** recall the newest/oldest for editing, **Enter on an empty line** releases the oldest, **Ctrl-C parks** the queue (`2 queued, held`) instead of spending it, and `/queue [clear]` lists or drops it. **Every mid-turn prompt suspends the capture first** (tool confirmation, question form, sudo password), so a message typed while the turn ran can never be read as an answer -- and a blank answer now re-asks instead of silently picking option 1, which is how a stray Enter used to approve the next write tool.
 
