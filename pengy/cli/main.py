@@ -20,6 +20,7 @@ from pathlib import Path
 
 from pengy.core.config import recovery_options, compaction_policy, set_compaction_policy
 from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
+from pengy.core.config import chat_identity
 from pengy.core.llm_client import LLMClient
 from pengy.core.chat_title import generate_title
 from pengy.core.chat_search import text_of, parse_query, search_chats
@@ -1130,7 +1131,8 @@ class PengyCLI:
         role = msg.get("role")
         body = Text(_sanitize_display(text_of(msg.get("content")) or "(no text)"))
         body.highlight_words(self._search_terms, style="bold yellow", case_sensitive=False)
-        label = {"user": "You", "assistant": "Assistant"}.get(role, str(role).title())
+        user_label, assistant_label = chat_identity(self.config)
+        label = {"user": user_label, "assistant": assistant_label}.get(role, str(role).title())
         self.console.print(Panel(
             body, title=f"#{msg_no} {label}", title_align="left",
             border_style="blue" if role == "user" else "green",
@@ -1971,12 +1973,13 @@ class PengyCLI:
             return
 
         # Pretty (default) — rich markdown rendering
+        _, assistant_label = chat_identity(self.config)
         if content.strip():
             self.console.print()
             self.console.print(
                 Panel(
                     Markdown(content),
-                    title="Assistant 🤖",
+                    title=f"{assistant_label} 🤖",
                     title_align="left",
                     border_style="green",
                 )
@@ -2012,11 +2015,12 @@ class PengyCLI:
             print(content)
             return
 
+        _, assistant_label = chat_identity(self.config)
         self.console.print()
         self.console.print(
             Panel(
                 Markdown(content),
-                title="Assistant 🤖",
+                title=f"{assistant_label} 🤖",
                 title_align="left",
                 border_style="green",
             )

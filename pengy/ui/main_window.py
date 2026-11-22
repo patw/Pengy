@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut, QTextOption
 
 from pengy.core.config import recovery_options
-from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message
+from pengy.core.config import DEFAULTS, load_config, save_config, render_system_message, chat_identity
 from pengy.core.model_cache import cached_models_for
 from pengy.core.chat_manager import (
     load_index, create_chat, save_chat, get_chat, delete_chat, TITLE_SOURCE_MODEL,
@@ -234,6 +234,9 @@ class MainWindow(QMainWindow):
 
         # Apply theme FIRST so render_now() uses the correct colours
         chat_view.apply_theme(self._theme)
+        # Labels come from this node's config, not from the chat (chat_identity).
+        # getattr keeps harnesses that build only the pieces _add_tab needs working.
+        chat_view.apply_identity(*chat_identity(getattr(self, "config", {})))
 
         # Render existing messages into the new ChatView
         for index, msg in enumerate(chat.get("messages", [])):
@@ -437,6 +440,7 @@ class MainWindow(QMainWindow):
         # Re-theme all open chat views and their custom tab controls.
         for session in self.open_tabs.values():
             session.chat_view.apply_theme(self._theme)
+            session.chat_view.apply_identity(*chat_identity(getattr(self, "config", {})))
         bar = self.tab_widget.tabBar()
         for i in range(self.tab_widget.count()):
             button = bar.tabButton(i, QTabBar.ButtonPosition.RightSide)

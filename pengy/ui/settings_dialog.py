@@ -100,6 +100,17 @@ class SettingsDialog(QDialog):
         self.theme_accent_combo.setToolTip("Highlight color for buttons, links, and selection highlights.")
         ui_layout.addRow(_label("Accent color:", "Highlight color for buttons, links, and selection highlights."), self.theme_accent_combo)
 
+        # Chat role labels are derived at render time from these two; nothing is
+        # written into chat files, so existing chats change label with no migration.
+        self.display_name_input = QLineEdit(config.get("display_name", DEFAULTS["display_name"]))
+        self.display_name_input.setToolTip("Name shown on your own chat messages. Empty uses your login name.")
+        ui_layout.addRow(_label("Display name:", "Name shown on your own chat messages. Empty uses your login name."), self.display_name_input)
+
+        self.show_node_check = QCheckBox("Name the answering machine in the assistant label")
+        self.show_node_check.setChecked(bool(config.get("show_node_in_label", True)))
+        self.show_node_check.setToolTip("Shows e.g. 'Pengy (behopc)'. Useful when the same chats are shared between machines.")
+        ui_layout.addRow(_label("Chat labels:", "Shows e.g. 'Pengy (behopc)' as the assistant label. Useful when the same chats are shared between machines."), self.show_node_check)
+
         self.bulk_rename_btn = QPushButton("Bulk Rename Chats")
         self.bulk_rename_btn.setToolTip(
             "Generate a new title for every existing chat with the default model.")
@@ -693,6 +704,8 @@ class SettingsDialog(QDialog):
         self.config["context_keep_turns"] = self.context_keep_turns_spinbox.value()
         self.config["theme_mode"] = self.theme_mode_combo.currentData()
         self.config["theme_accent"] = self.theme_accent_combo.currentData()
+        self.config["display_name"] = self.display_name_input.text().strip()
+        self.config["show_node_in_label"] = self.show_node_check.isChecked()
         self.config["ui_scale"] = self.scale_combo.currentData()
         self.config["llm_timeout"] = self.llm_timeout_spinbox.value()
         self.config["tool_timeout"] = self.timeout_spinbox.value()

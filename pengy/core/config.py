@@ -92,7 +92,35 @@ DEFAULTS = {
     # a shared/synced tree instead — only one path is ever consulted, and
     # Settings → Extras shows and edits this value.
     "skills_dir": "",
+    # Chat role labels. display_name is the human side of the label; empty falls
+    # back to the login name (getpass.getuser()), which is also what the system
+    # message gets. show_node_in_label names the answering machine, which matters
+    # because chats are shared between machines. Labels are derived at render
+    # time and never written to the chat file.
+    "display_name": "",
+    "show_node_in_label": True,
 }
+
+
+AGENT_NAME = "Pengy"
+
+
+def chat_identity(config: dict) -> tuple[str, str]:
+    """Return ``(human label, assistant label)`` for the chat role labels.
+
+    Derived at render time from the config of the machine doing the rendering,
+    never read from the chat file: the same chat is opened on several machines,
+    so "who answered this" is a property of the node, not of the stored message.
+    That keeps this a display-only change -- existing chats need no migration and
+    nothing is written to them. The assistant side is always the agent name, and
+    names the host only when asked, because the host is the operator's own
+    machine name and not everyone wants it in every transcript line.
+    """
+    user = (config.get("display_name") or "").strip() or getpass.getuser()
+    assistant = AGENT_NAME
+    if config.get("show_node_in_label", DEFAULTS["show_node_in_label"]):
+        assistant = f"{AGENT_NAME} ({socket.gethostname()})"
+    return user, assistant
 
 
 def render_system_message(template: str) -> str:

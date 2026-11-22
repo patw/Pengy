@@ -226,7 +226,11 @@ class TestCliSearch:
         assert "#3    You:" in out and "#4    AI:" in out
         cli._handle_slash("/load 1 #4")
         out = capsys.readouterr().out
-        assert "#4 Assistant" in out and "Install **nginx** and edit the config." in out
+        # The panel title is the derived assistant label (issue #3), not a
+        # hardcoded string, so assert on the derivation.
+        from pengy.core.config import chat_identity
+        assistant_label = chat_identity(cli.config)[1]
+        assert f"#4 {assistant_label}" in out and "Install **nginx** and edit the config." in out
         assert "/show 1 to read on" in out and "Conversation:" not in out
         cli._handle_slash("/load 1 9")
         assert "No message #9; this chat has 4." in capsys.readouterr().out

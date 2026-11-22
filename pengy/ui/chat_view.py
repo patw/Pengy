@@ -135,6 +135,10 @@ class ChatView(QTextBrowser):
         # so memoising per message removes almost all of it.
         self._html_cache: list[str | None] = []
         self._theme = get_theme()
+        # Role labels, set by MainWindow from config (see apply_identity).
+        # The defaults are the strings Pengy shipped with, so a ChatView built
+        # without MainWindow renders exactly as before.
+        self._role_labels = ("You", "Assistant")
         self._expanded_tools = set()
         self._expanded_reasoning: set[int] = set()
         # Search hits being shown: view index -> words to mark (see reveal_hits).
@@ -201,6 +205,21 @@ class ChatView(QTextBrowser):
         )
         # A new theme means a new pygments formatter, so every cached code
         # block is stale — not just the CSS in the <head>.
+        self._invalidate_all()
+        if self._messages:
+            self._render()
+
+    def apply_identity(self, user: str, assistant: str):
+        """Set the human / assistant role labels and re-render.
+
+        Labels belong to the view and the node, never to the chat file (see
+        pengy.core.config.chat_identity for the derivation). Cached HTML has to
+        be dropped because a label is part of every user and assistant card.
+        """
+        labels = (str(user), str(assistant))
+        if labels == self._role_labels:
+            return
+        self._role_labels = labels
         self._invalidate_all()
         if self._messages:
             self._render()
@@ -724,7 +743,7 @@ class ChatView(QTextBrowser):
                     cards.append(f'<span class="attachment-unavailable">Unsupported attachment: {self._escape_html(str(ref.get("name", "Attachment")))}</span>')
             gallery = f'<div class="attachment-gallery">{"".join(cards)}</div>' if cards else ""
             return (
-                '<p class="role-user">You &#x1F9D1;</p>'
+                f'<p class="role-user">{self._escape_html(self._role_labels[0])} &#x1F9D1;</p>'
                 f'{gallery}<p style="margin:2px 0 10px 0;">{body}</p>'
             )
         if role == "assistant":
@@ -736,7 +755,7 @@ class ChatView(QTextBrowser):
             if idx in self._hit_marks:
                 html_content = mark_terms(html_content, self._hit_marks[idx])
             parts.append(
-                '<p class="role-assistant">Assistant &#x1F916;</p>'
+                f'<p class="role-assistant">{self._escape_html(self._role_labels[1])} &#x1F916;</p>'
                 f'<div style="margin:2px 0 10px 0;">{html_content}</div>'
             )
             return "".join(parts)
