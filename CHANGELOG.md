@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.16.0 — 2026-11-22
 
 - **Chat role labels say who is speaking, and every part of the label is a setting.** Issue #3 (kodekrash) proposed replacing the hardcoded `You 🧑` / `Assistant 🤖` by deriving labels at render time with no schema change; the approach is adopted as proposed, including its scope line (an `actor` field on a message is a chat-file change, deliberately not done here). Two premises in it needed fixing before it could work: `{username}` is `getpass.getuser()`, a login name (it renders `root` in a container), and node identity did not exist in Pengy code at all (`grep pengy@ pengy/` is empty -- that identity lives in the BotTalk client, outside the app).
 
