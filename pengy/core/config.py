@@ -100,15 +100,20 @@ DEFAULTS = {
     # Settings → Extras shows and edits this value.
     "skills_dir": "",
     # Chat role labels. The label is the whole string that gets rendered: the
-    # renderer no longer appends a glyph, so the emoji is part of the string and
-    # removing it is a settings edit, not a code edit. {username} and {hostname}
-    # expand the way they do in the system-message template: display_name supplies
-    # {username} (empty falls back to the login name) and show_node_in_label
-    # decides whether {hostname} expands to ' (host)' or to nothing -- it matters
-    # because chats are shared between machines. Labels are derived at render time
-    # and never written to the chat file.
-    "display_name": "You",
-    "user_label": f"{{username}} {_USER_GLYPH}",
+    # renderer no longer appends a glyph, so deleting the emoji, moving it in front of
+    # the name, or renaming the agent are all settings edits, not code edits.
+    # {username} and {hostname} expand the way they do in the system-message
+    # template, so there is no new vocabulary to learn; leaving a token out of a
+    # label simply omits it. {hostname} expands to ' (host)' only when
+    # show_node_in_label names the machine -- it matters because chats are shared
+    # between machines.
+    #
+    # Two fields, one per role, and nothing else to keep straight: the human side is
+    # not stored on its own, because it is just {username} in the label, and
+    # {username} is the login name the system prompt already uses. Someone who wants
+    # their own name shown writes it into the label. Labels are derived at render
+    # time and never written to the chat file.
+    "user_label": f"You {_USER_GLYPH}",
     "assistant_label": f"{AGENT_NAME}{{hostname}} {_ASSISTANT_GLYPH}",
     "show_node_in_label": True,
 }
@@ -125,8 +130,8 @@ def _expand_label(template: str, username: str, hostname_slot: str) -> str:
             .replace("{hostname}", hostname_slot)).strip()
 
 
-def _label_template(config: dict, key: str) -> str:
-    """The configured label template, falling back to the shipped one.
+def _label_text(config: dict, key: str) -> str:
+    """The configured label, falling back to the shipped default.
 
     Stripped before the fallback test, so a whitespace-only value counts as blank
     and cannot render an empty label.
@@ -139,9 +144,12 @@ def chat_identity(config: dict) -> tuple[str, str]:
 
     Both labels are complete strings taken from config and rendered verbatim: the
     glyph is in the string, not added by the renderer, so deleting it, moving it
-    before the name, or renaming the agent are all settings edits. A blank
-    template falls back to the shipped one, so a cleared field can never render an
+    before the name, or renaming the agent are all settings edits. A blank field
+    falls back to the shipped default, so a cleared field can never render an
     empty label.
+
+    ``{username}`` is the login name, the same value the system prompt uses; write
+    a name into the field to show one instead.
 
     Derived at render time from the config of the machine doing the rendering,
     never read from the chat file: the same chat is opened on several machines,
@@ -149,14 +157,15 @@ def chat_identity(config: dict) -> tuple[str, str]:
     That keeps this display-only -- existing chats need no migration and nothing is
     written to them.
     """
-    username = (config.get("display_name") or "").strip() or getpass.getuser()
-    host_slot = (
-        f" ({socket.gethostname()})"
-        if config.get("show_node_in_label", DEFAULTS["show_node_in_label"])
-        else ""
-    )
-    user = _expand_label(_label_template(config, "user_label"), username, host_slot)
-    assistant = _expand_label(_label_template(config, "assistant_label"), username, host_slot)
+    username = getpass.getuser()
+    # A label that names the machine renders as 'Pengy (host)'; with no hostname
+    # available it renders as 'Pengy', not 'Pengy ()'. Same guard in the C++ and Rust
+    # editions.
+    hostname = socket.gethostname()
+    host_slot = f" ({hostname})" if (hostname and
+                                      config.get("show_node_in_label", DEFAULTS["show_node_in_label"])) else ""
+    user = _expand_label(_label_text(config, "user_label"), username, host_slot)
+    assistant = _expand_label(_label_text(config, "assistant_label"), username, host_slot)
     return user, assistant
 
 
@@ -237,6 +246,7 @@ def _migrate_config(config: dict, saved: dict) -> None:
     if "tool_confirmation" in saved:
         config.pop("yolo_mode", None)
         config.pop("auto_approve_readonly", None)
+        config.pop("display_name", None)
         return
 
     # Old-style keys present — convert them

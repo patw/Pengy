@@ -102,27 +102,22 @@ class SettingsDialog(QDialog):
 
         # Chat role labels are derived at render time from these two; nothing is
         # written into chat files, so existing chats change label with no migration.
-        self.display_name_input = QLineEdit(config.get("display_name", DEFAULTS["display_name"]))
-        self.display_name_input.setToolTip("Name shown on your own chat messages. Empty uses your login name.")
-        ui_layout.addRow(_label("Display name:", "Name shown on your own chat messages. Empty uses your login name."), self.display_name_input)
-        # The label fields are the whole rendered string, glyph included; the
-        # renderer adds nothing. Blank falls back to the shipped default.
-        self.user_label_input = QLineEdit(config.get("user_label", DEFAULTS["user_label"]))
-        self.user_label_input.setToolTip(
-            "Whole label for your messages. {username} is your display name. "
-            "Empty restores the default, including the emoji.")
-        ui_layout.addRow(_label("Your label:",
-                               "Whole label for your messages, emoji included. {username} is your display name. "
-                               "Empty restores the default."), self.user_label_input)
-
-        self.assistant_label_input = QLineEdit(config.get("assistant_label", DEFAULTS["assistant_label"]))
-        self.assistant_label_input.setToolTip(
-            "Whole label for the assistant. {hostname} becomes ' (host)' when chat labels name the machine. "
-            "Empty restores the default, including the emoji.")
-        ui_layout.addRow(_label("Assistant label:",
-                               "Whole label for the assistant, emoji included. {hostname} becomes ' (host)' when chat "
-                               "labels name the machine. Empty restores the default."), self.assistant_label_input)
-
+        # The fields are prefilled with the string that ships as the default -- the
+        # value actually used when the setting is empty -- so the default shape is
+        # visible and editable in place, with {username} and {hostname} spelled out.
+        for key, field, title, tip in (
+            ("user_label", "user_label_input", "Your label:",
+             "Whole label for your messages, emoji included. {username} is your login "
+             "name. Saving the default text restores it as the default."),
+            ("assistant_label", "assistant_label_input", "Assistant label:",
+             "Whole label for the assistant, emoji included. {hostname} becomes ' (host)' "
+             "when chat labels name the machine. Saving the default text restores it as "
+             "the default."),
+        ):
+            widget = QLineEdit(config.get(key) or DEFAULTS[key])
+            widget.setToolTip(tip)
+            setattr(self, field, widget)
+            ui_layout.addRow(_label(title, tip), widget)
 
         self.show_node_check = QCheckBox("Name the answering machine in the assistant label")
         self.show_node_check.setChecked(bool(config.get("show_node_in_label", True)))
@@ -722,9 +717,12 @@ class SettingsDialog(QDialog):
         self.config["context_keep_turns"] = self.context_keep_turns_spinbox.value()
         self.config["theme_mode"] = self.theme_mode_combo.currentData()
         self.config["theme_accent"] = self.theme_accent_combo.currentData()
-        self.config["display_name"] = self.display_name_input.text().strip()
-        self.config["user_label"] = self.user_label_input.text().strip() or DEFAULTS["user_label"]
-        self.config["assistant_label"] = self.assistant_label_input.text().strip() or DEFAULTS["assistant_label"]
+        # Saving the default text stores empty, so a future change to the shipped
+        # default is not pinned by a config file that happens to repeat it.
+        for key, field in (("user_label", "user_label_input"),
+                           ("assistant_label", "assistant_label_input")):
+            text = getattr(self, field).text().strip()
+            self.config[key] = "" if text == DEFAULTS[key] else text
         self.config["show_node_in_label"] = self.show_node_check.isChecked()
         self.config["ui_scale"] = self.scale_combo.currentData()
         self.config["llm_timeout"] = self.llm_timeout_spinbox.value()

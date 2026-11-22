@@ -28,11 +28,12 @@ def _default_role_labels() -> tuple[str, str]:
 
     A ChatView built without MainWindow (tests, embedders) uses this, so the
     fallback is the shipped default -- glyph included, because the renderer adds
-    nothing of its own any more.
+    nothing of its own any more. The human label is a literal in the shipped
+    default, so it expands as-is; only {hostname} needs dropping, because a bare
+    view has no node to name.
     """
     return tuple(
-        _CONFIG_DEFAULTS[key].replace("{username}", "You")
-        .replace("{hostname}", "").strip()
+        _CONFIG_DEFAULTS[key].replace("{hostname}", "").strip()
         for key in ("user_label", "assistant_label")
     )
 
