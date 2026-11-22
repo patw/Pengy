@@ -66,7 +66,9 @@ const assert = require('assert');
 const sources = [], timers = new Map(), saved = new Map(), received = [];
 let clock = 0, nextTimer = 0, reloads = 0;
 const elements = new Map();
-const element = id => { if (!elements.has(id)) elements.set(id,{disabled:false, classList:{toggle(){}}, focus(){}}); return elements.get(id); };
+// textContent + classList.add/remove: the queue strip is rendered with those,
+// and setProcessing() refreshes it on every state change.
+const element = id => { if (!elements.has(id)) elements.set(id,{disabled:false, textContent:'', classList:{add(){}, remove(){}, toggle(){}}, focus(){}}); return elements.get(id); };
 class EventSource {
   static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
   constructor(url) { this.url = url; this.readyState = 0; this.listeners = {}; sources.push(this); }
@@ -81,7 +83,10 @@ const context = vm.createContext({ EventSource, Math: Object.assign(Object.creat
   setTimeout: (fn,delay) => {const id = ++nextTimer; timers.set(id,{fn,delay}); return id;},
   clearTimeout: id => timers.delete(id),
   handleEvent: data => received.push(data), reloadToSync: () => reloads++ });
-vm.runInContext("const CHAT_ID = 'chat'; let isProcessing = true; let eventSource = null; let sseCursor = ''; let sseReconnectTimer = null; let sseReconnectAttempt = 0;", context);
+// Page state the extracted functions close over. queuedMessages/queueHeld are the
+// mid-turn queue: setProcessing() renders it and the final_response handler
+// releases it, so the harness has to declare them like the page does.
+vm.runInContext("const CHAT_ID = 'chat'; let isProcessing = true; let eventSource = null; let sseCursor = ''; let sseReconnectTimer = null; let sseReconnectAttempt = 0; let queuedMessages = []; let queueHeld = false;", context);
 vm.runInContext(FUNCTIONS, context);
 const exec = code => vm.runInContext(code, context);
 const fireTimer = () => { assert.equal(timers.size,1); const [id,t] = [...timers][0]; timers.delete(id); clock += t.delay; t.fn(); return t.delay; };
