@@ -188,6 +188,38 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(main_splitter)
 
+        # Accept drops anywhere in the window, not just on the input box.
+        # Qt delivers a drag to the deepest widget that accepts it, so the
+        # chat input keeps priority; this is the fallback for the rest of the
+        # window (chat view, sidebar, tab bar, splitter gutters).
+        self.setAcceptDrops(True)
+
+    # ── Window-wide drag & drop ───────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        if self.chat_input.can_accept_drag(event.mimeData()):
+            self.chat_input.show_drop_cue(True)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self.chat_input.can_accept_drag(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.chat_input.show_drop_cue(False)
+        event.accept()
+
+    def dropEvent(self, event):
+        self.chat_input.show_drop_cue(False)
+        if self.chat_input.handle_drop(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
     # ── Tab management ────────────────────────────────────────────
 
     def _add_tab(self, chat: dict, switch_to: bool = True) -> _TabSession:
