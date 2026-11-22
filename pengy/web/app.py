@@ -37,6 +37,7 @@ from pengy.core.chat_manager import (
 )
 from pengy.core.image_utils import preprocess as preprocess_image
 from pengy.core.attachments import derivative_path, import_image_bytes, resolve_history, attachment_label
+from pengy.core.text_attach import budget_for_model, read_text_attachment_bytes
 from pengy.core import tools
 from pengy.core import task_manager
 
@@ -923,8 +924,8 @@ def chat_send(chat_id: str):
                     pass
             else:
                 try:
-                    fcontent = fdata.decode("utf-8", errors="replace")
-                    text_blocks.append(f"[File: {fname}]\n```\n{fcontent}\n```")
+                    fcontent, fnote = read_text_attachment_bytes(fdata, budget_for_model(config.get("model", ""), config))
+                    text_blocks.append(f"[File: {fname}]\n```\n{fcontent}{fnote}\n```")
                 except Exception:
                     pass
 

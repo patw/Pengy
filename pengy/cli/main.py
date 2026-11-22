@@ -30,6 +30,7 @@ from pengy.core.chat_manager import (
     add_usage,
 )
 from pengy.core import task_manager
+from pengy.core.text_attach import budget_for_model, read_text_attachment
 from pengy.core.about import (
     CATBEE_BLURB, CATBEE_URL, DESCRIPTION, GITHUB_URL, LICENSE_NAME, LICENSE_URL,
     WEBSITE_URL, copyright_line, edition_line,
@@ -337,11 +338,11 @@ def _is_text_file(path: Path) -> bool:
         return False
 
 
-def _inject_file_content(path: Path) -> str:
-    """Return a fenced code block with the file's content."""
+def _inject_file_content(path: Path, budget: int) -> str:
+    """Return a fenced code block with the file's content, capped at *budget*."""
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-        return f"[File: {path.name}]\n```\n{content}\n```"
+        content, note = read_text_attachment(path, budget)
+        return f"[File: {path.name}]\n```\n{content}{note}\n```"
     except Exception as e:
         return f"[File: {path.name} — error reading: {e}]"
 
@@ -1518,7 +1519,7 @@ class PengyCLI:
                     image_paths.append(p)
                     resolved = resolved.replace(match.group(0), "", 1)
                 elif _is_text_file(p):
-                    blocks.append(_inject_file_content(p))
+                    blocks.append(_inject_file_content(p, budget_for_model(self.config.get("model", ""), self.config)))
                     resolved = resolved.replace(match.group(0), "", 1)
             elif "/" in path_str or p.suffix.lower() in (_TEXT_EXTENSIONS | _IMAGE_EXTENSIONS):
                 self.console.print(

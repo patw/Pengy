@@ -13,6 +13,9 @@ from PySide6.QtGui import QKeyEvent, QImage, QPixmap
 
 from pengy.ui.theme import chat_font, get_theme, scaled_size
 from pengy.ui.icons import apply_button_icon, themed_icon
+from pengy.core.text_attach import (
+    MAX_FILE_BYTES, budget_for_model, oversized_reason, read_text_attachment,
+)
 
 
 _IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
@@ -319,12 +322,23 @@ class ChatInputWidget(QWidget):
 
     def _attach_files(self, paths: list[Path]):
         unsupported = []
+        oversized = []
         for path in paths:
             if not path.is_file() or not (_is_text_file(path) or _is_image_file(path)):
                 unsupported.append(path.name)
+            elif _is_text_file(path) and oversized_reason(path.stat().st_size):
+                # A text file bigger than the ceiling is not prompt input; say so
+                # when it is attached, not when the request fails at the endpoint.
+                oversized.append(f"{path.name} ({path.stat().st_size / (1024 * 1024):.1f} MB)")
             elif path not in self._attachments:
                 self._attachments.append(path)
                 self._add_chip(path)
+        if oversized:
+            QMessageBox.warning(
+                self, "File Too Large",
+                "Not attached, over the "
+                f"{MAX_FILE_BYTES // 1024} KB limit:\n" + "\n".join(oversized),
+            )
         if unsupported:
             QMessageBox.warning(
                 self, "Cannot Attach File",
@@ -405,13 +419,14 @@ class ChatInputWidget(QWidget):
 
         parts = []
         images = []
+        budget = budget_for_model()
         for path in self._attachments:
             if _is_image_file(path):
                 images.append(path)
             else:
                 try:
-                    content = path.read_text(encoding="utf-8", errors="replace")
-                    parts.append(f"[File: {path.name}]\n```\n{content}\n```")
+                    content, note = read_text_attachment(path, budget)
+                    parts.append(f"[File: {path.name}]\n```\n{content}{note}\n```")
                 except Exception as e:
                     parts.append(f"[File: {path.name} — error reading: {e}]")
 
