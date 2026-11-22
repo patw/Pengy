@@ -20,6 +20,21 @@ from pygments.lexers import get_lexer_by_name, TextLexer
 from pygments.formatters import HtmlFormatter
 
 from pengy.ui.theme import chat_font, get_theme
+from pengy.core.config import DEFAULTS as _CONFIG_DEFAULTS
+
+
+def _default_role_labels() -> tuple[str, str]:
+    """The labels a default config renders, with no machine named.
+
+    A ChatView built without MainWindow (tests, embedders) uses this, so the
+    fallback is the shipped default -- glyph included, because the renderer adds
+    nothing of its own any more.
+    """
+    return tuple(
+        _CONFIG_DEFAULTS[key].replace("{username}", "You")
+        .replace("{hostname}", "").strip()
+        for key in ("user_label", "assistant_label")
+    )
 
 
 def _build_css(theme: dict[str, str] | None = None) -> str:
@@ -135,10 +150,10 @@ class ChatView(QTextBrowser):
         # so memoising per message removes almost all of it.
         self._html_cache: list[str | None] = []
         self._theme = get_theme()
-        # Role labels, set by MainWindow from config (see apply_identity).
-        # The defaults are the strings Pengy shipped with, so a ChatView built
-        # without MainWindow renders exactly as before.
-        self._role_labels = ("You", "Assistant")
+        # Role labels, set by MainWindow from config (see apply_identity). The
+        # fallback is what a default config renders, glyph included -- the
+        # renderer adds nothing of its own any more.
+        self._role_labels = _default_role_labels()
         self._expanded_tools = set()
         self._expanded_reasoning: set[int] = set()
         # Search hits being shown: view index -> words to mark (see reveal_hits).
@@ -743,7 +758,7 @@ class ChatView(QTextBrowser):
                     cards.append(f'<span class="attachment-unavailable">Unsupported attachment: {self._escape_html(str(ref.get("name", "Attachment")))}</span>')
             gallery = f'<div class="attachment-gallery">{"".join(cards)}</div>' if cards else ""
             return (
-                f'<p class="role-user">{self._escape_html(self._role_labels[0])} &#x1F9D1;</p>'
+                f'<p class="role-user">{self._escape_html(self._role_labels[0])}</p>'
                 f'{gallery}<p style="margin:2px 0 10px 0;">{body}</p>'
             )
         if role == "assistant":
@@ -755,7 +770,7 @@ class ChatView(QTextBrowser):
             if idx in self._hit_marks:
                 html_content = mark_terms(html_content, self._hit_marks[idx])
             parts.append(
-                f'<p class="role-assistant">{self._escape_html(self._role_labels[1])} &#x1F916;</p>'
+                f'<p class="role-assistant">{self._escape_html(self._role_labels[1])}</p>'
                 f'<div style="margin:2px 0 10px 0;">{html_content}</div>'
             )
             return "".join(parts)

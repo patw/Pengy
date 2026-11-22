@@ -1979,7 +1979,7 @@ class PengyCLI:
             self.console.print(
                 Panel(
                     Markdown(content),
-                    title=f"{assistant_label} 🤖",
+                    title=assistant_label,
                     title_align="left",
                     border_style="green",
                 )
@@ -2020,7 +2020,7 @@ class PengyCLI:
         self.console.print(
             Panel(
                 Markdown(content),
-                title=f"{assistant_label} 🤖",
+                title=assistant_label,
                 title_align="left",
                 border_style="green",
             )

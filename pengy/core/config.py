@@ -46,6 +46,13 @@ DEFAULT_SYSTEM_MESSAGE = (
     "You are a helpful assistant named Pengy. "
     "The current date is {date} and the user is {username} on host {hostname} which is {osinfo}."
 )
+# What Pengy calls itself, and the glyphs the shipped label templates use.
+# The glyphs live in the templates, not in the renderer: a label string is
+# rendered verbatim, so dropping the emoji is a settings edit.
+AGENT_NAME = "Pengy"
+_USER_GLYPH = "\U0001F9D1"
+_ASSISTANT_GLYPH = "\U0001F916"
+
 
 DEFAULTS = {
     # A local server, not a hosted API.  Pengy's audience runs Ollama or
@@ -92,34 +99,64 @@ DEFAULTS = {
     # a shared/synced tree instead — only one path is ever consulted, and
     # Settings → Extras shows and edits this value.
     "skills_dir": "",
-    # Chat role labels. display_name is the human side of the label; empty falls
-    # back to the login name (getpass.getuser()), which is also what the system
-    # message gets. show_node_in_label names the answering machine, which matters
-    # because chats are shared between machines. Labels are derived at render
-    # time and never written to the chat file.
-    "display_name": "",
+    # Chat role labels. The label is the whole string that gets rendered: the
+    # renderer no longer appends a glyph, so the emoji is part of the string and
+    # removing it is a settings edit, not a code edit. {username} and {hostname}
+    # expand the way they do in the system-message template: display_name supplies
+    # {username} (empty falls back to the login name) and show_node_in_label
+    # decides whether {hostname} expands to ' (host)' or to nothing -- it matters
+    # because chats are shared between machines. Labels are derived at render time
+    # and never written to the chat file.
+    "display_name": "You",
+    "user_label": f"{{username}} {_USER_GLYPH}",
+    "assistant_label": f"{AGENT_NAME}{{hostname}} {_ASSISTANT_GLYPH}",
     "show_node_in_label": True,
 }
 
 
-AGENT_NAME = "Pengy"
+def _expand_label(template: str, username: str, hostname_slot: str) -> str:
+    """Fill ``{username}`` / ``{hostname}`` in a label template.
+
+    Same placeholder vocabulary as the system-message template, so nothing new has
+    to be learned. Leaving a token out of a template simply omits that value --
+    there is no hidden appending.
+    """
+    return (template.replace("{username}", username)
+            .replace("{hostname}", hostname_slot)).strip()
+
+
+def _label_template(config: dict, key: str) -> str:
+    """The configured label template, falling back to the shipped one.
+
+    Stripped before the fallback test, so a whitespace-only value counts as blank
+    and cannot render an empty label.
+    """
+    return (config.get(key) or "").strip() or DEFAULTS[key]
 
 
 def chat_identity(config: dict) -> tuple[str, str]:
     """Return ``(human label, assistant label)`` for the chat role labels.
 
+    Both labels are complete strings taken from config and rendered verbatim: the
+    glyph is in the string, not added by the renderer, so deleting it, moving it
+    before the name, or renaming the agent are all settings edits. A blank
+    template falls back to the shipped one, so a cleared field can never render an
+    empty label.
+
     Derived at render time from the config of the machine doing the rendering,
     never read from the chat file: the same chat is opened on several machines,
     so "who answered this" is a property of the node, not of the stored message.
-    That keeps this a display-only change -- existing chats need no migration and
-    nothing is written to them. The assistant side is always the agent name, and
-    names the host only when asked, because the host is the operator's own
-    machine name and not everyone wants it in every transcript line.
+    That keeps this display-only -- existing chats need no migration and nothing is
+    written to them.
     """
-    user = (config.get("display_name") or "").strip() or getpass.getuser()
-    assistant = AGENT_NAME
-    if config.get("show_node_in_label", DEFAULTS["show_node_in_label"]):
-        assistant = f"{AGENT_NAME} ({socket.gethostname()})"
+    username = (config.get("display_name") or "").strip() or getpass.getuser()
+    host_slot = (
+        f" ({socket.gethostname()})"
+        if config.get("show_node_in_label", DEFAULTS["show_node_in_label"])
+        else ""
+    )
+    user = _expand_label(_label_template(config, "user_label"), username, host_slot)
+    assistant = _expand_label(_label_template(config, "assistant_label"), username, host_slot)
     return user, assistant
 
 
