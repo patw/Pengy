@@ -71,7 +71,7 @@ SLASH_COMMANDS = (
     "/yolo", "/config", "/model", "/models", "/list", "/load", "/search", "/baseurl",
     "/apikey", "/llm-timeout", "/timeout", "/download-max", "/agent", "/context-keep",
     "/auto-compact", "/system", "/delete", "/attach", "/attachments", "/compact", "/redact",
-    "/tasks", "/task", "/about", "/quit", "/exit", "/q",
+    "/tasks", "/task", "/queue", "/about", "/quit", "/exit", "/q",
 )
 
 # Sub-arguments worth completing once the command is typed.
@@ -183,6 +183,8 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
+
+from pengy.cli import repl_input, typing
 
 
 # ---------------------------------------------------------------------------
@@ -366,11 +368,18 @@ class PengyCLI:
         self._output_mode = "pretty"  # pretty | raw | json | silent
         self._turn_error = None  # set by _report_turn_error, read by single-shot mode
         self._search_terms: list[str] = []  # last /search, marked by /load <#> <msg#>
-        self._update_llm_client()
-
+        self._prompts = None  # repl_input.PromptIO, built on first use
         # "yes to all this turn" — resets each time the LLM returns a fresh
         # set of tool calls (i.e. each API round-trip).
         self._yolo_this_turn = False
+        self._update_llm_client()
+
+    def _prompt_io(self):
+        """The input layer, built once. Creating it imports prompt_toolkit, so it
+        is lazy: single-shot runs (cron, subagents, --output json) never touch it."""
+        if self._prompts is None:
+            self._prompts = repl_input.PromptIO()
+        return self._prompts
 
     # ------------------------------------------------------------------
     # entry points
@@ -499,32 +508,75 @@ class PengyCLI:
     # ------------------------------------------------------------------
 
     def _repl(self):
-        """Read-Eval-Print-Loop for interactive mode."""
+        """Read-Eval-Print-Loop for interactive mode.
+
+        A message typed while the previous turn ran goes out before we ask for
+        anything, one per finished turn -- the same rule the desktop and web
+        composers use. Ctrl-C during a turn parks the queue; Enter on an empty
+        line releases it.
+        """
+        prompts = self._prompt_io()
         while True:
+            queue = typing.queue()
+            if len(queue) and not queue.held:
+                self._run_line(typing.take_oldest())
+                continue
+
+            title = self.current_chat.get("title", "?") if self.current_chat else "?"
             try:
-                title = self.current_chat.get("title", "?") if self.current_chat else "?"
-                prompt_str = f"\n{BLUE}{BOLD}{_truncate(title, 30)} › You{RESET} "
-                sys.stdout.write(prompt_str)
-                sys.stdout.flush()
-                raw = sys.stdin.readline()
-                if not raw:
-                    raise EOFError
-                raw = raw.rstrip("\n")
+                if prompts.enabled:
+                    raw = prompts.read_command(title)
+                    if raw is None:
+                        raise EOFError
+                else:
+                    # No editor (piped stdin, TERM=dumb, prompt_toolkit missing):
+                    # keep the pre-existing behaviour byte for byte.
+                    prompt_str = f"\n{BLUE}{BOLD}{_truncate(title, 30)} › You{RESET} "
+                    sys.stdout.write(prompt_str)
+                    sys.stdout.flush()
+                    raw = sys.stdin.readline()
+                    if not raw:
+                        raise EOFError
+                    raw = raw.rstrip("\n")
             except (KeyboardInterrupt, EOFError):
                 raise
 
             text = raw.strip()
             if not text:
+                # Enter on an empty line releases the oldest queued message
+                # instead of doing nothing -- how a parked queue gets going again.
+                if len(queue):
+                    queue.held = False
+                    self._run_line(typing.take_oldest())
                 continue
 
-            # Ctrl-C while a turn (or a slash command such as /task or /models)
-            # is running stops that, not the CLI: _drive_generator has already
-            # killed the tool and saved the repaired chat by the time it gets
-            # here.  Ctrl-C at the prompt itself still quits (run_interactive).
-            try:
-                self._dispatch(text)
-            except KeyboardInterrupt:
-                self.console.print("\n[dim]Interrupted.[/dim]")
+            self._run_line(text)
+
+    def _run_line(self, text: str):
+        """Dispatch one REPL line, capturing type-ahead for the duration.
+
+        Ctrl-C while a turn (or a slash command such as /task or /models) is
+        running stops that, not the CLI: _drive_generator has already killed the
+        tool and saved the repaired chat by the time it gets here.  Ctrl-C at the
+        prompt itself still quits (run_interactive).
+        """
+        typing.start()
+        interrupted = False
+        try:
+            self._dispatch(text)
+        except KeyboardInterrupt:
+            interrupted = True
+            self.console.print("\n[dim]Interrupted.[/dim]")
+        finally:
+            # Move anything captured into the queue *before* deciding whether to
+            # park it: a parked queue has to be parked while it is non-empty.
+            typing.announce(typing.stop())
+        if interrupted:
+            queue = typing.queue()
+            if len(queue):
+                # Ctrl-C means stop: park what is waiting rather than spending it
+                # on the next turn. The prompt says "held"; Enter releases it.
+                queue.held = True
 
     def _dispatch(self, text: str):
         """Run one REPL line: a slash command or a message to the model."""
@@ -679,6 +731,9 @@ class PengyCLI:
         elif cmd == "/task":
             self._cmd_task(args)
 
+        elif cmd == "/queue":
+            self._cmd_queue(args)
+
         elif cmd == "/about":
             self._cmd_about()
 
@@ -715,6 +770,7 @@ class PengyCLI:
         table.add_row("/compact", "Compact context by eliding old tool results")
         table.add_row("/redact [N]", "Delete the last N messages (default 1) — repeatable up to the top")
         table.add_row("/tasks", "List saved prompt-template Tasks")
+        table.add_row("/queue [clear]", "Show (or clear) messages queued while a turn ran")
         table.add_row("/task <#>", "Run a Task by its /tasks index, prompting for any %placeholders%")
         table.add_row("/list", "List recent chats")
         table.add_row("/load <index> [msg#]", "Load a chat by its /list index; msg# (from /search) prints that message")
@@ -948,6 +1004,28 @@ class PengyCLI:
         table.add_row("User Agent", self.config.get("user_agent", "—"))
 
         self.console.print(table)
+
+    def _cmd_queue(self, args: list[str]):
+        """`/queue [clear]` -- what was typed while the last turn ran."""
+        queue = typing.queue()
+        if args and args[0].lower() == "clear":
+            count = len(queue)
+            queue.clear()
+            self.console.print(f"[dim]Cleared {count} queued message(s).[/dim]")
+            return
+        if queue.is_empty():
+            self.console.print(
+                "[dim]No queued messages. Type while a turn runs and Enter queues it; "
+                "Up on an empty line pulls the newest back for editing.[/dim]")
+            return
+        self.console.print()
+        note = " [yellow](held after Ctrl-C)[/yellow]" if queue.held else ""
+        self.console.print(f"[bold]Queued messages[/bold] [dim](oldest first)[/dim]{note}")
+        for i, preview in enumerate(queue.previews(72), 1):
+            self.console.print(f"  [dim]{i}.[/dim] {preview}")
+        self.console.print(
+            "[dim]Enter on an empty line sends the oldest · Up edits the newest · "
+            "Down the oldest · /queue clear drops them all[/dim]")
 
     def _cmd_about(self):
         self.console.print(f"[bold]{edition_line('Python')}[/bold]")
@@ -1689,6 +1767,14 @@ class PengyCLI:
                 if expecting_api_call:
                     self._clear_thinking()
 
+                # Announce what was typed while the request was in flight. Unlike
+                # the Rust and C++ clients (which poll a cancel callback every
+                # 100 ms) this one blocks inside the SDK, so events -- and this
+                # pump -- land when the model answers, not continuously.
+                typed = typing.collect()
+                if typed:
+                    typing.announce(typed)
+
                 rtype = response.get("type", "")
 
                 if rtype == "final_response":
@@ -1931,16 +2017,19 @@ class PengyCLI:
 
             while True:
                 try:
-                    choice = Prompt.ask(
-                        f"  Choose [1-{len(options)}]",
-                        default="1",
-                    ).strip()
+                    # Blank re-asks (it used to pick option 1, which is how a stray
+                    # Enter answered a question the model had asked), and capture
+                    # is suspended for the answer.
+                    choice = self._prompt_io().ask(
+                        f"  Choose [1-{len(options)}]: ").strip()
                     idx = int(choice) - 1
                     if 0 <= idx < len(options):
                         answers.append(options[idx]["label"])
                         break
                     self.console.print(f"[red]Please enter a number between 1 and {len(options)}.[/red]")
                 except ValueError:
+                    if not choice:
+                        continue
                     self.console.print(f"[red]Please enter a number.[/red]")
                 except (KeyboardInterrupt, EOFError):
                     self.console.print("\n[red]Cancelled.[/red]")
@@ -2108,9 +2197,11 @@ class PengyCLI:
 
         while True:
             try:
-                choice = Prompt.ask(
-                    f"  [1] Execute  [2] Yes to all this turn  [3] Decline  [4] Abort run  [bold][1/2/3/4][/bold]",
-                    default="1",
+                # Blank must never mean "Execute": a stray Enter pressed while
+                # waiting used to approve the next write tool. The prompt layer
+                # also suspends type-ahead capture for the answer.
+                choice = self._prompt_io().ask(
+                    "  [1] Execute  [2] Yes to all this turn  [3] Decline  [4] Abort run  [1/2/3/4] "
                 ).strip()
             except (KeyboardInterrupt, EOFError):
                 self.console.print("\n[red]Run aborted.[/red]")
@@ -2125,6 +2216,8 @@ class PengyCLI:
             elif choice == "4":
                 self.console.print("[red]Run aborted by user.[/red]")
                 return {"confirmed": False, "tool_call_id": response["tool_call_id"], "abort_run": True}
+            elif not choice:
+                self.console.print("[dim]Press 1 to execute, 3 to decline.[/dim]")
             else:
                 self.console.print("[red]Please enter 1, 2, 3, or 4.[/red]")
 
@@ -2133,12 +2226,12 @@ class PengyCLI:
 
         *host* names the remote machine the command runs on (None for local).
         """
-        target = f" for [bold]{escape(_sanitize_display(host))}[/bold]" if host else ""
+        target = f" for {_sanitize_display(host)}" if host else ""
         try:
-            password = Prompt.ask(
-                f"[yellow]Enter sudo password{target}[/yellow]",
-                password=True,
-            )
+            # The prompt layer suspends type-ahead capture here: a queued message
+            # must never be submitted as the sudo password.
+            password = self._prompt_io().ask(
+                f"Enter sudo password{target}: ", password=True)
             return password if password else None
         except (KeyboardInterrupt, EOFError):
             return None

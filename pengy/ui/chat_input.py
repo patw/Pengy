@@ -1,4 +1,5 @@
 """Chat input widget for Pengy."""
+import html
 import mimetypes
 import os
 import tempfile
@@ -9,7 +10,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QMessageBox,
 )
 from PySide6.QtCore import Signal, Qt, QMimeData
-from PySide6.QtGui import QKeyEvent, QImage, QPixmap
+from PySide6.QtGui import QKeyEvent, QImage, QPixmap, QTextCursor
 
 from pengy.ui.theme import chat_font, get_theme, scaled_size
 from pengy.ui.icons import apply_button_icon, themed_icon
@@ -92,6 +93,7 @@ def _image_from_mime(mime: QMimeData) -> Path | None:
 
 class _InputEdit(QTextEdit):
     submit_pressed = Signal()
+    queue_recall = Signal(int)
     image_pasted = Signal(Path)
     files_dropped = Signal(list)
     file_drag_active = Signal(bool)
@@ -209,16 +211,31 @@ class _InputEdit(QTextEdit):
                 if not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                     self.submit_pressed.emit()
                     return True
+            # Up/Down on an *empty* composer step through the messages queued while
+            # a turn runs, so a thought typed mid-turn can be edited instead of
+            # being sent verbatim when the turn ends. Only an empty composer is
+            # intercepted: with text in it, Up/Down must keep moving the cursor.
+            if (event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down)
+                    and not event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+                    and self.toPlainText() == ""):
+                self.queue_recall.emit(-1 if event.key() == Qt.Key.Key_Up else 1)
+                return True
         return super().eventFilter(obj, event)
 
 
 class ChatInputWidget(QWidget):
     message_sent = Signal(str, list)
+    # Up (-1) / Down (+1) pressed on an empty composer: recall a queued message.
+    queue_recall_requested = Signal(int)
+    # Enter on an empty composer. MainWindow releases the oldest queued message if
+    # one is waiting, so a queue parked by Stop can be drained without retyping.
+    empty_submit = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._attachments: list[Path] = []
         self._theme = get_theme()
+        self._turn_running = False
         self._setup_ui()
         self.apply_theme(self._theme)
 
@@ -226,6 +243,15 @@ class ChatInputWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
+
+        # Queue strip -- the messages typed while a turn was running. Above the
+        # chips row so it reads as "what happens next", directly over the composer.
+        # Hidden until something is waiting.
+        self._queue_label = QLabel()
+        self._queue_label.setObjectName("queueLabel")
+        self._queue_label.setWordWrap(True)
+        self._queue_label.hide()
+        layout.addWidget(self._queue_label)
 
         # File chips row — hidden until something is attached
         self._chips_row = QWidget()
@@ -251,6 +277,7 @@ class ChatInputWidget(QWidget):
 
         self._edit = _InputEdit()
         self._edit.submit_pressed.connect(self._on_submit)
+        self._edit.queue_recall.connect(self.queue_recall_requested)
         self._edit.image_pasted.connect(self._on_image_pasted)
         self._edit.files_dropped.connect(self._attach_files)
         self._edit.file_drag_active.connect(self.show_drop_cue)
@@ -293,9 +320,63 @@ class ChatInputWidget(QWidget):
         self._edit.style().polish(self._edit)
         self._edit.update()
 
+    # ── Queue of messages typed while a turn runs ──────────────────
+
+    def set_queue_state(self, previews: list[str], held: bool, running: bool):
+        """Render the queue strip (hidden when ``previews`` is empty) and say what
+        Enter will do.
+
+        The placeholder is the only always-visible statement of that, so it tracks
+        the turn rather than the queue: it must be right even with nothing queued.
+        """
+        if self._turn_running != running:
+            self._turn_running = running
+            self._edit.setPlaceholderText(
+                "Pengy is working — type your next message and press Enter to queue it"
+                if running else
+                "Type a message... (Enter to send, Shift+Enter for new line)"
+            )
+
+        if not previews:
+            self._queue_label.clear()
+            self._queue_label.hide()
+            return
+
+        if held:
+            hint = "held after Stop — Enter to send"
+        elif running:
+            hint = "sends when this turn ends — ↑ edit newest · ↓ edit oldest"
+        else:
+            hint = "Enter to send — ↑ edit newest · ↓ edit oldest"
+
+        # html.escape, then the newline-to-<br> conversion Qt needs.
+        lines = [f"⏳ Queued ({len(previews)}) · {html.escape(hint)}"]
+        for i, preview in enumerate(previews, 1):
+            lines.append(f"{i}. {html.escape(preview)}")
+        self._queue_label.setText("<br>".join(lines))
+        self._queue_label.show()
+
+    def set_composer_text(self, text: str):
+        """Put text back in the composer (a queued message recalled for editing)."""
+        self._edit.setPlainText(text)
+        self._edit.moveCursor(QTextCursor.MoveOperation.End)
+        self._edit.setFocus()
+
+    def attach_paths(self, paths):
+        """Attach files by path -- used to re-attach a recalled message's images."""
+        self._attach_files(list(paths))
+
+    def composer_empty(self) -> bool:
+        """True when there is nothing to send: no text and no attachments."""
+        return not self._edit.toPlainText() and not self._attachments
+
     def apply_theme(self, theme: dict[str, str]):
         self._theme = theme
         self._edit.apply_theme(theme)
+        self._queue_label.setStyleSheet(
+            f"color: {theme['fg']}; background: {theme['selection']}; "
+            f"border: 1px solid {theme['border']}; border-radius: 6px; padding: 3px 6px;"
+        )
         self._drop_hint.setStyleSheet(
             f"color: {theme['focus']}; background: {theme['selection']}; "
             f"border: 1px dashed {theme['focus']}; border-radius: 6px; padding: 3px;"
@@ -415,6 +496,10 @@ class ChatInputWidget(QWidget):
     def _on_submit(self):
         text = self._edit.toPlainText().strip()
         if not text and not self._attachments:
+            # Enter on an empty composer is not a no-op any more: it releases the
+            # oldest queued message (MainWindow decides; a Stop parks the queue, and
+            # this is how it gets going again). Nothing is sent from here.
+            self.empty_submit.emit()
             return
 
         parts = []

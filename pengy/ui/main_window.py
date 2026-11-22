@@ -26,6 +26,7 @@ from pengy.ui.chat_history import ChatHistoryWidget
 from pengy.ui.chat_view import ChatView
 from pengy.ui.chat_input import ChatInputWidget
 from pengy.ui.chat_worker import ChatWorker
+from pengy.core.message_queue import MessageQueue
 from pengy.ui.settings_dialog import SettingsDialog
 from pengy.ui.tasks_dialog import TasksDialog
 from pengy.ui.edit_chat_dialog import EditChatDialog
@@ -48,6 +49,9 @@ class _TabSession:
     tool_running: bool = False
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Messages typed while this tab's turn was running. Memory only: a message
+    # that was never sent must not appear in chats.json as if it had been.
+    queue: MessageQueue = field(default_factory=MessageQueue)
 
 
 class MainWindow(QMainWindow):
@@ -152,6 +156,8 @@ class MainWindow(QMainWindow):
 
         self.chat_input = ChatInputWidget()
         self.chat_input.message_sent.connect(self.send_message)
+        self.chat_input.queue_recall_requested.connect(self._recall_queued)
+        self.chat_input.empty_submit.connect(self._on_empty_submit)
         input_layout.addWidget(self.chat_input)
 
         self._redact_btn = QPushButton("Redact")
@@ -338,6 +344,7 @@ class MainWindow(QMainWindow):
                 self.chat_history.select_chat_by_id(cid)
                 self._update_quick_settings_for(session)
                 self._stop_btn.setVisible(session.thinking)
+                self._refresh_queue_ui(session)
                 return
 
     def _tab_for_chat(self, chat_id: str) -> _TabSession | None:
@@ -668,12 +675,29 @@ class MainWindow(QMainWindow):
     # ── Sending messages ──────────────────────────────────────────
 
     def send_message(self, text: str, images: list = None):
-        """Send a message from the active tab to the LLM."""
+        """Send a message from the active tab to the LLM.
+
+        A turn that is already in flight used to be abandoned from here
+        (``_process_response`` -> ``_abandon_worker_for``), so typing a second
+        thought while the agent worked silently threw the first one away. Now it is
+        queued, shown above the composer, and sent when the turn ends.
+        """
         if not self.active_chat_id:
             return
         session = self._tab_for_chat(self.active_chat_id)
         if not session:
             return
+        if self._session_busy(session):
+            self._enqueue_for_turn(session, text, images or [])
+            return
+        self._start_turn(session, text, images)
+
+    @staticmethod
+    def _session_busy(session: _TabSession) -> bool:
+        return bool(session and (session.worker is not None or session.thinking))
+
+    def _start_turn(self, session: _TabSession, text: str, images: list = None):
+        """Begin a turn in *session*: the old send_message body."""
         if images is None:
             images = []
 
@@ -718,9 +742,66 @@ class MainWindow(QMainWindow):
 
         self._stop_btn.show()
         session.thinking = True
+        # A new turn makes the queue live again (a Stop parks it until the user
+        # releases it) and the composer has to say that Enter now queues.
+        session.queue.held = False
+        self._refresh_queue_ui(session)
         self._update_tab_title(session)
         self._update_quick_settings_for(session)
         self._process_response(session, messages)
+
+    # ── Queued input (typed while a turn runs) ────────────────────
+
+    def _enqueue_for_turn(self, session: _TabSession, text: str, images: list):
+        session.queue.enqueue(text, images)
+        self._refresh_queue_ui(session)
+
+    def _refresh_queue_ui(self, session: _TabSession):
+        """Render the active tab's queue strip. One composer is shared by every
+        tab, so the others refresh when they become active (_on_tab_changed)."""
+        if not session or session is not self._tab_for_chat(self.active_chat_id or ""):
+            return
+        if getattr(self, "chat_input", None) is None:
+            return
+        self.chat_input.set_queue_state(
+            session.queue.previews(), session.queue.held, self._session_busy(session)
+        )
+
+    def _release_queued(self, session: _TabSession):
+        """Send the oldest queued message. Callers check the tab is idle first: a
+        running turn's own end is what releases the queue, and a Stop parks it."""
+        if not session or self._session_busy(session) or not session.chat:
+            return
+        if session.queue.is_empty():
+            return
+        nxt = session.queue.take_head()
+        session.queue.held = False
+        self._refresh_queue_ui(session)
+        self._start_turn(session, nxt.text, nxt.images)
+
+    def _on_empty_submit(self):
+        """Enter on an empty composer: release the oldest queued message (how a
+        queue parked by Stop gets going again)."""
+        session = self._tab_for_chat(self.active_chat_id) if self.active_chat_id else None
+        if session and not self._session_busy(session):
+            self._release_queued(session)
+
+    def _recall_queued(self, direction: int):
+        """Up (-1) puts the newest queued message back in the composer to edit; Down
+        (+1) the oldest. The entry leaves the queue while it is edited, so pressing
+        Enter re-queues it (while the turn runs) and nothing is sent twice."""
+        session = self._tab_for_chat(self.active_chat_id) if self.active_chat_id else None
+        if not session or session.queue.is_empty():
+            return
+        if not self.chat_input.composer_empty():
+            return
+        item = session.queue.take_newest() if direction < 0 else session.queue.take_oldest()
+        if not item.text and not item.images:
+            return
+        self.chat_input.set_composer_text(item.text)
+        if item.images:
+            self.chat_input.attach_paths(item.images)
+        self._refresh_queue_ui(session)
 
     def _process_response(self, session: _TabSession, messages: list[dict]):
         """Launch a background worker for a tab's LLM request."""
@@ -897,6 +978,8 @@ class MainWindow(QMainWindow):
         if session is self._tab_for_chat(self.active_chat_id):
             self._stop_btn.hide()
             self._update_quick_settings_for(session)
+        # A failed turn does not spend the queue: it stays visible, and Enter sends it.
+        self._refresh_queue_ui(session)
         if session.worker_thread and session.worker_thread.isRunning():
             session.worker_thread.quit()
 
@@ -928,6 +1011,14 @@ class MainWindow(QMainWindow):
         if session is self._tab_for_chat(self.active_chat_id):
             self._stop_btn.hide()
             self._update_quick_settings_for(session)
+
+        # The turn ended on its own, so what was typed while it ran goes out now.
+        # (A Stop parks the queue instead -- see _stop_worker -- and a failed turn
+        # holds it for the user to decide.)
+        if not session.queue.is_empty() and not session.queue.held:
+            self._release_queued(session)
+        else:
+            self._refresh_queue_ui(session)
 
     # ── Worker lifecycle ──────────────────────────────────────────
 
@@ -981,6 +1072,12 @@ class MainWindow(QMainWindow):
         session.tool_running = False
         self._update_tab_title(session)
         self._update_quick_settings_for(session)
+
+        # Stop means stop: the queue is parked, not spent, so the next thing that
+        # runs is the user's decision. Enter in an empty composer releases it.
+        if not session.queue.is_empty():
+            session.queue.held = True
+        self._refresh_queue_ui(session)
 
         if session.chat:
             session.chat["messages"] = clean_dangling_tool_calls(session.chat["messages"])
